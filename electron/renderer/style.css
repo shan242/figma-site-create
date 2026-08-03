@@ -1,0 +1,126 @@
+:root {
+  --bg: #1e2126;
+  --panel: #262a31;
+  --panel-2: #2d323a;
+  --text: #e6e8ec;
+  --muted: #9aa2ad;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --border: #3a4048;
+  --ok: #22c55e;
+  --err: #ef4444;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  padding: 18px 24px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+header p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+main {
+  flex: 1;
+  padding: 18px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+
+.field label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+input[type="text"] {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  width: 100%;
+}
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.out-row { display: flex; gap: 8px; }
+.out-row input { flex: 1; }
+
+button {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { border-color: var(--accent); }
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#log {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: #17191d;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

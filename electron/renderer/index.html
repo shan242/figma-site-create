@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'">
+  <title>Figma Sites 复制工具</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Figma Sites 静态复制工具</h1>
+    <p>输入已发布的 *.figma.site 网址，一键生成可离线打开的静态 HTML/CSS 站点。</p>
+  </header>
+  <main>
+    <div class="field">
+      <label for="url">站点网址</label>
+      <input id="url" type="text" spellcheck="false" placeholder="https://example.figma.site/">
+    </div>
+    <div class="field">
+      <label for="out">输出目录</label>
+      <div class="out-row">
+        <input id="out" type="text" spellcheck="false">
+        <button id="btn-pick">选择...</button>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btn-scrape" class="primary">1. 抓取站点</button>
+      <button id="btn-build">2. 生成站点</button>
+      <span id="status" class="status">就绪</span>
+    </div>
+    <div id="log" aria-live="polite"></div>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>

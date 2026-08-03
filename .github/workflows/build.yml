@@ -1,0 +1,81 @@
+# Dual-OS CI: build the Electron GUI (FigmaSiteReplica) for Windows + macOS on
+# every push to main and on version tags. Runs `npm ci` + `build:worker` on the
+# target OS itself, so no cross-compilation hacks are needed.
+#
+# Trigger from a tag:        git tag v1.0.0 && git push origin v1.0.0
+# The tag job also publishes a GitHub Release with all built artifacts.
+#
+# NOTE: artifacts are UNSIGNED. See signing caveats in replicate/CLAUDE.md or
+# the README — Windows shows a SmartScreen warning, macOS needs right-click →
+# Open (or `xattr -cr`) on first launch.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac
+    env:
+      # No signing certificate on CI runners — tell electron-builder to skip
+      # codesign instead of probing for an identity and failing.
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: electron/package-lock.json
+
+      - name: Install dependencies
+        working-directory: electron
+        run: npm ci
+
+      - name: Bundle worker (worker.cjs)
+        working-directory: electron
+        run: npm run build:worker
+
+      - name: Package ${{ matrix.os }}
+        working-directory: electron
+        run: npx electron-builder ${{ matrix.args }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FigmaSiteReplica-${{ matrix.os }}
+          path: |
+            electron/dist/*.exe
+            electron/dist/*.dmg
+            electron/dist/*.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*

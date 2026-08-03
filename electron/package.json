@@ -1,0 +1,50 @@
+{
+  "name": "replicate-gui",
+  "version": "1.0.0",
+  "description": "Figma Sites static replica GUI",
+  "main": "main.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "build:worker": "esbuild gui-worker.mjs --bundle --format=cjs --platform=node --target=node20 --outfile=worker.cjs"
+  },
+  "build": {
+    "appId": "com.figma.replicate",
+    "productName": "FigmaSiteReplica",
+    "files": [
+      "main.js",
+      "preload.js",
+      "worker.cjs",
+      "renderer/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.exe"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    }
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1"
+  }
+}
