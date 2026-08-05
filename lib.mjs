@@ -14,6 +14,16 @@ export const fmtColor = (c, a) => {
   return `rgb(${r},${g},${b})`;
 };
 
+// Parse a CSS color into Figma's 0-1 component form, or null for anything that
+// isn't a 3/6-digit hex. Used by the AI edit overlay and validated there too.
+export function hexToColor(hex) {
+  const m = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/i.exec(String(hex || "").trim());
+  if (!m) return null;
+  let h = m[1];
+  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  return { r: parseInt(h.slice(0, 2), 16) / 255, g: parseInt(h.slice(2, 4), 16) / 255, b: parseInt(h.slice(4, 6), 16) / 255, a: 1 };
+}
+
 export const gradientAngle = (h) => {
   if (!h || h.length < 3) return null;
   const [p0, p1] = h;
@@ -87,7 +97,9 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
     // quotes inside font-family would break it and drop every inline style.
     st["font-family"] = fontStackFn ? fontStackFn(s.fontFamily || "Inter") : `'${s.fontFamily || "Inter"}', system-ui, sans-serif`;
     if (s.fontSize) st["font-size"] = `${s.fontSize}px`;
-    const weight = s.fontStyle ? fontStyleToWeight(s.fontStyle) : 400;
+    // An explicit numeric fontWeight (set by the AI text-edit overlay) wins
+    // over the fontStyle-string heuristic; real scraped data has no fontWeight.
+    const weight = s.fontWeight != null ? s.fontWeight : s.fontStyle ? fontStyleToWeight(s.fontStyle) : 400;
     st["font-weight"] = weight;
     if (s.italic) st["font-style"] = "italic";
     // The published site renders every text block with the font's natural
@@ -173,6 +185,27 @@ export function linkHref(node, pathToFile) {
   return null;
 }
 
+// Apply a persisted text edit ({text, fontSize, fontWeight, color}) onto a
+// TEXT node before rendering. Returns a shallow clone — never mutates the
+// source node — so the same data can render both edited and unedited. Replacing
+// text drops the rich-text override tables, whose char indices would no longer
+// line up with the new string.
+export function applyTextEdit(node, edit) {
+  if (!edit) return node;
+  const eff = { ...node, style: { ...(node.style || {}) } };
+  if (edit.text != null) {
+    eff.characters = edit.text;
+    eff.characterStyleOverrides = undefined;
+    eff.styleOverrideTable = undefined;
+  }
+  if (edit.fontSize != null) eff.style.fontSize = edit.fontSize;
+  if (edit.fontWeight != null) eff.style.fontWeight = edit.fontWeight;
+  if (edit.color != null) {
+    eff.fills = [{ type: "SOLID", visible: true, opacity: 1, color: hexToColor(edit.color) }];
+  }
+  return eff;
+}
+
 export function renderNode(node, nodes, canvas, out, ctx) {
   const { assetDir, pathToFile, fontStack } = ctx;
   const assetUrl = makeAssetUrl(assetDir);
@@ -180,8 +213,13 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   const bb = node.absoluteBoundingBox;
   if (!bb) return;
 
+  // AI node-style overlay (edit_node): raw CSS props merged after the computed
+  // style so they override whatever the renderer derived, for any node type.
+  const overlay = ctx.nodeStyles?.get(node.id);
+
   if (tag === "SVG" && node.isLine) {
     const st = nodeStyle(node, canvas, fontStack, assetUrl);
+    if (overlay) Object.assign(st, overlay);
     st.height = `${node.strokeWeight || 1}px`;
     st.top = `${Math.round(bb.y - canvas.y - (node.strokeWeight || 1) / 2)}px`;
     const col = fmtColor(node.strokes?.[0]?.color);
@@ -195,6 +233,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   if (tag === "SVG") {
     if (node.hash) {
       const st = nodeStyle(node, canvas, fontStack, assetUrl);
+      if (overlay) Object.assign(st, overlay);
       st.display = "block";
       out.push(`  <img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}" />`);
     }
@@ -202,7 +241,9 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   }
 
   if (tag === "TEXT") {
-    const st = nodeStyle(node, canvas, fontStack, assetUrl);
+    const eff = applyTextEdit(node, ctx.edits?.get(node.id));
+    const st = nodeStyle(eff, canvas, fontStack, assetUrl);
+    if (overlay) Object.assign(st, overlay);
     // The "active" nav item (current page) carries textDecoration UNDERLINE
     // plus Extra Bold in the design; items with a NAVIGATE interaction are
     // links. Both come from the Figma data, not from which page we are on.
@@ -216,7 +257,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     // no inter-paragraph gap; blank lines are preserved as <p>&#8203;</p>.
     // characterStyleOverrides mark spans with a different weight/size — those
     // become inline <span> overrides.
-    const { chars, runs } = textRuns(node);
+    const { chars, runs } = textRuns(eff);
     if (!chars.includes("\n") && !runs.some((r) => r.weight || r.size)) {
       out.push(`${wrapOpen}${escapeHtml(chars)}${wrapClose}`);
       return;
@@ -249,6 +290,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
 
   if (tag === "RECTANGLE" || tag === "IMAGE") {
     const st = nodeStyle(node, canvas, fontStack, assetUrl);
+    if (overlay) Object.assign(st, overlay);
     // Mask-group images carry their asset in node.hash, not in fills.
     if (tag === "IMAGE" && node.hash && !st["background-image"]) {
       st["background-image"] = `url(${assetUrl(node.hash)})`;
@@ -276,4 +318,19 @@ export function collectNodes(id, nodes, acc) {
   if (!n) return;
   acc.push(n);
   for (const c of n.children || []) collectNodes(c, nodes, acc);
+}
+
+// All nodes of a page, flattened, root-first.
+export function collectAll(data) {
+  const all = [];
+  for (const r of data.roots) collectNodes(r, data.nodeById, all);
+  return all;
+}
+
+// The page's canvas frame (FRAME, falling back to WEBPAGE). Shared by the
+// build pipeline and the AI's apply_wordcloud (which clamps placement rects
+// to it).
+export function findCanvas(data) {
+  const all = collectAll(data);
+  return all.find((n) => n.type === "FRAME") || all.find((n) => n.type === "WEBPAGE") || null;
 }

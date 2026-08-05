@@ -5,12 +5,65 @@
 // Reads manifest.json + data/<slug>.json (produced by scrape.mjs) and writes
 // <slug>.html + styles.css into the same directory. Rendering rules live in
 // lib.mjs; this file decides fonts + page wiring.
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, basename } from "node:path";
-import { fillToCss, cssText, renderNode, collectNodes, escapeHtml } from "./lib.mjs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
+import { join, basename, resolve, sep } from "node:path";
+import { fillToCss, cssText, renderNode, collectAll, escapeHtml } from "./lib.mjs";
+import { cloudInjection } from "./wordcloud.mjs";
 
 // Populated inside main() so the packaged CLI can normalize argv first.
 let outDir, manifest, assetDir, fontDir, HAS_CJK;
+// Word-cloud placements persisted by the AI chat tool (apply_wordcloud). The
+// build only reads this file — writing it happens in ai.mjs — so a rebuild of
+// the same spec reproduces the same pages byte-for-byte.
+let WORDCLOUDS = [];
+// Text/style edits persisted by the AI chat tool (edit_text). Same read-only
+// contract: ai.mjs owns the write, the build just applies the overlay.
+let EDITS = [];
+// Per-node CSS-style overlays persisted by edit_node, applied on any node type.
+let NODE_STYLES = [];
+
+function readItems(file) {
+  try {
+    const data = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(data?.items) ? data.items : [];
+  } catch {
+    return [];
+  }
+}
+
+const readWordClouds = (dir) => readItems(join(dir, "wordclouds.json"));
+const readEdits = (dir) => readItems(join(dir, "edits.json"));
+const readNodeStyles = (dir) => readItems(join(dir, "nodeStyles.json"));
+const readOverrides = (dir) => readItems(join(dir, "overrides.json"));
+
+// Files the AI locked via write_file survive a rebuild by being re-applied
+// after the build regenerates them. file-locks.json is owned by ai.mjs; the
+// build only reads it. Keys are normalized relative paths; anything that would
+// resolve outside the out dir is skipped.
+function applyFileLocks(dir) {
+  let locks;
+  try {
+    locks = JSON.parse(readFileSync(join(dir, "file-locks.json"), "utf8"));
+  } catch {
+    return;
+  }
+  const files = locks?.files;
+  if (!files || typeof files !== "object") return;
+  const dirNorm = dir.endsWith(sep) ? dir : dir + sep;
+  for (const [rel, content] of Object.entries(files)) {
+    const dest = resolve(dir, rel);
+    if (!dest.startsWith(dirNorm) || typeof content !== "string") {
+      console.warn(`  ⚠ skipping unsafe locked path: ${rel}`);
+      continue;
+    }
+    try {
+      writeFileSync(dest, content);
+      console.log(`  ✓ re-applied locked file ${rel}`);
+    } catch (e) {
+      console.warn(`  ⚠ could not re-apply locked file ${rel}: ${e.message}`);
+    }
+  }
+}
 
 // Figma font families that Google Fonts serves; anything else is self-hosted
 // from the site's own /_woff files during the build.
@@ -104,8 +157,13 @@ async function selfHostedCss(selfHost) {
     const file = basename(url);
     const dest = join(fontDir, file);
     try {
-      const res = await fetch(`${manifest.liveBase}${url}`);
-      if (res.ok) writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+      // Skip the re-download when the file already exists — the chat agent
+      // rebuilds after every edit, and re-fetching fonts on each rebuild is
+      // wasted network for an unchanged site.
+      if (!existsSync(dest) || statSync(dest).size === 0) {
+        const res = await fetch(`${manifest.liveBase}${url}`);
+        if (res.ok) writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+      }
       rules.push(`@font-face {
   font-family: '${name.split(":")[0]}';
   font-weight: ${info.weight || 400};
@@ -130,18 +188,35 @@ const fontStack = (family) =>
 function buildPage(page, pathToFile, googleLink, hasCjk) {
   const d = loadData(page.json);
   const nodes = d.nodeById;
-  const all = [];
-  for (const r of d.roots) collectNodes(r, nodes, all);
+  const all = collectAll(d);
 
   const canvas = all.find((n) => n.type === "FRAME") || all.find((n) => n.type === "WEBPAGE");
   if (!canvas) throw new Error(`No canvas frame in ${page.path}`);
 
   const cb = canvas.absoluteBoundingBox;
   const out = [];
-  const ctx = { assetDir, pathToFile, fontStack };
+  const ctx = {
+    assetDir,
+    pathToFile,
+    fontStack,
+    edits: new Map(EDITS.filter((e) => e.slug === page.slug).map((e) => [e.nodeId, e])),
+    nodeStyles: new Map(NODE_STYLES.filter((s) => s.slug === page.slug).map((s) => [s.nodeId, s.style])),
+  };
   for (const n of all) {
     if (n === canvas) continue;
     renderNode(n, nodes, cb, out, ctx);
+  }
+
+  // Word clouds the AI placed on this page. fontFamily falls back to the
+  // page's own text font so the words inherit the site's look (with the CJK
+  // stack when the site is mixed Chinese/English).
+  const clouds = WORDCLOUDS.filter((c) => c.slug === page.slug);
+  if (clouds.length) {
+    const firstText = all.find((n) => n.type === "TEXT" && n.style?.fontFamily);
+    const pageFont = fontStack(firstText?.style?.fontFamily || "Inter");
+    for (const c of clouds) {
+      out.push(cloudInjection(c, { width: c.rect.width, height: c.rect.height, fontFamily: pageFont }));
+    }
   }
 
   const bg = fillToCss((canvas.fills || []).find((f) => f.visible)) ?? {};
@@ -174,6 +249,9 @@ export async function buildSite(outDirParam) {
   manifest = JSON.parse(readFileSync(join(outDir, "manifest.json"), "utf8"));
   assetDir = join(outDir, "assets");
   fontDir = join(outDir, "fonts");
+  WORDCLOUDS = readWordClouds(outDir);
+  EDITS = readEdits(outDir);
+  NODE_STYLES = readNodeStyles(outDir);
   HAS_CJK = manifest.pages.some((p) => /[一-鿿]/.test(JSON.stringify(loadData(p.json).nodeById)));
   const { google, selfHost, hasCJK } = planFonts();
   const googleLink = googleFontsLink(google);
@@ -187,11 +265,17 @@ body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
 .nav-link:not(.nav-active):hover { text-decoration-line: underline; text-underline-position: from-font; }
 .nav-active { cursor: default; }
 .line { position: absolute; }
+.wordcloud { position: absolute; }
+.wordcloud canvas { width: 100%; height: 100%; display: block; }
 `;
   const extraCss = await selfHostedCss(selfHost);
-  writeFileSync(join(outDir, "styles.css"), `${sharedCss}${extraCss ? `\n${extraCss}\n` : ""}`);
+  // AI global CSS (append_css) goes last so its rules take precedence over the
+  // shared stylesheet (still below per-element inline styles, by CSS rules).
+  const overrideCss = readOverrides(outDir).map((i) => i.css).join("\n");
+  writeFileSync(join(outDir, "styles.css"), `${sharedCss}${extraCss ? `\n${extraCss}\n` : ""}${overrideCss ? `\n${overrideCss}\n` : ""}`);
 
   for (const p of manifest.pages) buildPage(p, pathToFile, googleLink, hasCJK);
+  applyFileLocks(outDir);
   console.log("✅ Build complete.");
 }
 

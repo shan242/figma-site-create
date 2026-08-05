@@ -8,28 +8,136 @@
 </head>
 <body>
   <header>
-    <h1>Figma Sites 静态复制工具</h1>
-    <p>输入已发布的 *.figma.site 网址，一键生成可离线打开的静态 HTML/CSS 站点。</p>
-  </header>
-  <main>
-    <div class="field">
-      <label for="url">站点网址</label>
-      <input id="url" type="text" spellcheck="false" placeholder="https://example.figma.site/">
+    <div class="title-wrap">
+      <h1>Figma Sites 静态复制工具</h1>
+      <p>抓取已发布的 *.figma.site 站点并生成静态 HTML/CSS,再与 AI 对话调整页面(如放置交互词云)。</p>
     </div>
-    <div class="field">
-      <label for="out">输出目录</label>
-      <div class="out-row">
-        <input id="out" type="text" spellcheck="false">
-        <button id="btn-pick">选择...</button>
+    <button id="btn-settings" class="gear" title="AI 设置" aria-label="打开 AI 设置">⚙</button>
+  </header>
+
+  <main class="layout">
+    <section class="col left">
+      <div class="field">
+        <label for="url">站点网址</label>
+        <input id="url" type="text" spellcheck="false" placeholder="https://example.figma.site/">
+      </div>
+      <div class="field">
+        <label for="out">输出目录</label>
+        <div class="out-row">
+          <input id="out" type="text" spellcheck="false">
+          <button id="btn-pick">选择...</button>
+        </div>
+        <div class="recent-row">
+          <label for="recent">最近:</label>
+          <select id="recent">
+            <option value="">— 选择最近使用过的目录 —</option>
+          </select>
+          <span id="dir-status" class="dir-status"></span>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="btn-scrape" class="primary">1. 抓取站点</button>
+        <button id="btn-build">2. 生成站点</button>
+        <button id="btn-open">打开页面</button>
+        <span id="status" class="status">就绪</span>
+      </div>
+      <div class="actions">
+        <button id="btn-publish" class="primary">发布到服务器</button>
+        <button id="btn-publish-cancel" disabled>取消</button>
+        <button id="btn-publish-settings" class="gear" title="发布设置" aria-label="打开发布设置">⚙</button>
+        <span id="publish-status" class="status"></span>
+      </div>
+      <div id="log" aria-live="polite"></div>
+    </section>
+
+    <section class="col chat">
+      <div class="chat-head">
+        <h2>AI 对话</h2>
+        <button id="btn-cancel" disabled>取消</button>
+      </div>
+      <div id="chat" aria-live="polite"></div>
+      <div class="chat-input-row">
+        <input id="chat-input" type="text" spellcheck="false" placeholder="例如:在首页顶部放一个关于「旅行」主题的词云">
+        <button id="btn-send" class="primary">发送</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="settings" class="modal" hidden>
+    <div class="modal-card">
+      <h2>AI 设置</h2>
+      <div class="field">
+        <label for="cfg-key">API Key</label>
+        <input id="cfg-key" type="password" spellcheck="false" placeholder="sk-...">
+      </div>
+      <div class="field">
+        <label for="cfg-base">API 地址</label>
+        <input id="cfg-base" type="text" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="cfg-model">模型</label>
+        <input id="cfg-model" type="text" spellcheck="false">
+      </div>
+      <label class="check"><input id="cfg-auto" type="checkbox"> 自动应用修改(跳过确认)</label>
+      <div class="field">
+        <label for="lic-code">本机机器码</label>
+        <input id="lic-code" type="text" readonly spellcheck="false">
+      </div>
+      <div class="lic-row">
+        <span id="lic-status" class="lic-status"></span>
+        <button id="btn-lic-refresh">校验授权</button>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-cfg-save" class="primary">保存</button>
+        <button id="btn-cfg-cancel">关闭</button>
+      </div>
+      <p id="cfg-msg" class="cfg-msg"></p>
+    </div>
+  </div>
+
+  <div id="publish-settings" class="modal" hidden>
+    <div class="modal-card">
+      <h2>发布设置(1Panel)</h2>
+      <div class="field">
+        <label for="pub-key">API Key</label>
+        <input id="pub-key" type="password" spellcheck="false" placeholder="1Panel 个人中心 → API">
+      </div>
+      <div class="field">
+        <label for="pub-base">服务器地址</label>
+        <input id="pub-base" type="text" spellcheck="false" placeholder="http://192.168.1.10:8080">
+      </div>
+      <div class="field">
+        <label for="pub-domain">域名</label>
+        <input id="pub-domain" type="text" spellcheck="false" placeholder="example.com">
+      </div>
+      <div class="field">
+        <label for="pub-alias">别名(可选,默认同域名)</label>
+        <input id="pub-alias" type="text" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="pub-group">分组 ID(默认 1)</label>
+        <input id="pub-group" type="number" spellcheck="false" value="1">
+      </div>
+      <div class="modal-actions">
+        <button id="btn-pub-test">测试连接</button>
+        <button id="btn-pub-save" class="primary">保存</button>
+        <button id="btn-pub-cancel">关闭</button>
+      </div>
+      <p id="pub-msg" class="cfg-msg"></p>
+    </div>
+  </div>
+
+  <div id="confirm" class="modal" hidden>
+    <div class="modal-card">
+      <h2 id="confirm-title">确认修改</h2>
+      <div id="confirm-body" class="confirm-body"></div>
+      <div class="modal-actions">
+        <button id="btn-confirm-yes" class="primary">应用</button>
+        <button id="btn-confirm-no">拒绝</button>
       </div>
     </div>
-    <div class="actions">
-      <button id="btn-scrape" class="primary">1. 抓取站点</button>
-      <button id="btn-build">2. 生成站点</button>
-      <span id="status" class="status">就绪</span>
-    </div>
-    <div id="log" aria-live="polite"></div>
-  </main>
+  </div>
+
   <script src="renderer.js"></script>
 </body>
 </html>
