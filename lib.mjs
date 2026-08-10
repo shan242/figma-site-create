@@ -75,7 +75,7 @@ export function makeAssetUrl(assetDir) {
   };
 }
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
@@ -84,7 +84,19 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
   const top = Math.round(bb.y - canvas.y);
   const w = Math.round(bb.width);
   const h = Math.round(bb.height);
-  const st = { position: "absolute", left: `${left}px`, top: `${top}px`, width: `${w}px`, height: `${h}px` };
+  const st = { position: "absolute", top: `${top}px`, width: `${w}px`, height: `${h}px` };
+  // The build renders the canvas fluid (width:100%; min-width:W) to match the
+  // live site. A node Figma constrained horizontal=CENTER keeps its distance
+  // from the canvas center as the viewport stretches, so its left is a calc:
+  // at canvas width W it sits at design px `left`; at any wider viewport it
+  // must land at 50% + (left - W/2). calc(50% + (left - W/2))px is exactly
+  // that. Nodes without CENTER keep their fixed design px.
+  if (node.constraints?.horizontal === "CENTER") {
+    const off = left - Math.round(canvas.width) / 2;
+    st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off))}px)`;
+  } else {
+    st.left = `${left}px`;
+  }
   const opacity = node.opacity !== undefined && node.opacity < 1 ? node.opacity : 1;
 
   if (node.type === "TEXT") {
@@ -206,6 +218,203 @@ export function applyTextEdit(node, edit) {
   return eff;
 }
 
+// --- SVG natural-size rendering ---------------------------------------------
+// Figma Sites exports a vector node as an .svg asset. When the node has an
+// effect (drop shadow, glow), the exporter bakes the effect gutter into the
+// asset, so the SVG's natural size exceeds the node's design box — the card
+// frame on alias-grid is a 256x376 box shipped as a 276x396 SVG (white card +
+// ~20px shadow gutter). The live site renders such assets at natural size,
+// positioned so the SVG's content (which starts at offX/offY inside the
+// viewBox) lands exactly on the design box. Rendering at the design box clips
+// the gutter — the cards lost their shadows that way.
+
+const svgGeoCache = new Map();
+
+function assetSvgPath(assetDir, hash) {
+  const p = join(assetDir, `${hash}.svg`);
+  return existsSync(p) ? p : null;
+}
+
+function svgGeometry(assetDir, hash) {
+  if (svgGeoCache.has(hash)) return svgGeoCache.get(hash);
+  let geo = null;
+  const p = assetSvgPath(assetDir, hash);
+  if (p) {
+    try {
+      geo = parseSvgGeometry(readFileSync(p, "utf8"));
+    } catch {}
+  }
+  svgGeoCache.set(hash, geo);
+  return geo;
+}
+
+function parseSvgGeometry(svg) {
+  const wm = /<svg[^>]*\swidth\s*=\s*"(-?[\d.]+)"/.exec(svg);
+  const hm = /<svg[^>]*\sheight\s*=\s*"(-?[\d.]+)"/.exec(svg);
+  const vb = /viewBox\s*=\s*"(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)"/.exec(svg);
+  const w = wm ? parseFloat(wm[1]) : vb ? parseFloat(vb[3]) : null;
+  const h = hm ? parseFloat(hm[1]) : vb ? parseFloat(vb[4]) : null;
+  if (w == null || h == null) return null;
+  const c = svgContentMin(svg);
+  return c ? { w, h, offX: c.x, offY: c.y } : { w, h, offX: 0, offY: 0 };
+}
+
+// Minimum x/y of the SVG's drawing content. <defs> content (filters, gradients)
+// is metadata, not geometry — the gutter it describes shows up in the paths.
+function svgContentMin(svg) {
+  let minX = Infinity, minY = Infinity;
+  const consider = (x, y) => {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+  };
+  for (const m of svg.matchAll(/<path\b[^>]*\bd="([^"]*)"/g)) {
+    const p = pathMin(m[1]);
+    if (p) consider(p.x, p.y);
+  }
+  for (const m of svg.matchAll(/<rect\b[^>]*\bx="(-?[\d.]+)"[^>]*\by="(-?[\d.]+)"/g)) {
+    consider(parseFloat(m[1]), parseFloat(m[2]));
+  }
+  for (const m of svg.matchAll(/<circle\b[^>]*\bcx="(-?[\d.]+)"[^>]*\bcy="(-?[\d.]+)"[^>]*\br="(-?[\d.]+)"/g)) {
+    consider(parseFloat(m[1]) - parseFloat(m[3]), parseFloat(m[2]) - parseFloat(m[3]));
+  }
+  for (const m of svg.matchAll(/<ellipse\b[^>]*\bcx="(-?[\d.]+)"[^>]*\bcy="(-?[\d.]+)"[^>]*\brx="(-?[\d.]+)"[^>]*\bry="(-?[\d.]+)"/g)) {
+    consider(parseFloat(m[1]) - parseFloat(m[3]), parseFloat(m[2]) - parseFloat(m[4]));
+  }
+  for (const m of svg.matchAll(/<line\b[^>]*\bx1="(-?[\d.]+)"[^>]*\by1="(-?[\d.]+)"[^>]*\bx2="(-?[\d.]+)"[^>]*\by2="(-?[\d.]+)"/g)) {
+    consider(Math.min(parseFloat(m[1]), parseFloat(m[3])), Math.min(parseFloat(m[2]), parseFloat(m[4])));
+  }
+  for (const m of svg.matchAll(/<polygon\b[^>]*\bpoints="([^"]+)"/g)) {
+    const p = pointsMin(m[1]);
+    if (p) consider(p.x, p.y);
+  }
+  if (minX === Infinity) return null;
+  return { x: minX, y: minY };
+}
+
+function pointsMin(pts) {
+  const nums = pts.split(/[\s,]+/).map(parseFloat).filter((n) => !isNaN(n));
+  if (nums.length < 2) return null;
+  let minX = Infinity, minY = Infinity;
+  for (let i = 0; i + 1 < nums.length; i += 2) {
+    if (nums[i] < minX) minX = nums[i];
+    if (nums[i + 1] < minY) minY = nums[i + 1];
+  }
+  return { x: minX, y: minY };
+}
+
+// Lowest x/y a path reaches. Curve control points are included as candidates —
+// they bound the curve's hull, and for the gutter offset only the top-left
+// matters, so over-inclusion of control points is harmless for the min.
+function pathMin(d) {
+  const toks = [];
+  const re = /([MLHVCSQTAZmlhvcsqtaz]|-?[\d.]+)/g;
+  let m;
+  while ((m = re.exec(d))) toks.push(m[1]);
+  const isCmd = (t) => /[MLHVCSQTAZmlhvcsqtaz]/.test(t);
+  let x = 0, y = 0, startX = 0, startY = 0;
+  let minX = Infinity, minY = Infinity;
+  let i = 0;
+  while (i < toks.length) {
+    const t = toks[i];
+    if (!isCmd(t)) { i++; continue; }
+    const abs = t === t.toUpperCase();
+    const c = t.toUpperCase();
+    i++;
+    if (c === "Z") { x = startX; y = startY; continue; }
+    if (c === "M" || c === "L") {
+      let first = true;
+      while (i < toks.length && !isCmd(toks[i])) {
+        const nx = parseFloat(toks[i]), ny = parseFloat(toks[i + 1]);
+        if (isNaN(nx) || isNaN(ny)) { i++; continue; }
+        x = abs ? nx : x + nx;
+        y = abs ? ny : y + ny;
+        if (first) { startX = x; startY = y; first = false; }
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        i += 2;
+      }
+    } else if (c === "H") {
+      while (i < toks.length && !isCmd(toks[i])) {
+        const nx = parseFloat(toks[i]);
+        if (!isNaN(nx)) { x = abs ? nx : x + nx; if (x < minX) minX = x; }
+        i++;
+      }
+    } else if (c === "V") {
+      while (i < toks.length && !isCmd(toks[i])) {
+        const ny = parseFloat(toks[i]);
+        if (!isNaN(ny)) { y = abs ? ny : y + ny; if (y < minY) minY = y; }
+        i++;
+      }
+    } else if (c === "A") {
+      while (i < toks.length && !isCmd(toks[i])) {
+        const vals = [];
+        for (let k = 0; k < 7 && i < toks.length && !isCmd(toks[i]); k++) vals.push(parseFloat(toks[i++]));
+        if (vals.length >= 2) {
+          x = abs ? vals[vals.length - 2] : x + vals[vals.length - 2];
+          y = abs ? vals[vals.length - 1] : y + vals[vals.length - 1];
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+        }
+      }
+    } else {
+      const per = c === "C" ? 6 : c === "S" ? 4 : c === "Q" ? 4 : 2;
+      while (i < toks.length && !isCmd(toks[i])) {
+        const vals = [];
+        for (let k = 0; k < per && i < toks.length && !isCmd(toks[i]); k++) vals.push(parseFloat(toks[i++]));
+        for (let k = 0; k + 1 < vals.length; k += 2) {
+          if (isNaN(vals[k]) || isNaN(vals[k + 1])) continue;
+          const cx = abs ? vals[k] : x + vals[k];
+          const cy = abs ? vals[k + 1] : y + vals[k + 1];
+          if (cx < minX) minX = cx;
+          if (cy < minY) minY = cy;
+        }
+        if (vals.length >= 2) {
+          x = abs ? vals[vals.length - 2] : x + vals[vals.length - 2];
+          y = abs ? vals[vals.length - 1] : y + vals[vals.length - 1];
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+        }
+      }
+    }
+  }
+  if (minX === Infinity) return null;
+  return { x: minX, y: minY };
+}
+
+// Shift a CSS left value (plain px, or the CENTER-constraint calc) left by dx.
+function shiftLeft(leftCss, dx) {
+  if (!dx) return leftCss;
+  if (typeof leftCss === "string" && leftCss.endsWith("px")) {
+    const v = parseFloat(leftCss) - dx;
+    return `${Math.round(v * 1000) / 1000}px`;
+  }
+  const m = /^calc\(50% ([+-]) ([\d.]+)px\)$/.exec(leftCss);
+  if (m) {
+    const sign = m[1] === "+" ? 1 : -1;
+    const n = sign * parseFloat(m[2]) - dx;
+    return n >= 0 ? `calc(50% + ${n}px)` : `calc(50% - ${-n}px)`;
+  }
+  return leftCss;
+}
+
+// Reflow a node whose Figma horizontal constraint is SCALE: the published site
+// positions it as a percentage of the design width, so it stretches with the
+// fluid canvas (width:100%; min-width:designW). Vertical stays at design px —
+// the live container keeps its design height, so a SCALE/SCALE node only widens.
+// Must run after every px adjustment (SVG natural-size offsets) — it reads the
+// final left/width and re-expresses them as %.
+function applyScaleH(node, st, canvas) {
+  if (node.constraints?.horizontal !== "SCALE") return st;
+  const designW = canvas.width;
+  if (typeof st.width === "string" && /^-?[\d.]+px$/.test(st.width)) {
+    st.width = `${((parseFloat(st.width) / designW) * 100).toFixed(4)}%`;
+  }
+  if (typeof st.left === "string" && /^-?[\d.]+px$/.test(st.left)) {
+    st.left = `${((parseFloat(st.left) / designW) * 100).toFixed(4)}%`;
+  }
+  return st;
+}
+
 export function renderNode(node, nodes, canvas, out, ctx) {
   const { assetDir, pathToFile, fontStack } = ctx;
   const assetUrl = makeAssetUrl(assetDir);
@@ -225,6 +434,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     const col = fmtColor(node.strokes?.[0]?.color);
     st.background = col;
     delete st["border-radius"];
+    applyScaleH(node, st, canvas);
     out.push(`  <div class="line" style="${cssText(st)}"></div>`);
     return;
   }
@@ -235,6 +445,14 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       const st = nodeStyle(node, canvas, fontStack, assetUrl);
       if (overlay) Object.assign(st, overlay);
       st.display = "block";
+      const geo = svgGeometry(assetDir, node.hash);
+      if (geo && (Math.abs(geo.w - bb.width) > 0.5 || Math.abs(geo.h - bb.height) > 0.5)) {
+        st.left = shiftLeft(st.left, geo.offX);
+        st.top = `${Math.round(bb.y - canvas.y) - geo.offY}px`;
+        st.width = `${geo.w}px`;
+        st.height = `${geo.h}px`;
+      }
+      applyScaleH(node, st, canvas);
       out.push(`  <img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}" />`);
     }
     return;
@@ -244,6 +462,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     const eff = applyTextEdit(node, ctx.edits?.get(node.id));
     const st = nodeStyle(eff, canvas, fontStack, assetUrl);
     if (overlay) Object.assign(st, overlay);
+    applyScaleH(node, st, canvas);
     // The "active" nav item (current page) carries textDecoration UNDERLINE
     // plus Extra Bold in the design; items with a NAVIGATE interaction are
     // links. Both come from the Figma data, not from which page we are on.
@@ -297,6 +516,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st["background-size"] = "cover";
       st["background-position"] = "center";
     }
+    applyScaleH(node, st, canvas);
     out.push(`  <div style="${cssText(st)}"></div>`);
     return;
   }

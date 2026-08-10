@@ -215,11 +215,25 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
     const firstText = all.find((n) => n.type === "TEXT" && n.style?.fontFamily);
     const pageFont = fontStack(firstText?.style?.fontFamily || "Inter");
     for (const c of clouds) {
-      out.push(cloudInjection(c, { width: c.rect.width, height: c.rect.height, fontFamily: pageFont }));
+      out.push(cloudInjection(c, { width: c.rect.width, height: c.rect.height, fontFamily: pageFont, canvasWidth: Math.round(cb.width) }));
     }
   }
 
+  // A word cloud may sit below the design canvas bottom (the AI places it in
+  // canvas coordinates with top > canvas height); grow the canvas to cover it
+  // so the page background reaches the cloud instead of clipping it. Matched
+  // to the same rounded rect cloudInjection emits.
+  const cloudBottom = clouds.length ? Math.max(...clouds.map((c) => Math.round(c.rect.top) + Math.round(c.rect.height))) : 0;
+  const canvasHeight = Math.max(Math.round(cb.height), cloudBottom);
+
   const bg = fillToCss((canvas.fills || []).find((f) => f.visible)) ?? {};
+  // Fluid canvas: the live site renders width:100% with a min-width equal to
+  // the design width, so the page fills the viewport and only shrinks below
+  // the design width when the viewport is narrower. The body background follows
+  // the canvas color (live does this via body:has([data-breakpoint-id])) and
+  // overflow-x:hidden clips the min-width overflow instead of showing a scrollbar.
+  const canvasW = Math.round(cb.width);
+  const bodyBg = bg["background-color"] || "#ffffff";
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -230,9 +244,10 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="${googleLink}" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
+  <style>body { background-color: ${bodyBg}; overflow-x: hidden; }</style>
 </head>
 <body>
-  <div class="canvas" style="width:${Math.round(cb.width)}px;height:${Math.round(cb.height)}px;${cssText(bg)}">
+  <div class="canvas" style="width:100%;min-width:${canvasW}px;min-height:${canvasHeight}px;${cssText(bg)}">
 ${out.join("\n")}
   </div>
 </body>
@@ -260,7 +275,7 @@ export async function buildSite(outDirParam) {
   const sharedCss = `/* Generated replica of ${manifest.liveBase} */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
-.canvas { position: relative; margin: 0 auto; box-shadow: 0 0 40px rgba(0,0,0,.08); }
+.canvas { position: relative; margin: 0 auto; }
 .nav-link { text-decoration: none; }
 .nav-link:not(.nav-active):hover { text-decoration-line: underline; text-underline-position: from-font; }
 .nav-active { cursor: default; }

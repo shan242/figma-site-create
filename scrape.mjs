@@ -23,6 +23,7 @@
 //     are actually JPEG bytes, so extensions are sniffed from magic bytes.
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { generateDesignReport } from "./design-report.mjs";
 
 const CONCURRENCY = 6;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -224,6 +225,17 @@ export async function scrapeSite(outDir, urlArg) {
   // 4. Manifest for the build step.
   const manifest = { liveBase: origin, siteHash, siteTitle, pages, generatedAt: new Date().toISOString() };
   writeFileSync(join(outDir, "manifest.json"), JSON.stringify(manifest, null, 2));
+
+  // 5. Design report: aggregate all page node data into design tokens + layout
+  // patterns the AI agent reads before editing (see design-report.mjs).
+  try {
+    const pageData = pages.map((p) => JSON.parse(readFileSync(join(outDir, p.json), "utf8")));
+    generateDesignReport(pageData, outDir);
+    console.log("  ✓ design-report.md + design-report.json");
+  } catch (e) {
+    console.warn(`  ⚠ design report failed: ${e.message}`);
+  }
+
   console.log(`\n✅ Scraped ${pages.length} pages into ${outDir}/`);
   console.log(`   Next: node build.mjs --out ${outDir}`);
 }

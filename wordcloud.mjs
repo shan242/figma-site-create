@@ -194,8 +194,11 @@ export const clientScript = `window.renderWordCloud = function (canvas, layout) 
 // Build the HTML chunk build.mjs inlines into a page: an absolutely-positioned
 // <div> holding a <canvas> plus the renderer + layout data. rect is the
 // canvas-coordinate box {left, top, width, height}; fontFamily is the page
-// stack (with CJK fallbacks) so the words inherit the site's look.
-export function cloudInjection(item, { width, height, fontFamily }) {
+// stack (with CJK fallbacks) so the words inherit the site's look. canvasWidth
+// (the design canvas width, from build.mjs) lets clouds ride the fluid canvas:
+// a cloud as wide as the design stretches to 100%, and a cloud centered in the
+// design stays centered, mirroring how CENTER-constrained nodes render.
+export function cloudInjection(item, { width, height, fontFamily, canvasWidth }) {
   const spec = item.spec || {};
   const layout = layoutWordCloud(spec.words || [], {
     width,
@@ -211,7 +214,15 @@ export function cloudInjection(item, { width, height, fontFamily }) {
   const top = Math.round(r.top);
   const w = Math.round(r.width);
   const h = Math.round(r.height);
-  return `  <div class="wordcloud" style="position:absolute;left:${left}px;top:${top}px;width:${w}px;height:${h}px">
+  let leftCss = `${left}px`;
+  let wCss = `${w}px`;
+  if (canvasWidth != null && w >= canvasWidth) {
+    leftCss = "0";
+    wCss = "100%";
+  } else if (canvasWidth != null && Math.abs(left + w / 2 - canvasWidth / 2) <= 1) {
+    leftCss = `calc(50% - ${w / 2}px)`;
+  }
+  return `  <div class="wordcloud" style="position:absolute;left:${leftCss};top:${top}px;width:${wCss};height:${h}px">
     <canvas></canvas>
     <script>${clientScript}
 (function () {

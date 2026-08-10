@@ -323,8 +323,6 @@ const cfgBase = document.getElementById("cfg-base");
 const cfgModel = document.getElementById("cfg-model");
 const cfgAuto = document.getElementById("cfg-auto");
 const cfgMsg = document.getElementById("cfg-msg");
-const licCode = document.getElementById("lic-code");
-const licStatus = document.getElementById("lic-status");
 
 function setBlockedUI(blocked) {
   blockedRender = blocked;
@@ -342,10 +340,6 @@ async function openSettings() {
   cfgBase.value = c.baseUrl || "";
   cfgModel.value = c.model || "";
   cfgAuto.checked = !!c.autoApply;
-  const l = await window.api.getLicense();
-  licCode.value = l.machineCode || "";
-  licStatus.textContent = l.blocked ? "已禁用" : "授权正常";
-  licStatus.className = l.blocked ? "lic-status bad" : "lic-status";
   cfgMsg.textContent = "";
   settingsEl.hidden = false;
 }
@@ -367,21 +361,9 @@ document.getElementById("btn-cfg-cancel").addEventListener("click", () => {
   settingsEl.hidden = true;
 });
 
-// 授权状态:被服务端封禁时禁用功能并显示错误;本地"校验授权"按钮主动刷新。
-document.getElementById("btn-lic-refresh").addEventListener("click", async () => {
-  licStatus.textContent = "校验中…";
-  const r = await window.api.licenseRefresh();
-  licStatus.textContent = r.blocked ? "已禁用" : "授权正常";
-  licStatus.className = r.blocked ? "lic-status bad" : "lic-status";
-  if (r.blocked) setBlockedUI(true);
-});
-
+// 授权状态:被服务端封禁时禁用功能并显示错误(应用级强制,不展示明细)。
 window.api.onLicenseEvent((evt) => {
-  if (evt && evt.blocked) {
-    setBlockedUI(true);
-    licStatus.textContent = "已禁用";
-    licStatus.className = "lic-status bad";
-  }
+  if (evt && evt.blocked) setBlockedUI(true);
 });
 
 // --- 发布到 1Panel 服务器 -----------------------------------------------------

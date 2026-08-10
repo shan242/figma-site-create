@@ -305,20 +305,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   margin: 0;
 }
 
-.lic-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.lic-status {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.lic-status.bad { color: var(--err); }
-
 .check {
   display: flex;
   align-items: center;

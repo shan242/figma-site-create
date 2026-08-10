@@ -197,7 +197,7 @@ test("tools reject path traversal", async () => {
 test("write_file refuses metadata / overlay files", async () => {
   const dir = fixture();
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
-  for (const p of ["manifest.json", "wordclouds.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json"]) {
+  for (const p of ["manifest.json", "wordclouds.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"]) {
     const r = await handlers.write_file({ path: p, content: "{}" });
     assert.ok(r.error, `${p} must be denied`);
   }
@@ -243,6 +243,39 @@ test("read_file can read files inside the dir", async () => {
   assert.ok(r.content.includes("Test"));
 });
 
+test("get_standard returns the width-adaptive standard", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.get_standard({ name: "width-adaptive" });
+  assert.equal(r.name, "width-adaptive");
+  assert.ok(r.content.includes("禁用"));
+  assert.ok(r.template.includes("{W}"));
+  assert.ok(r.template.includes("@media"));
+  // The template must never rely on invalid CSS division (length ÷ length).
+  assert.ok(!r.template.includes("100vw /"));
+  assert.ok(r.chars > 0);
+});
+
+test("get_standard returns the width-reflow standard", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.get_standard({ name: "width-reflow" });
+  assert.equal(r.name, "width-reflow");
+  assert.ok(r.content.includes("重排"));
+  assert.ok(r.content.includes("禁用"));
+  // Reflow has no single canonical template, only a reference skeleton.
+  assert.ok(r.template.includes("max-width"));
+  assert.ok(r.template.includes("{CARDW}"));
+  assert.ok(r.chars > 0);
+});
+
+test("get_standard rejects unknown names", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.get_standard({ name: "nope" });
+  assert.ok(r.error);
+});
+
 test("write_file is gated by confirmation", async () => {
   const dir = fixture();
   const denied = makeTools({ outDir: dir, confirm: denyAll });
@@ -253,7 +286,7 @@ test("write_file is gated by confirmation", async () => {
   assert.equal(readFileSync(join(dir, "note.txt"), "utf8"), "hi");
 });
 
-test("apply_wordcloud clamps rect to the canvas and persists", async () => {
+test("apply_wordcloud clamps horizontally + top>=0 and persists", async () => {
   const dir = fixture();
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   const r = await handlers.apply_wordcloud({
@@ -268,6 +301,137 @@ test("apply_wordcloud clamps rect to the canvas and persists", async () => {
   assert.equal(stored.items.length, 1);
   assert.equal(stored.items[0].id, r.id);
   assert.equal(stored.items[0].spec.words.length, 2);
+});
+
+test("apply_wordcloud lets rect extend below the canvas; width still clamped", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.apply_wordcloud({
+    slug: "index",
+    rect: { left: 400, top: 900, width: 300, height: 120 },
+    spec: { words: [{ text: "hello", weight: 80 }] },
+  });
+  assert.equal(r.rect.top, 900); // below the 400-high canvas — preserved
+  assert.equal(r.rect.height, 120);
+  assert.equal(r.rect.left, 200); // 500 - 300
+  assert.equal(r.rect.width, 300);
+  assert.equal(r.error, undefined);
+});
+
+test("build grows the canvas height to cover word clouds below it", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  await handlers.apply_wordcloud({ slug: "index", rect: { left: 0, top: 900, width: 200, height: 150 }, spec: { words: [{ text: "hello", weight: 80 }] } });
+  await buildSite(dir);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  const m = html.match(/class="canvas" style="width:100%;min-width:(\d+)px;min-height:(\d+)px/);
+  assert.ok(m, "canvas element present");
+  assert.equal(m[1], "500");
+  assert.equal(m[2], "1050"); // 900 + 150
+  assert.ok(html.includes("wordcloud"));
+});
+
+test("SCALE-constrained nodes reflow as % of design width, vertical stays px", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rep-scale-"));
+  mkdirSync(join(dir, "data"));
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      liveBase: "https://example.figma.site",
+      siteTitle: "T",
+      pages: [{ path: "/", slug: "index", file: "index.html", title: "Home", json: "data/index.json" }],
+    }),
+  );
+  writeFileSync(
+    join(dir, "data", "index.json"),
+    JSON.stringify({
+      roots: ["1:1"],
+      nodeById: {
+        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, children: ["1:2", "1:3"] },
+        // SCALE/SCALE node at design left 100, width 200 in a 500-wide canvas.
+        "1:2": { id: "1:2", type: "RECTANGLE", constraints: { horizontal: "SCALE", vertical: "SCALE" }, absoluteBoundingBox: { x: 100, y: 40, width: 200, height: 80 } },
+        "1:3": { id: "1:3", type: "TEXT", characters: "plain", absoluteBoundingBox: { x: 20, y: 200, width: 50, height: 20 } },
+      },
+    }),
+  );
+  await buildSite(dir);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  // x=100 → 20% of 500, width=200 → 40% of 500; top/height stay at design px.
+  assert.ok(html.includes("top: 40px; width: 40.0000%; height: 80px; left: 20.0000%"), "SCALE node reflows horizontally, keeps vertical px");
+  assert.ok(html.includes("top: 200px; width: 50px; height: auto; left: 20px"), "unconstrained node keeps design px");
+});
+
+test("fluid canvas: CENTER nodes stay centered, plain nodes keep px, body follows canvas bg", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rep-center-"));
+  mkdirSync(join(dir, "data"));
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      liveBase: "https://example.figma.site",
+      siteTitle: "T",
+      pages: [{ path: "/", slug: "index", file: "index.html", title: "Home", json: "data/index.json" }],
+    }),
+  );
+  writeFileSync(
+    join(dir, "data", "index.json"),
+    JSON.stringify({
+      roots: ["1:1"],
+      nodeById: {
+        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, fills: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0.85, g: 0.89, b: 0.8 } }], children: ["1:2", "1:3"] },
+        "1:2": { id: "1:2", type: "TEXT", characters: "centered", constraints: { horizontal: "CENTER", vertical: "TOP" }, absoluteBoundingBox: { x: 200, y: 40, width: 100, height: 20 } },
+        "1:3": { id: "1:3", type: "TEXT", characters: "fixed", absoluteBoundingBox: { x: 20, y: 80, width: 50, height: 20 } },
+      },
+    }),
+  );
+  await buildSite(dir);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  assert.ok(/class="canvas" style="width:100%;min-width:500px;min-height:400px/.test(html), "canvas is fluid with a min-width");
+  // CENTER node at design left 200 in a 500 canvas → keeps offset -50px from center.
+  assert.ok(html.includes('left: calc(50% - 50px)'), "CENTER node stays centered as canvas stretches");
+  assert.ok(html.includes("left: 20px"), "unconstrained node keeps its design px");
+  assert.ok(html.includes("background-color: rgb(217,227,204); overflow-x: hidden;"), "body bg follows canvas and clips horizontal overflow");
+});
+
+test("SVG asset with an effect gutter renders at natural size, content-aligned to the design box", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rep-svg-"));
+  mkdirSync(join(dir, "data"));
+  mkdirSync(join(dir, "assets"));
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      liveBase: "https://example.figma.site",
+      siteTitle: "T",
+      pages: [{ path: "/", slug: "index", file: "index.html", title: "Home", json: "data/index.json" }],
+    }),
+  );
+  // The card frame: Figma bbox 256x376 at (100,20), but the shipped SVG is
+  // 276x396 with the rounded rect drawn at content offset (10,4) — the gutter
+  // bakes the drop shadow into the asset. Rendering at the bbox clips it.
+  writeFileSync(
+    join(dir, "data", "index.json"),
+    JSON.stringify({
+      roots: ["1:1"],
+      nodeById: {
+        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, children: ["1:2"] },
+        "1:2": { id: "1:2", type: "SVG", name: "Card", hash: "aa11bb22", absoluteBoundingBox: { x: 100, y: 20, width: 256, height: 376 } },
+      },
+    }),
+  );
+  writeFileSync(
+    join(dir, "assets", "aa11bb22.svg"),
+    `<svg xmlns="http://www.w3.org/2000/svg" width="276" height="396" viewBox="0 0 276 396">
+  <defs><filter id="f"><feGaussianBlur stdDeviation="5"/><feOffset dy="6"/></filter></defs>
+  <rect x="10" y="4" width="256" height="376" rx="12" fill="#fff" filter="url(#f)"/>
+</svg>`,
+  );
+  await buildSite(dir);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  const img = /<img src="assets\/aa11bb22\.svg" alt="" style="([^"]+)" \/>/.exec(html);
+  assert.ok(img, "SVG node rendered as an img referencing its asset");
+  assert.match(img[1], /width: 276px/, "renders at the asset's natural width");
+  assert.match(img[1], /height: 396px/, "renders at the asset's natural height");
+  assert.match(img[1], /left: 90px/, "content-aligned: bbox left 100 - content offset 10");
+  assert.match(img[1], /top: 16px/, "content-aligned: bbox top 20 - content offset 4");
 });
 
 test("apply_wordcloud fills words locally when spec has none", async () => {

@@ -55,6 +55,25 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
 
 - **Positioning**: every node is an absolutely-positioned box inside `.canvas`
   (a FRAME/WEBPAGE node), `left/top/width/height` rounded from `absoluteBoundingBox`.
+- **Fluid canvas (matches the live site's adaptive behavior)**: `.canvas` renders
+  `width:100%; min-width:{design width}px` (live: `min-width:max(100%,1440px)`), so
+  the page fills the viewport and only clips below the design width. The body
+  background is set to the canvas color (live: `body:has([data-breakpoint-id])`)
+  with `overflow-x:hidden` to swallow the min-width overflow. A node whose
+  `constraints.horizontal === "CENTER"` (Figma keeps its offset from the canvas
+  center) renders `left: calc(50% ± offpx)` where `off = designLeft - W/2` — at the
+  design width this evaluates to `designLeft` exactly, so nothing moves on a 1440
+  viewport, but the node stays centered as the viewport grows.
+- **`constraints.horizontal === "SCALE"` nodes reflow with the viewport**: the
+  live site positions such nodes as a **percentage of the design width**, so they
+  stretch as the canvas fills a wider viewport (the alias-grid site is all-SCALE
+  and its full-width banners/hero stretch 1440→1920; isabella is all-CENTER).
+  `lib.mjs` re-expresses the final `left`/`width` (after any SVG natural-size
+  offset) as `left: X%; width: W%`. **Vertical stays at design px** — the live
+  container keeps its design height, so a SCALE/SCALE node only widens, never
+  grows taller; text inside a widened box re-wraps (font-size is unchanged, so
+  box height stays the same). At the design width the percentages resolve to the
+  design px exactly, so SCALE builds are unchanged on a 1440 viewport.
 - **Text**: `font-family` uses **single quotes** (`'Inter', system-ui, sans-serif`).
   The whole style attr is double-quoted, so a double quote inside `font-family`
   breaks the attribute and **silently drops every inline style** on that element.
@@ -77,9 +96,27 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   Mask-group images carry their asset in `node.hash`, not in fills — check `node.hash`
   when `fills` has no imageRef. Vector icons (SVG node) become `<img>` of a generated
   `.svg` asset.
+- **SVG assets render at NATURAL size, content-aligned to the design box**: Figma bakes
+  a drop shadow / effect into the SVG by adding a gutter, so the asset is larger than
+  the node's `absoluteBoundingBox` and the drawing content sits at an offset
+  `(offX, offY)` inside it (e.g. a 256×376 card ships as a 276×396 SVG with content at
+  (10,4)). The live site renders such `<img>`s at the asset's natural size positioned
+  `left = designLeft - offX`, `top = designTop - offY`; `lib.mjs` does the same
+  (`svgGeometry` parses width/height + min content point, content-addressable cache).
+  Forcing the design box would clip the shadow gutter — that was the flat-card bug.
+  Only kicks in when natural ≠ bbox; plain icons render at the bbox as before.
 - **Lines**: an SVG node with `isLine` becomes a 1px `<div>` (not `<hr>`).
-- **Effects/shadows are NOT rendered** — a deliberate replica choice. A Figma
-  drop-shadow on the canvas is approximated by a soft CSS box-shadow on `.canvas`.
+- **No renderer-side effects/shadows** — a deliberate replica choice. The renderer adds
+  no CSS box-shadow or filter; the only shadows that appear are ones Figma baked into
+  the asset bytes (see the SVG natural-size rule above). (The old soft CSS box-shadow
+  on `.canvas` was dropped with the fluid canvas: on a full-width element it drew a
+  shadow around the viewport edges, unlike the live site.)
+- **Word clouds may sit below the canvas**: `apply_wordcloud` only clamps
+  horizontally (width ≤ canvas width, left ≥ 0); `top`/`height` may extend past
+  the canvas bottom, and `build.mjs` grows the `.canvas` height to cover the
+  lowest cloud so the page background reaches it. Don't re-add a vertical clamp —
+  "below the content" is a valid placement, and a silent clamp was the old bug
+  that made the AI retry in a loop.
 - **CJK**: if any page has CJK glyphs, append `'Noto Sans SC', 'Noto Sans JP'` to the
   font stack and add them (weights 400/500) to the Google Fonts link so mixed
   Chinese/English text matches the live render.

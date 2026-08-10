@@ -286,7 +286,7 @@ ipcMain.handle("chat:send", async (event, { message, outDir }) => {
     const model = createDeepSeekModel(config);
     const tools = makeTools({
       outDir,
-      confirm: (payload) => requestConfirm(payload),
+      confirm: (payload) => (config.autoApply ? Promise.resolve(true) : requestConfirm(payload)),
       onLog: (line) => send({ type: "log", text: line }),
     });
     const result = await runAgent({
@@ -295,7 +295,6 @@ ipcMain.handle("chat:send", async (event, { message, outDir }) => {
       tools,
       onEvent: send,
       config: { signal: abort.signal },
-      maxTurns: 20,
     });
     // A successful edit only lands in the generated HTML after a rebuild. If
     // the agent changed files but never asked to rebuild, do it once here so
