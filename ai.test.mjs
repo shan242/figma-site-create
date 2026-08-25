@@ -361,6 +361,87 @@ test("SCALE-constrained nodes reflow as % of design width, vertical stays px", a
   assert.ok(html.includes("top: 200px; width: 50px; height: auto; left: 20px"), "unconstrained node keeps design px");
 });
 
+test("children of a clickable GROUP inherit its NAVIGATE interaction", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rep-grouplink-"));
+  mkdirSync(join(dir, "data"));
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      liveBase: "https://example.figma.site",
+      siteTitle: "T",
+      pages: [
+        { path: "/", slug: "index", file: "index.html", title: "Home", json: "data/index.json" },
+        { path: "/page-4", slug: "page-4", file: "page-4.html", title: "P4", json: "data/index.json" },
+      ],
+    }),
+  );
+  // The ON_CLICK→NAVIGATE interaction lives on the GROUP (as Figma Sites emits
+  // it), not on the button's background or label — the children must inherit it.
+  writeFileSync(
+    join(dir, "data", "index.json"),
+    JSON.stringify({
+      roots: ["1:1"],
+      nodeById: {
+        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, children: ["1:2"] },
+        "1:2": {
+          id: "1:2", type: "GROUP", name: "Group 58", absoluteBoundingBox: { x: 300, y: 100, width: 180, height: 60 },
+          interactions: [{ event: { interactionType: "ON_CLICK" }, actions: [{ connectionType: "INTERNAL_NODE", navigationType: "NAVIGATE", connectionURL: "/page-4" }] }],
+          children: ["1:3", "1:4"],
+        },
+        "1:3": { id: "1:3", type: "RECTANGLE", name: "pill", absoluteBoundingBox: { x: 300, y: 100, width: 180, height: 60 }, fills: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0, g: 0.2, b: 0.8 } }] },
+        "1:4": { id: "1:4", type: "TEXT", characters: "Click to continue", style: { fontFamily: "Inter", fontSize: 14 }, absoluteBoundingBox: { x: 310, y: 110, width: 160, height: 20 } },
+      },
+    }),
+  );
+  await buildSite(dir);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  const links = [...html.matchAll(/<a href="page-4\.html"[^>]*>/g)];
+  assert.equal(links.length, 2, "pill background and label both link to the group's target");
+  assert.ok(/Click to continue\s*<\/a>/.test(html), "label renders inside an anchor");
+});
+
+test("RECTANGLE and SVG with their own NAVIGATE interaction render as anchors", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rep-anchors-"));
+  mkdirSync(join(dir, "data"));
+  mkdirSync(join(dir, "assets"));
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      liveBase: "https://example.figma.site",
+      siteTitle: "T",
+      pages: [
+        { path: "/", slug: "index", file: "index.html", title: "Home", json: "data/index.json" },
+        { path: "/page-5", slug: "page-5", file: "page-5.html", title: "P5", json: "data/index.json" },
+      ],
+    }),
+  );
+  writeFileSync(
+    join(dir, "data", "index.json"),
+    JSON.stringify({
+      roots: ["1:1"],
+      nodeById: {
+        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, children: ["1:2", "1:3"] },
+        "1:2": {
+          id: "1:2", type: "RECTANGLE", name: "next", absoluteBoundingBox: { x: 20, y: 300, width: 200, height: 60 },
+          interactions: [{ event: { interactionType: "ON_CLICK" }, actions: [{ connectionType: "INTERNAL_NODE", navigationType: "NAVIGATE", connectionURL: "/page-5" }] }],
+          fills: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0.9, g: 0.9, b: 0.9 } }],
+        },
+        "1:3": {
+          id: "1:3", type: "SVG", name: "arrow", hash: "bb33cc44", absoluteBoundingBox: { x: 20, y: 20, width: 40, height: 40 },
+          interactions: [{ event: { interactionType: "ON_CLICK" }, actions: [{ connectionType: "INTERNAL_NODE", navigationType: "NAVIGATE", connectionURL: "/page-5" }] }],
+        },
+      },
+    }),
+  );
+  // Distinct asset hash: svgGeometry caches parsed geometry per hash in a
+  // module-level map, so reusing another test's hash would poison that test.
+  writeFileSync(join(dir, "assets", "bb33cc44.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"></svg>');
+  await buildSite(dir);
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  assert.ok(html.includes('<a href="page-5.html" style="position: absolute; top: 300px'), "interactive RECTANGLE renders as an anchor");
+  assert.ok(html.includes('<a href="page-5.html"><img src="assets/bb33cc44.svg"'), "interactive SVG renders as an anchor-wrapped img");
+});
+
 test("fluid canvas: CENTER nodes stay centered, plain nodes keep px, body follows canvas bg", async () => {
   const dir = mkdtempSync(join(tmpdir(), "rep-center-"));
   mkdirSync(join(dir, "data"));

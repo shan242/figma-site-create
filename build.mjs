@@ -195,10 +195,15 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
 
   const cb = canvas.absoluteBoundingBox;
   const out = [];
+  // childId -> parent node, so a child of a clickable GROUP inherits the
+  // group's NAVIGATE interaction (buttons keep their interaction on the group).
+  const parentOf = new Map();
+  for (const n of all) for (const c of n.children || []) parentOf.set(c, n);
   const ctx = {
     assetDir,
     pathToFile,
     fontStack,
+    parentOf,
     edits: new Map(EDITS.filter((e) => e.slug === page.slug).map((e) => [e.nodeId, e])),
     nodeStyles: new Map(NODE_STYLES.filter((s) => s.slug === page.slug).map((s) => [s.nodeId, s.style])),
   };

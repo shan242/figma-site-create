@@ -85,9 +85,16 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   white-space:pre-wrap; line-height:normal; margin:0">` blocks with no gap; blank
   lines become `<p>&#8203;</p>` (zero-width space preserves the line).
 - **Links & nav state are data-driven, not page-derived**:
-  - A text node becomes `<a>` **only** when `node.interactions` has
-    `ON_CLICK` / `INTERNAL_NODE` / `NAVIGATE` with a `connectionURL`. `linkHref()`
-    maps the live path (`/history--culture`) to the local file via the manifest.
+  - A node becomes `<a>` when it — or the GROUP wrapping it — has
+    `ON_CLICK` / `INTERNAL_NODE` / `NAVIGATE` with a `connectionURL`. Figma puts the
+    interaction on the **group** that wraps a button's background + label (not on the
+    label), so `linkHref()` walks the ancestor chain via the page's `parentOf` map;
+    a node that has interactions of its own owns its click and never inherits.
+    `linkHref()` maps the live path (`/history--culture`) to the local file via the
+    manifest. The live site renders each interactive node as an anchor, so besides
+    text, a `RECTANGLE`/`IMAGE` with a target renders as an `<a>` carrying its fill,
+    and an interactive `SVG` renders as an anchor-wrapped `<img>` — that restores the
+    pill buttons and next/arrow hotspots that carry no interaction of their own.
   - The "active" nav item is the node whose `style.textDecoration === "UNDERLINE"`
     (rendered underline + Extra Bold in the design). Do NOT compute it from "which
     page are we on" — the design data is the source of truth. Some pages have zero

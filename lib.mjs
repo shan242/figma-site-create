@@ -182,17 +182,26 @@ export function textRuns(node) {
   return { chars, runs };
 }
 
-// A text node becomes a clickable <a> only when the design has an ON_CLICK /
-// NAVIGATE interaction — that is what Figma Sites turns into an anchor.
-// pathToFile maps live paths ("/history--culture") to local files.
-export function linkHref(node, pathToFile) {
-  for (const it of node.interactions || []) {
-    if (it.event?.interactionType !== "ON_CLICK") continue;
-    for (const a of it.actions || []) {
-      if (a.connectionType === "INTERNAL_NODE" && a.navigationType === "NAVIGATE" && a.connectionURL) {
-        return pathToFile[a.connectionURL] || null;
+// A node becomes a clickable <a> when it — or a GROUP wrapping it — carries an
+// ON_CLICK / NAVIGATE interaction; that is what Figma Sites turns into an anchor.
+// Figma frequently puts the interaction on the group that wraps a button's
+// background + label rather than on the label itself, so the lookup walks up
+// the ancestor chain. A node that has interactions of its own owns its click:
+// even if none navigate, we don't fall through to an ancestor's.
+// parentOf maps childId -> parent node; pathToFile maps live paths to local files.
+export function linkHref(node, pathToFile, parentOf) {
+  let cur = node;
+  while (cur) {
+    for (const it of cur.interactions || []) {
+      if (it.event?.interactionType !== "ON_CLICK") continue;
+      for (const a of it.actions || []) {
+        if (a.connectionType === "INTERNAL_NODE" && a.navigationType === "NAVIGATE" && a.connectionURL) {
+          return pathToFile[a.connectionURL] || null;
+        }
       }
     }
+    if (cur.interactions?.length) break;
+    cur = parentOf ? parentOf.get(cur.id) : null;
   }
   return null;
 }
@@ -425,6 +434,9 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // AI node-style overlay (edit_node): raw CSS props merged after the computed
   // style so they override whatever the renderer derived, for any node type.
   const overlay = ctx.nodeStyles?.get(node.id);
+  // Click target for this node: its own NAVIGATE interaction, or the nearest
+  // ancestor GROUP's (buttons are groups whose interaction lives on the group).
+  const href = linkHref(node, pathToFile, ctx.parentOf);
 
   if (tag === "SVG" && node.isLine) {
     const st = nodeStyle(node, canvas, fontStack, assetUrl);
@@ -435,7 +447,8 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     st.background = col;
     delete st["border-radius"];
     applyScaleH(node, st, canvas);
-    out.push(`  <div class="line" style="${cssText(st)}"></div>`);
+    const line = `  <div class="line" style="${cssText(st)}"></div>`;
+    out.push(href ? `  <a href="${href}">${line}</a>` : line);
     return;
   }
 
@@ -453,7 +466,8 @@ export function renderNode(node, nodes, canvas, out, ctx) {
         st.height = `${geo.h}px`;
       }
       applyScaleH(node, st, canvas);
-      out.push(`  <img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}" />`);
+      const img = `<img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}" />`;
+      out.push(href ? `  <a href="${href}">${img}</a>` : img);
     }
     return;
   }
@@ -464,9 +478,9 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     if (overlay) Object.assign(st, overlay);
     applyScaleH(node, st, canvas);
     // The "active" nav item (current page) carries textDecoration UNDERLINE
-    // plus Extra Bold in the design; items with a NAVIGATE interaction are
-    // links. Both come from the Figma data, not from which page we are on.
-    const href = linkHref(node, pathToFile);
+    // plus Extra Bold in the design; items with a NAVIGATE interaction (on the
+    // node or its wrapping group) are links. Both come from the Figma data,
+    // not from which page we are on.
     const isActive = node.style?.textDecoration === "UNDERLINE";
     const wrapOpen = href
       ? `  <a href="${href}" class="nav-link" style="${cssText(st)}">`
@@ -517,7 +531,13 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st["background-position"] = "center";
     }
     applyScaleH(node, st, canvas);
-    out.push(`  <div style="${cssText(st)}"></div>`);
+    // The live site renders each interactive node (rect button, hotspot
+    // marker, …) as an <a>; an interactive group's children link to its target.
+    if (href) {
+      out.push(`  <a href="${href}" style="${cssText(st)}"></a>`);
+    } else {
+      out.push(`  <div style="${cssText(st)}"></div>`);
+    }
     return;
   }
 }
