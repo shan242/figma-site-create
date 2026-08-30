@@ -282,7 +282,6 @@ export async function buildSite(outDirParam) {
 body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
 .canvas { position: relative; margin: 0 auto; }
 .nav-link { text-decoration: none; }
-.nav-link:not(.nav-active):hover { text-decoration-line: underline; text-underline-position: from-font; }
 .nav-active { cursor: default; }
 .line { position: absolute; }
 .wordcloud { position: absolute; }

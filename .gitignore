@@ -2,6 +2,7 @@
 packaged/
 electron/dist/
 electron/worker.cjs
+/worker.cjs
 replica-out/
 
 # Dependencies

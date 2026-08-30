@@ -99,19 +99,30 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
     (rendered underline + Extra Bold in the design). Do NOT compute it from "which
     page are we on" — the design data is the source of truth. Some pages have zero
     nav links at all.
+  - The shared stylesheet adds **no hover underline** (`.nav-link` is only
+    `text-decoration: none`) — the live site's global CSS is `a{text-decoration:none}`
+    with no `:hover` text-decoration anywhere. Don't re-add a `.nav-link:hover`
+    rule; a button that looks underlined on hover in a local build is a bug.
 - **Images**: `RECTANGLE`/`IMAGE` become background-image divs (`cover`/`center`).
   Mask-group images carry their asset in `node.hash`, not in fills — check `node.hash`
   when `fills` has no imageRef. Vector icons (SVG node) become `<img>` of a generated
-  `.svg` asset.
-- **SVG assets render at NATURAL size, content-aligned to the design box**: Figma bakes
-  a drop shadow / effect into the SVG by adding a gutter, so the asset is larger than
-  the node's `absoluteBoundingBox` and the drawing content sits at an offset
-  `(offX, offY)` inside it (e.g. a 256×376 card ships as a 276×396 SVG with content at
-  (10,4)). The live site renders such `<img>`s at the asset's natural size positioned
-  `left = designLeft - offX`, `top = designTop - offY`; `lib.mjs` does the same
-  (`svgGeometry` parses width/height + min content point, content-addressable cache).
-  Forcing the design box would clip the shadow gutter — that was the flat-card bug.
-  Only kicks in when natural ≠ bbox; plain icons render at the bbox as before.
+  `.svg` asset. **`IMAGE` nodes are borderless**: the exporter bakes their stroke
+  into the asset bytes (the dashed ocean ellipses ship as PNGs with the dashed ring
+  drawn in), and the live site paints no CSS border on them — adding one put a solid
+  square frame around the dashed circle.
+- **SVG assets render at Figma's `isolatedAbsoluteRenderBounds`, not the design box**:
+  the exporter bakes effects (drop-shadow gutters) into the SVG **or** crops it to the
+  drawing (the page-5 triangle polygon ships as a 46×36 asset inside a 64×53 design
+  box), so the asset size ≠ `absoluteBoundingBox` in both directions. The live site
+  places the `<img>` at Figma's own isolated render bounds (a 256×376 card ships as a
+  276×396 SVG — shadow gutter; a cropped vector sits at the content box). `lib.mjs`
+  uses `node.isolatedAbsoluteRenderBounds` when it differs from the bbox (fallback:
+  `svgGeometry` parses the asset's width/height + min content point). **Rotated
+  vectors are excluded** (`isNodeRotated` on `relativeTransform`) — the live site
+  renders those with a CSS transform inside the design box, which the static renderer
+  doesn't replicate, so they keep the SVG-parse path. Also, SVG `<img>`s never carry a
+  `background-color` from `node.fills` — the vector's fill/opacity is baked into the
+  asset; painting the fill as a background turned a transparent triangle into a square.
 - **Lines**: an SVG node with `isLine` becomes a 1px `<div>` (not `<hr>`).
 - **No renderer-side effects/shadows** — a deliberate replica choice. The renderer adds
   no CSS box-shadow or filter; the only shadows that appear are ones Figma baked into
@@ -157,6 +168,10 @@ contains rich-text spans — that's a capture artifact, not a rendering bug.
   with a clear message. Publish in Figma first.
 - **No `guidToUrl`** → `scrape.mjs` falls back to BFS over nav `interactions`.
 - **Missing assets** → tried under every extension; some hashes genuinely 404.
+  `scrape.mjs` now **retries the primary extension on transient 5xx/timeout
+  errors before probing alt extensions** (a dropped 6MB map would otherwise leave
+  the built page white), and **verifies every referenced hash landed on disk**,
+  warning loudly about stragglers. If an asset is still missing, re-scrape.
 - **Rare node types** (vectors, groups with effects) → skipped by `renderNode`; the
   replica renders what the proven path handles. Extend `lib.mjs`, not `build.mjs`.
 - **New font families** → add to `GOOGLE_FONTS` only if Google Fonts serves them;

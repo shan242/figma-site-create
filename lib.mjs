@@ -144,10 +144,15 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
     const fill = (node.fills || []).find((f) => f.visible && f.opacity !== 0);
     Object.assign(st, fillToCss(fill, assetUrl) ?? {});
     if (node.cornerRadius) st["border-radius"] = `${node.cornerRadius}px`;
-    if (node.strokes?.length) {
+    // IMAGE nodes (raster exports of shapes like the dashed ocean ellipses)
+    // render borderless: their stroke is baked into the asset bytes by the
+    // exporter, and the live site draws no CSS border on them. Painting one on
+    // top produced a solid square ring around the dashed circle.
+    if (node.strokes?.length && node.type !== "IMAGE") {
       const strk = node.strokes[0];
       const color = fmtColor(strk.color, strk.opacity);
-      st.border = `${node.strokeWeight || 1}px solid ${color}`;
+      const style = node.strokeDashes?.length ? "dashed" : "solid";
+      st.border = `${node.strokeWeight || 1}px ${style} ${color}`;
     }
   }
   return st;
@@ -406,6 +411,20 @@ function shiftLeft(leftCss, dx) {
   return leftCss;
 }
 
+// True when the node's relativeTransform 2x2 carries anything but a pure
+// translation (rotation, flip, scale). The live site renders such vectors with
+// a CSS transform inside the design box, which this static renderer doesn't
+// replicate — used to keep them on the SVG-parse sizing path instead of the
+// renderBounds one.
+function isNodeRotated(node) {
+  const t = node.relativeTransform;
+  if (!t?.[0] || !t?.[1]) return false;
+  const [a, b] = t[0];
+  const [c, d] = t[1];
+  const eps = 1e-6;
+  return Math.abs(a - 1) > eps || Math.abs(b) > eps || Math.abs(c) > eps || Math.abs(d - 1) > eps;
+}
+
 // Reflow a node whose Figma horizontal constraint is SCALE: the published site
 // positions it as a percentage of the design width, so it stretches with the
 // fluid canvas (width:100%; min-width:designW). Vertical stays at design px —
@@ -458,13 +477,44 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       const st = nodeStyle(node, canvas, fontStack, assetUrl);
       if (overlay) Object.assign(st, overlay);
       st.display = "block";
-      const geo = svgGeometry(assetDir, node.hash);
-      if (geo && (Math.abs(geo.w - bb.width) > 0.5 || Math.abs(geo.h - bb.height) > 0.5)) {
-        st.left = shiftLeft(st.left, geo.offX);
-        st.top = `${Math.round(bb.y - canvas.y) - geo.offY}px`;
-        st.width = `${geo.w}px`;
-        st.height = `${geo.h}px`;
+      // The live site places vector assets at Figma's own isolated render
+      // bounds, which account for both baked-in effects (asset larger than the
+      // design box) and cropped content (asset smaller, e.g. the page-5
+      // triangle polygon whose SVG is trimmed to the drawing). Prefer that
+      // authoritative box; fall back to parsing the SVG file for old data.
+      const rb = node.isolatedAbsoluteRenderBounds;
+      // Rotated vectors (relativeTransform carries a rotation matrix) are
+      // rendered by the live site with a CSS transform inside the design box —
+      // not at renderBounds — so leave them on the SVG-parse path below rather
+      // than misplacing them at the axis-aligned content box.
+      const rotated = isNodeRotated(node);
+      if (!rotated && rb && (Math.abs(rb.width - bb.width) > 0.5 || Math.abs(rb.height - bb.height) > 0.5)) {
+        const rLeft = Math.round((rb.x - canvas.x) * 1000) / 1000;
+        const rTop = Math.round((rb.y - canvas.y) * 1000) / 1000;
+        st.top = `${rTop}px`;
+        st.width = `${Math.round(rb.width * 1000) / 1000}px`;
+        st.height = `${Math.round(rb.height * 1000) / 1000}px`;
+        if (node.constraints?.horizontal === "CENTER") {
+          const off = rLeft - Math.round(canvas.width) / 2;
+          st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off * 1000) / 1000)}px)`;
+        } else {
+          st.left = `${rLeft}px`;
+        }
+      } else {
+        const geo = svgGeometry(assetDir, node.hash);
+        if (geo && (Math.abs(geo.w - bb.width) > 0.5 || Math.abs(geo.h - bb.height) > 0.5)) {
+          st.left = shiftLeft(st.left, geo.offX);
+          st.top = `${Math.round(bb.y - canvas.y) - geo.offY}px`;
+          st.width = `${geo.w}px`;
+          st.height = `${geo.h}px`;
+        }
       }
+      // The vector's fill (and any node-level opacity) is baked into the SVG
+      // asset itself; nodeStyle derives a background-color from the node's
+      // fills, which would paint a solid rectangle behind a transparent
+      // polygon (the page-5 triangle looked like a square).
+      delete st["background-color"];
+      delete st["background-image"];
       applyScaleH(node, st, canvas);
       const img = `<img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}" />`;
       out.push(href ? `  <a href="${href}">${img}</a>` : img);

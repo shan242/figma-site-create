@@ -21,7 +21,7 @@
 //     covering every page, so a single fetch yields full page discovery.
 //   - Assets are served at /_assets/v11/<hash>.<ext>; some .png-named files
 //     are actually JPEG bytes, so extensions are sniffed from magic bytes.
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { generateDesignReport } from "./design-report.mjs";
 
@@ -59,7 +59,13 @@ function resolveSiteUrl(raw) {
 
 async function get(url, { asText = true } = {}) {
   const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
+  if (!res.ok) {
+    // Attach the status so callers can tell a definitive 4xx (missing file,
+    // no point retrying) from a transient 5xx/network error (retry helps).
+    const err = new Error(`${res.status} ${res.statusText} for ${url}`);
+    err.status = res.status;
+    throw err;
+  }
   return asText ? res.text() : Buffer.from(await res.arrayBuffer());
 }
 
@@ -196,10 +202,22 @@ export async function scrapeSite(outDir, urlArg) {
   let downloaded = 0, failedAssets = 0;
   const results = await runPool(entries, async ({ hash, ext }) => {
     const guess = ext || "png";
+    const primary = `${origin}/_assets/v11/${hash}.${guess}`;
     let buf;
-    try {
-      buf = await get(`${origin}/_assets/v11/${hash}.${guess}`, { asText: false });
-    } catch {
+    // Retry the primary extension before assuming the asset is missing. A
+    // transient 5xx/timeout on a large file (the 6MB page.html base map) must
+    // not be treated as "not found" — the old code fell straight into the
+    // alt-extension probe and silently dropped the asset, leaving the built
+    // page with a white background and no map.
+    for (let t = 0; t < 3 && !buf; t++) {
+      try {
+        buf = await get(primary, { asText: false });
+      } catch (e) {
+        if (e?.status >= 400 && e?.status < 500) break; // definitive 404 — skip retries
+        if (t < 2) await sleep(400 * (t + 1));
+      }
+    }
+    if (!buf) {
       // Some assets only exist under a different extension.
       for (const alt of ["png", "jpg", "svg", "webp", "gif"]) {
         if (alt === guess) continue;
@@ -210,8 +228,8 @@ export async function scrapeSite(outDir, urlArg) {
           /* try next */
         }
       }
-      if (!buf) return { hash, error: "not found" };
     }
+    if (!buf) return { hash, error: "not found" };
     const real = sniffExt(buf) || guess;
     writeFileSync(join(outDir, "assets", `${hash}.${real}`), buf);
     return { hash, real };
@@ -219,6 +237,16 @@ export async function scrapeSite(outDir, urlArg) {
   for (const r of results) {
     if (r.error) { failedAssets++; console.warn(`  ⚠ asset ${r.hash}: ${r.error}`); }
     else downloaded++;
+  }
+  // Integrity check: every referenced hash must have landed on disk. A missed
+  // download (transient failure, wrong ext guess) would otherwise surface only
+  // later as a broken image in the built pages.
+  const onDisk = new Set();
+  for (const f of readdirSync(join(outDir, "assets"))) onDisk.add(f.split(".")[0]);
+  const stillMissing = [...allHashes.keys()].filter((h) => !onDisk.has(h));
+  if (stillMissing.length) {
+    failedAssets += stillMissing.length;
+    console.warn(`  ⚠ ${stillMissing.length} asset(s) missing from disk: ${stillMissing.join(", ")}`);
   }
   console.log(`  ✓ assets: ${downloaded} downloaded${failedAssets ? `, ${failedAssets} failed` : ""}`);
 
