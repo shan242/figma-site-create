@@ -7,7 +7,7 @@
 // lib.mjs; this file decides fonts + page wiring.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { join, basename, resolve, sep } from "node:path";
-import { fillToCss, cssText, renderNode, collectAll, escapeHtml } from "./lib.mjs";
+import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
 
 // Populated inside main() so the packaged CLI can normalize argv first.
@@ -231,7 +231,7 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
   const cloudBottom = clouds.length ? Math.max(...clouds.map((c) => Math.round(c.rect.top) + Math.round(c.rect.height))) : 0;
   const canvasHeight = Math.max(Math.round(cb.height), cloudBottom);
 
-  const bg = fillToCss((canvas.fills || []).find((f) => f.visible)) ?? {};
+  const bg = fillToCss((canvas.fills || []).find((f) => f.visible), makeAssetUrl(assetDir)) ?? {};
   // Fluid canvas: the live site renders width:100% with a min-width equal to
   // the design width, so the page fills the viewport and only shrinks below
   // the design width when the viewport is narrower. The body background follows
