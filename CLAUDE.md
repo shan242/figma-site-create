@@ -106,10 +106,11 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
 - **Images**: `RECTANGLE`/`IMAGE` become background-image divs (`cover`/`center`).
   Mask-group images carry their asset in `node.hash`, not in fills — check `node.hash`
   when `fills` has no imageRef. Vector icons (SVG node) become `<img>` of a generated
-  `.svg` asset. **`IMAGE` nodes are borderless**: the exporter bakes their stroke
-  into the asset bytes (the dashed ocean ellipses ship as PNGs with the dashed ring
-  drawn in), and the live site paints no CSS border on them — adding one put a solid
-  square frame around the dashed circle.
+  `.svg` asset. **`IMAGE` and `SVG` nodes carry no CSS fill or border**: the exporter
+  bakes their fill, stroke, and shadow into the asset bytes (the dashed ocean ellipses
+  ship as PNGs with the dashed ring drawn in; the page-6 curves and page-28 dots are
+  SVGs whose stroke is baked in). The live site paints no CSS on them — adding a
+  fill/border put a solid square behind circles, curves, and dots.
 - **SVG assets render at Figma's `isolatedAbsoluteRenderBounds`, not the design box**:
   the exporter bakes effects (drop-shadow gutters) into the SVG **or** crops it to the
   drawing (the page-5 triangle polygon ships as a 46×36 asset inside a 64×53 design
@@ -118,11 +119,13 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   276×396 SVG — shadow gutter; a cropped vector sits at the content box). `lib.mjs`
   uses `node.isolatedAbsoluteRenderBounds` when it differs from the bbox (fallback:
   `svgGeometry` parses the asset's width/height + min content point). **Rotated
-  vectors are excluded** (`isNodeRotated` on `relativeTransform`) — the live site
-  renders those with a CSS transform inside the design box, which the static renderer
-  doesn't replicate, so they keep the SVG-parse path. Also, SVG `<img>`s never carry a
-  `background-color` from `node.fills` — the vector's fill/opacity is baked into the
-  asset; painting the fill as a background turned a transparent triangle into a square.
+  vectors** (`isNodeRotated` on `relativeTransform`) are rendered at natural size,
+  centered on the isolated render bounds, with Figma's rotation applied as a CSS
+  `transform: matrix(a, c, b, d, 0, 0)` (`transform-origin: center`) — the 90°
+  Horizontal/Vertical toggle renders vertical, and page-6's ~8° curves get their
+  subtle tilt. Also, SVG `<img>`s never carry a `background-color` from `node.fills` —
+  the vector's fill/opacity is baked into the asset; painting the fill as a background
+  turned a transparent triangle into a square.
 - **Lines**: an SVG node with `isLine` becomes a 1px `<div>` (not `<hr>`).
 - **No renderer-side effects/shadows** — a deliberate replica choice. The renderer adds
   no CSS box-shadow or filter; the only shadows that appear are ones Figma baked into

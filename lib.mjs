@@ -141,18 +141,21 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
     st["justify-content"] = s.textAlignVertical === "CENTER" ? "center" : s.textAlignVertical === "BOTTOM" ? "flex-end" : "flex-start";
   } else {
     if (opacity < 1) st.opacity = opacity;
-    const fill = (node.fills || []).find((f) => f.visible && f.opacity !== 0);
-    Object.assign(st, fillToCss(fill, assetUrl) ?? {});
-    if (node.cornerRadius) st["border-radius"] = `${node.cornerRadius}px`;
-    // IMAGE nodes (raster exports of shapes like the dashed ocean ellipses)
-    // render borderless: their stroke is baked into the asset bytes by the
-    // exporter, and the live site draws no CSS border on them. Painting one on
-    // top produced a solid square ring around the dashed circle.
-    if (node.strokes?.length && node.type !== "IMAGE") {
-      const strk = node.strokes[0];
-      const color = fmtColor(strk.color, strk.opacity);
-      const style = node.strokeDashes?.length ? "dashed" : "solid";
-      st.border = `${node.strokeWeight || 1}px ${style} ${color}`;
+    // IMAGE and SVG nodes are raster/vector assets whose fill and stroke are
+    // baked into the asset bytes by the exporter; the live site renders them as
+    // a bare <img>/background with no CSS fill or border. Painting a fill or
+    // stroke on top added a solid rectangle behind circles/curves/dots.
+    const isAsset = node.type === "IMAGE" || node.type === "SVG";
+    if (!isAsset) {
+      const fill = (node.fills || []).find((f) => f.visible && f.opacity !== 0);
+      Object.assign(st, fillToCss(fill, assetUrl) ?? {});
+      if (node.cornerRadius) st["border-radius"] = `${node.cornerRadius}px`;
+      if (node.strokes?.length) {
+        const strk = node.strokes[0];
+        const color = fmtColor(strk.color, strk.opacity);
+        const style = node.strokeDashes?.length ? "dashed" : "solid";
+        st.border = `${node.strokeWeight || 1}px ${style} ${color}`;
+      }
     }
   }
   return st;
@@ -483,12 +486,35 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       // triangle polygon whose SVG is trimmed to the drawing). Prefer that
       // authoritative box; fall back to parsing the SVG file for old data.
       const rb = node.isolatedAbsoluteRenderBounds;
-      // Rotated vectors (relativeTransform carries a rotation matrix) are
-      // rendered by the live site with a CSS transform inside the design box —
-      // not at renderBounds — so leave them on the SVG-parse path below rather
-      // than misplacing them at the axis-aligned content box.
       const rotated = isNodeRotated(node);
-      if (!rotated && rb && (Math.abs(rb.width - bb.width) > 0.5 || Math.abs(rb.height - bb.height) > 0.5)) {
+      if (rotated) {
+        // Rotated vectors (e.g. the 90° Horizontal/Vertical toggle) are drawn
+        // by the live site with a CSS transform matrix inside the design box.
+        // Replicate it: center the unrotated asset on the isolated render
+        // bounds (which already cover the baked shadow/overflow), then apply
+        // Figma's rotation matrix in place. transform-origin defaults to the
+        // element center, so rotating around center lands the content on that
+        // box. Figma's [[a,b],[c,d]] maps to CSS matrix(a, c, b, d).
+        const t = node.relativeTransform;
+        const geo = svgGeometry(assetDir, node.hash);
+        const w = geo ? geo.w : bb.width;
+        const h = geo ? geo.h : bb.height;
+        const box = rb || bb;
+        const cx = box.x + box.width / 2 - canvas.x;
+        const cy = box.y + box.height / 2 - canvas.y;
+        const leftPx = Math.round((cx - w / 2) * 1000) / 1000;
+        st.top = `${Math.round((cy - h / 2) * 1000) / 1000}px`;
+        st.width = `${w}px`;
+        st.height = `${h}px`;
+        if (node.constraints?.horizontal === "CENTER") {
+          const off = leftPx - Math.round(canvas.width) / 2;
+          st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off * 1000) / 1000)}px)`;
+        } else {
+          st.left = `${leftPx}px`;
+        }
+        st.transform = `matrix(${t[0][0]}, ${t[1][0]}, ${t[0][1]}, ${t[1][1]}, 0, 0)`;
+        st["transform-origin"] = "center";
+      } else if (rb && (Math.abs(rb.width - bb.width) > 0.5 || Math.abs(rb.height - bb.height) > 0.5)) {
         const rLeft = Math.round((rb.x - canvas.x) * 1000) / 1000;
         const rTop = Math.round((rb.y - canvas.y) * 1000) / 1000;
         st.top = `${rTop}px`;
