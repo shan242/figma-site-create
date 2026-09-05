@@ -108,6 +108,7 @@ function fontUsages() {
 const weightOf = (s) => {
   const str = (s || "").toLowerCase();
   if (str.includes("extra bold")) return 800;
+  if (str.includes("black")) return 900;
   if (str.includes("semibold") || str.includes("semi bold")) return 600;
   if (str.includes("bold")) return 700;
   if (str.includes("medium")) return 500;
@@ -132,8 +133,11 @@ function planFonts() {
     }
   }
   for (const [name, info] of namedFonts) {
-    const fam = name.split(":")[0];
-    if (!GOOGLE_FONTS.has(fam)) selfHost.set(name, info);
+    // Self-host every family the site ships its own woff2 for — even when the
+    // family also exists on Google Fonts (e.g. this site's "Inter:Bold"). The
+    // site's subset has Figma-exact metrics; Google's full face is a hair wider
+    // and wrapped single-line labels like "Horizontal" a character early.
+    selfHost.set(name, info);
   }
   return { google, selfHost, hasCJK: HAS_CJK };
 }

@@ -51,6 +51,7 @@ export const fillToCss = (fill, assetUrl) => {
 export const fontStyleToWeight = (s) => {
   const str = (s || "").toLowerCase();
   if (str.includes("extra bold")) return 800;
+  if (str.includes("black")) return 900;
   if (str.includes("semibold") || str.includes("semi bold")) return 600;
   if (str.includes("bold")) return 700;
   if (str.includes("medium")) return 500;
