@@ -488,6 +488,19 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       // authoritative box; fall back to parsing the SVG file for old data.
       const rb = node.isolatedAbsoluteRenderBounds;
       const rotated = isNodeRotated(node);
+      if (href && !rotated) {
+        // An interactive SVG renders as an <a> covering the node's FULL
+        // absoluteBoundingBox with the asset stretched inside it. The nav
+        // hotspots ship as empty 32×32 SVGs inside huge (1253×933) hit areas;
+        // sizing the <a> to the natural asset shrank the click target to a
+        // tiny corner and dropped the navigation.
+        delete st["background-color"];
+        delete st["background-image"];
+        applyScaleH(node, st, canvas);
+        const fill = `<img src="${assetUrl(node.hash)}" alt="" style="width: 100%; height: 100%; display: block" />`;
+        out.push(`  <a href="${href}" style="${cssText(st)}">${fill}</a>`);
+        return;
+      }
       if (rotated) {
         // Rotated vectors (e.g. the 90° Horizontal/Vertical toggle) are drawn
         // by the live site with a CSS transform matrix inside the design box.
