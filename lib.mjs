@@ -504,11 +504,10 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       if (rotated) {
         // Rotated vectors (e.g. the 90° Horizontal/Vertical toggle) are drawn
         // by the live site with a CSS transform matrix inside the design box.
-        // Replicate it: center the unrotated asset on the isolated render
-        // bounds (which already cover the baked shadow/overflow), then apply
-        // Figma's rotation matrix in place. transform-origin defaults to the
-        // element center, so rotating around center lands the content on that
-        // box. Figma's [[a,b],[c,d]] maps to CSS matrix(a, c, b, d).
+        // Replicate it: position the unrotated asset on the isolated render
+        // bounds (which cover the baked shadow/overflow), then apply Figma's
+        // rotation matrix around the design-box (bbox) center. Figma's
+        // [[a,b],[c,d]] maps to CSS matrix(a, c, b, d).
         const t = node.relativeTransform;
         const geo = svgGeometry(assetDir, node.hash);
         const w = geo ? geo.w : bb.width;
@@ -517,7 +516,8 @@ export function renderNode(node, nodes, canvas, out, ctx) {
         const cx = box.x + box.width / 2 - canvas.x;
         const cy = box.y + box.height / 2 - canvas.y;
         const leftPx = Math.round((cx - w / 2) * 1000) / 1000;
-        st.top = `${Math.round((cy - h / 2) * 1000) / 1000}px`;
+        const topPx = Math.round((cy - h / 2) * 1000) / 1000;
+        st.top = `${topPx}px`;
         st.width = `${w}px`;
         st.height = `${h}px`;
         if (node.constraints?.horizontal === "CENTER") {
@@ -527,7 +527,13 @@ export function renderNode(node, nodes, canvas, out, ctx) {
           st.left = `${leftPx}px`;
         }
         st.transform = `matrix(${t[0][0]}, ${t[1][0]}, ${t[0][1]}, ${t[1][1]}, 0, 0)`;
-        st["transform-origin"] = "center";
+        // Rotate around the DESIGN box (bbox) center, not the asset's own
+        // center. The asset carries a baked shadow gutter, so its center is
+        // offset from the bbox center; rotating around "center" (the asset's
+        // center) shifted the pill off by that gutter (9,13px on the toggle).
+        const originX = Math.round((bb.x + bb.width / 2 - canvas.x - leftPx) * 1000) / 1000;
+        const originY = Math.round((bb.y + bb.height / 2 - canvas.y - topPx) * 1000) / 1000;
+        st["transform-origin"] = `${originX}px ${originY}px`;
       } else if (rb && (Math.abs(rb.width - bb.width) > 0.5 || Math.abs(rb.height - bb.height) > 0.5)) {
         const rLeft = Math.round((rb.x - canvas.x) * 1000) / 1000;
         const rTop = Math.round((rb.y - canvas.y) * 1000) / 1000;
