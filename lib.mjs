@@ -140,14 +140,9 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
     const fill = (node.fills || []).find((f) => f.visible);
     const color = fill ? fmtColor(fill.color, fill.opacity) : null;
     if (color) st.color = color;
-    // Top-aligned text stays display:block (like the live <p>); flex is only
-    // needed to vertically center/bottom-align. Flex centering could shift
-    // centered single-line text a hair vs block + text-align.
-    if (s.textAlignVertical === "CENTER" || s.textAlignVertical === "BOTTOM") {
-      st.display = "flex";
-      st["flex-direction"] = "column";
-      st["justify-content"] = s.textAlignVertical === "CENTER" ? "center" : "flex-end";
-    }
+    st.display = "flex";
+    st["flex-direction"] = "column";
+    st["justify-content"] = s.textAlignVertical === "CENTER" ? "center" : s.textAlignVertical === "BOTTOM" ? "flex-end" : "flex-start";
   } else {
     if (opacity < 1) st.opacity = opacity;
     // IMAGE and SVG nodes are raster/vector assets whose fill and stroke are
@@ -472,11 +467,35 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   if (tag === "SVG" && node.isLine) {
     const st = nodeStyle(node, canvas, fontStack, assetUrl);
     if (overlay) Object.assign(st, overlay);
-    st.height = `${node.strokeWeight || 1}px`;
-    st.top = `${Math.round(bb.y - canvas.y - (node.strokeWeight || 1) / 2)}px`;
     const col = fmtColor(node.strokes?.[0]?.color);
     st.background = col;
     delete st["border-radius"];
+    const thick = node.strokeWeight || 1;
+    // The line's length lives in `size.x`; a rotated line (e.g. a vertical
+    // separator between "Male" and "Female") has bbox.width≈0, so using the
+    // bbox width dropped the whole line to 0×1px and it vanished.
+    const len = node.size?.x || bb.width || bb.height;
+    if (isNodeRotated(node)) {
+      // Render at the unrotated length×thickness, centered on the bbox, then
+      // rotate into place (same matrix convention as the SVG branch).
+      st.width = `${len}px`;
+      st.height = `${thick}px`;
+      const leftPx = Math.round((bb.x - canvas.x + bb.width / 2 - len / 2) * 1000) / 1000;
+      st.top = `${Math.round(bb.y - canvas.y + bb.height / 2 - thick / 2)}px`;
+      if (node.constraints?.horizontal === "CENTER") {
+        const off = leftPx - Math.round(canvas.width) / 2;
+        st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off * 1000) / 1000)}px)`;
+      } else {
+        st.left = `${leftPx}px`;
+      }
+      const t = node.relativeTransform;
+      st.transform = `matrix(${t[0][0]}, ${t[1][0]}, ${t[0][1]}, ${t[1][1]}, 0, 0)`;
+      st["transform-origin"] = "center";
+    } else {
+      st.width = `${len}px`;
+      st.height = `${thick}px`;
+      st.top = `${Math.round(bb.y - canvas.y - thick / 2)}px`;
+    }
     applyScaleH(node, st, canvas);
     const line = `  <div class="line" style="${cssText(st)}"></div>`;
     out.push(href ? `  <a href="${href}">${line}</a>` : line);
