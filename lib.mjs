@@ -140,9 +140,14 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
     const fill = (node.fills || []).find((f) => f.visible);
     const color = fill ? fmtColor(fill.color, fill.opacity) : null;
     if (color) st.color = color;
-    st.display = "flex";
-    st["flex-direction"] = "column";
-    st["justify-content"] = s.textAlignVertical === "CENTER" ? "center" : s.textAlignVertical === "BOTTOM" ? "flex-end" : "flex-start";
+    // Top-aligned text stays display:block (like the live <p>); flex is only
+    // needed to vertically center/bottom-align. Flex centering could shift
+    // centered single-line text a hair vs block + text-align.
+    if (s.textAlignVertical === "CENTER" || s.textAlignVertical === "BOTTOM") {
+      st.display = "flex";
+      st["flex-direction"] = "column";
+      st["justify-content"] = s.textAlignVertical === "CENTER" ? "center" : "flex-end";
+    }
   } else {
     if (opacity < 1) st.opacity = opacity;
     // IMAGE and SVG nodes are raster/vector assets whose fill and stroke are
