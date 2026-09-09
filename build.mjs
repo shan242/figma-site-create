@@ -210,9 +210,12 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
     parentOf,
     edits: new Map(EDITS.filter((e) => e.slug === page.slug).map((e) => [e.nodeId, e])),
     nodeStyles: new Map(NODE_STYLES.filter((s) => s.slug === page.slug).map((s) => [s.nodeId, s.style])),
+    // Scroll frames render their subtree themselves; the flat loop must not
+    // render those children a second time at canvas level.
+    handled: new Set(),
   };
   for (const n of all) {
-    if (n === canvas) continue;
+    if (n === canvas || ctx.handled.has(n.id)) continue;
     renderNode(n, nodes, cb, out, ctx);
   }
 

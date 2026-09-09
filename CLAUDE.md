@@ -77,8 +77,14 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
 - **Text**: `font-family` uses **single quotes** (`'Inter', system-ui, sans-serif`).
   The whole style attr is double-quoted, so a double quote inside `font-family`
   breaks the attribute and **silently drops every inline style** on that element.
-  `line-height: normal` (Figma's `lineHeightPx` makes lines cramped). `white-space:
-  pre-wrap`, `word-break: break-word`, `overflow: visible`.
+  `line-height` is `normal` by default, **but a FIXED `lineHeightUnit:"PIXELS"`
+  node renders `line-height: <lineHeightPx>px`** — the live site honors it and
+  dropping it mis-positioned the 70px "39%" stat. `white-space: pre-wrap`,
+  `word-break: break-word`, `overflow: visible`.
+- **Scroll frames**: a `FRAME` with `overflowDirection` (`HORIZONTAL_SCROLLING` /
+  `VERTICAL_SCROLLING`) renders as an `overflow-x/overflow-y: auto` container whose
+  children are positioned relative to the frame — the timeline's 2288px-wide image
+  inside a 1228px frame pans horizontally instead of being clipped into the viewport.
 - **Rich text**: `characterStyleOverrides` + `styleOverrideTable` split a text node
   into inline `<span style="font-weight:/font-size:">` runs (`textRuns()`).
 - **Multi-paragraph text**: split on `\n` into stacked `<p style="display:block;
@@ -120,8 +126,9 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   uses `node.isolatedAbsoluteRenderBounds` when it differs from the bbox (fallback:
   `svgGeometry` parses the asset's width/height + min content point). **Rotated
   vectors** (`isNodeRotated` on `relativeTransform`) are rendered at natural size,
-  centered on the isolated render bounds, with Figma's rotation applied as a CSS
-  `transform: matrix(a, c, b, d, 0, 0)` (`transform-origin: center`) — the 90°
+  positioned on the isolated render bounds, with Figma's rotation applied as a CSS
+  `transform: matrix(a, c, b, d, 0, 0)` around the **design-box (bbox) center** (the
+  asset's own center is offset by its baked shadow gutter) — the 90°
   Horizontal/Vertical toggle renders vertical, and page-6's ~8° curves get their
   subtle tilt. Also, SVG `<img>`s never carry a `background-color` from `node.fills` —
   the vector's fill/opacity is baked into the asset; painting the fill as a background

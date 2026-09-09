@@ -219,15 +219,27 @@ export function createDeepSeekModel(config) {
 
   async function fetchWithRetry(url, opts, signal) {
     for (let attempt = 0; ; attempt++) {
-      const res = await fetch(url, opts);
+      let res;
+      try {
+        res = await fetch(url, opts);
+      } catch (e) {
+        // Network error (connection reset / DNS / TLS) — retry, but never on a
+        // caller- or timeout-initiated abort.
+        if (e.name === "AbortError" || signal?.aborted) throw e;
+        if (attempt < 2) {
+          await sleep(600 * (attempt + 1));
+          continue;
+        }
+        throw e;
+      }
       if (res.status === 429 && attempt < 2) {
         await sleep(800 * (attempt + 1));
-        if (signal.aborted) return res;
+        if (signal?.aborted) return res;
         continue;
       }
       if (res.status >= 500 && res.status < 600 && attempt < 1) {
         await sleep(600);
-        if (signal.aborted) return res;
+        if (signal?.aborted) return res;
         continue;
       }
       return res;
@@ -239,7 +251,16 @@ export function createDeepSeekModel(config) {
     if (toolSchemas?.length) body.tools = toolSchemas;
 
     const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), config.timeoutMs || 90000);
+    const timeoutMs = config.timeoutMs || 120000;
+    // Inactivity timeout: reset on every received chunk. A stream that is
+    // actively producing tokens never trips it, but a stalled connection (or a
+    // model that stops sending) aborts after timeoutMs. The old fixed timer
+    // killed long-running streams at 90s even while data was flowing.
+    let timeout = setTimeout(() => ctrl.abort(), timeoutMs);
+    const bump = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => ctrl.abort(), timeoutMs);
+    };
     const onAbort = () => ctrl.abort();
     signal?.addEventListener("abort", onAbort);
     try {
@@ -262,6 +283,7 @@ export function createDeepSeekModel(config) {
       let content = "";
       const toolBuf = new Map();
       for await (const evt of parseSSE(decodeBody(res.body))) {
+        bump();
         if (evt.type === "content") {
           content += evt.text;
           onEvent?.({ type: "delta", text: evt.text });

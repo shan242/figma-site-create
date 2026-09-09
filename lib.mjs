@@ -115,9 +115,12 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
     const weight = s.fontWeight != null ? s.fontWeight : s.fontStyle ? fontStyleToWeight(s.fontStyle) : 400;
     st["font-weight"] = weight;
     if (s.italic) st["font-style"] = "italic";
-    // The published site renders every text block with the font's natural
-    // line-height; Figma's lineHeightPx makes lines cramped and was dropped.
-    st["line-height"] = "normal";
+    // A FIXED pixel line-height is honored (the live site renders
+    // `line-height: <lineHeightPx>px`, and dropping it mis-positioned the
+    // 70px "39%" stat). Intrinsic/percentage heights fall back to the font's
+    // natural line-height — Figma's default lineHeightPx there made lines
+    // cramped and was dropped.
+    st["line-height"] = s.lineHeightUnit === "PIXELS" && s.lineHeightPx ? `${s.lineHeightPx}px` : "normal";
     if (s.letterSpacing !== 0 && s.fontSize) {
       if (s.letterSpacingUnit === "PIXELS") st["letter-spacing"] = `${s.letterSpacing}px`;
       else st["letter-spacing"] = `${(s.fontSize * s.letterSpacing) / 100}px`;
@@ -565,6 +568,34 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       const img = `<img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}" />`;
       out.push(href ? `  <a href="${href}">${img}</a>` : img);
     }
+    return;
+  }
+
+  // A FRAME whose Figma overflowDirection is a scroll axis becomes a scroll
+  // container (the live site renders overflow-x/overflow-y: auto). Its children
+  // are positioned relative to the frame — e.g. the timeline's 2288px-wide
+  // image inside a 1228px frame pans horizontally instead of being clipped or
+  // stretched into the viewport.
+  if (tag === "FRAME" && node.overflowDirection) {
+    const st = nodeStyle(node, canvas, fontStack, assetUrl);
+    if (overlay) Object.assign(st, overlay);
+    if (node.overflowDirection === "HORIZONTAL_SCROLLING") {
+      st["overflow-x"] = "auto";
+      st["overflow-y"] = "clip";
+    } else if (node.overflowDirection === "VERTICAL_SCROLLING") {
+      st["overflow-y"] = "auto";
+      st["overflow-x"] = "clip";
+    } else {
+      st.overflow = "auto";
+    }
+    out.push(`  <div style="${cssText(st)}">`);
+    for (const childId of node.children || []) {
+      const child = nodes[childId];
+      if (!child) continue;
+      ctx.handled?.add(childId);
+      renderNode(child, nodes, node.absoluteBoundingBox, out, ctx);
+    }
+    out.push("  </div>");
     return;
   }
 
