@@ -637,7 +637,11 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     const wrapOpen = href
       ? `  <a href="${href}" class="nav-link" style="${cssText(st)}">`
       : `  <div${isActive ? ' class="nav-active"' : ""} style="${cssText(st)}">`;
-    const wrapClose = href ? "  </a>" : "  </div>";
+    // No leading whitespace on the closing tag: single-line text is emitted
+    // directly between open and close, and with white-space:pre-wrap those two
+    // indentation spaces became trailing spaces in the text, shifting centered
+    // stats like "71.9" a couple of pixels left.
+    const wrapClose = href ? "</a>" : "</div>";
     // The live site splits multi-paragraph text into stacked <p> blocks with
     // no inter-paragraph gap; blank lines are preserved as <p>&#8203;</p>.
     // characterStyleOverrides mark spans with a different weight/size — those
