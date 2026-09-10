@@ -103,7 +103,11 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
   if (node.type === "TEXT") {
     const s = node.style ?? {};
     st.width = `${w}px`;
-    st.height = "auto";
+    // textAutoResize NONE means the box is FIXED (width + height from the
+    // bbox), so the text is vertically aligned inside it via justify-content.
+    // Using height:auto collapsed the box to the text and dropped the vertical
+    // centering of the big stat numbers (71.9 / 80.6 / 8.8).
+    st.height = s.textAutoResize === "NONE" ? `${h}px` : "auto";
     // Inter text also falls back to Noto Sans SC/JP so CJK glyphs (e.g. 消炎药)
     // render in the same font the published site uses rather than a system font.
     // Single quotes: the whole style attribute is double-quoted, so double
@@ -117,10 +121,15 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
     if (s.italic) st["font-style"] = "italic";
     // A FIXED pixel line-height is honored (the live site renders
     // `line-height: <lineHeightPx>px`, and dropping it mis-positioned the
-    // 70px "39%" stat). Intrinsic/percentage heights fall back to the font's
-    // natural line-height — Figma's default lineHeightPx there made lines
-    // cramped and was dropped.
-    st["line-height"] = s.lineHeightUnit === "PIXELS" && s.lineHeightPx ? `${s.lineHeightPx}px` : "normal";
+    // 70px "39%" stat). A fixed-size box (textAutoResize NONE) uses
+    // `line-height: 0` — the live site lets flex `justify-content: center`
+    // do the vertical work, and an intrinsic line box pushed the stat numbers
+    // (71.9 / 80.6 / 8.8) off-center. Everything else keeps the font's
+    // natural line-height.
+    st["line-height"] =
+      s.lineHeightUnit === "PIXELS" && s.lineHeightPx ? `${s.lineHeightPx}px`
+      : s.textAutoResize === "NONE" ? "0"
+      : "normal";
     if (s.letterSpacing !== 0 && s.fontSize) {
       if (s.letterSpacingUnit === "PIXELS") st["letter-spacing"] = `${s.letterSpacing}px`;
       else st["letter-spacing"] = `${(s.fontSize * s.letterSpacing) / 100}px`;
