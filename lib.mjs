@@ -596,31 +596,42 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     return;
   }
 
-  // A FRAME whose Figma overflowDirection is a scroll axis becomes a scroll
-  // container (the live site renders overflow-x/overflow-y: auto). Its children
-  // are positioned relative to the frame — e.g. the timeline's 2288px-wide
-  // image inside a 1228px frame pans horizontally instead of being clipped or
-  // stretched into the viewport.
-  if (tag === "FRAME" && node.overflowDirection) {
+  // A FRAME draws only when it paints something:
+  //  - overflowDirection makes it a scroll container (the live site renders
+  //    overflow-x/overflow-y: auto) whose children live inside the scroll box
+  //    and are positioned relative to the frame — e.g. the timeline's 2288px
+  //    image panning inside a 1228px frame;
+  //  - otherwise, a fill (e.g. "hero-right-image-container", a FRAME carrying
+  //    an IMAGE fill) paints the frame background — the live site renders it as
+  //    a div with the image. Plain layout frames contribute nothing.
+  if (tag === "FRAME") {
+    const scroll = node.overflowDirection;
+    const hasFill = (node.fills || []).some((f) => f.visible);
+    if (!scroll && !hasFill) return;
     const st = nodeStyle(node, canvas, fontStack, assetUrl);
     if (overlay) Object.assign(st, overlay);
-    if (node.overflowDirection === "HORIZONTAL_SCROLLING") {
+    if (scroll === "HORIZONTAL_SCROLLING") {
       st["overflow-x"] = "auto";
       st["overflow-y"] = "clip";
-    } else if (node.overflowDirection === "VERTICAL_SCROLLING") {
+    } else if (scroll === "VERTICAL_SCROLLING") {
       st["overflow-y"] = "auto";
       st["overflow-x"] = "clip";
-    } else {
+    } else if (scroll) {
       st.overflow = "auto";
     }
-    out.push(`  <div style="${cssText(st)}">`);
-    for (const childId of node.children || []) {
-      const child = nodes[childId];
-      if (!child) continue;
-      ctx.handled?.add(childId);
-      renderNode(child, nodes, node.absoluteBoundingBox, out, ctx);
+    applyScaleH(node, st, canvas);
+    const isLink = !!href;
+    out.push(isLink ? `  <a href="${href}" style="${cssText(st)}">` : `  <div style="${cssText(st)}">`);
+    if (scroll) {
+      // Scroll containers own their subtree: children sit inside the scroll box.
+      for (const childId of node.children || []) {
+        const child = nodes[childId];
+        if (!child) continue;
+        ctx.handled?.add(childId);
+        renderNode(child, nodes, node.absoluteBoundingBox, out, ctx);
+      }
     }
-    out.push("  </div>");
+    out.push(isLink ? "</a>" : "</div>");
     return;
   }
 

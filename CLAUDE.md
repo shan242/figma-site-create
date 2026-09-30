@@ -85,6 +85,13 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   `VERTICAL_SCROLLING`) renders as an `overflow-x/overflow-y: auto` container whose
   children are positioned relative to the frame — the timeline's 2288px-wide image
   inside a 1228px frame pans horizontally instead of being clipped into the viewport.
+- **Frames paint their fills**: a `FRAME` renders a div whenever it has a
+  `overflowDirection` (scroll container, above) **or a visible fill** — e.g.
+  `hero-right-image-container` (a FRAME with an IMAGE fill) and the frosted
+  `card-*` frames (white at 0.7 opacity + corner radius). Skipping plain frames
+  dropped the hero image and the card glass backgrounds. Frames with neither are
+  pure layout and render nothing; a non-scroll frame's children are still emitted
+  by the flat loop (not nested inside it).
 - **Rich text**: `characterStyleOverrides` + `styleOverrideTable` split a text node
   into inline `<span style="font-weight:/font-size:">` runs (`textRuns()`).
 - **Multi-paragraph text**: split on `\n` into stacked `<p style="display:block;
