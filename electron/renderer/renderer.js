@@ -379,6 +379,58 @@ const pubDomain = document.getElementById("pub-domain");
 const pubAlias = document.getElementById("pub-alias");
 const pubGroup = document.getElementById("pub-group");
 const pubMsg = document.getElementById("pub-msg");
+// HTTPS options — account/certificate ids all come from 1Panel, never typed in.
+const pubHttpsEnabled = document.getElementById("pub-https-enabled");
+const pubHttpsBody = document.getElementById("pub-https-body");
+const pubHttpsMethod = document.getElementById("pub-https-method");
+const pubHttpsDnsField = document.getElementById("pub-https-dns-field");
+const pubHttpsDns = document.getElementById("pub-https-dns");
+const pubHttpsAcme = document.getElementById("pub-https-acme");
+const pubHttpsSsl = document.getElementById("pub-https-ssl");
+const pubHttpsRedirect = document.getElementById("pub-https-redirect");
+const pubHttpsHsts = document.getElementById("pub-https-hsts");
+
+function syncHttpsUi() {
+  pubHttpsBody.hidden = !pubHttpsEnabled.checked;
+  // A DNS account is only needed for the automatic DNS-01 flow.
+  pubHttpsDnsField.hidden = pubHttpsMethod.value !== "dnsAccount";
+}
+
+function fillSelect(sel, items, keepLabel, toLabel) {
+  const current = sel.value;
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "0";
+  none.textContent = keepLabel;
+  sel.appendChild(none);
+  for (const it of items) {
+    const o = document.createElement("option");
+    o.value = String(it.id);
+    o.textContent = toLabel(it);
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+}
+
+// Read the ACME/DNS accounts and certificates the panel already has, so the
+// user only ever picks from what is configured there.
+async function loadHttpsOptions() {
+  pubMsg.textContent = "读取 1Panel 账号与证书…";
+  try {
+    const r = await window.api.publishHttpsOptions();
+    fillSelect(pubHttpsAcme, r.acmeAccounts, "— 请选择 —", (a) => `${a.email || "(无邮箱)"} [${a.type}]`);
+    fillSelect(pubHttpsDns, r.dnsAccounts, "— 请选择 —", (d) => `${d.name} [${d.type}]`);
+    fillSelect(pubHttpsSsl, r.existingSsl ? [r.existingSsl] : [], "— 无,申请新证书 —", (s) => `#${s.id} ${s.domains || ""}${s.expireDate ? ` (到期 ${s.expireDate})` : ""}`);
+    // Preselect the certificate that already covers this domain — binding it is
+    // a no-op re-apply, far cheaper than issuing a new one.
+    if (r.existingSsl) pubHttpsSsl.value = String(r.existingSsl.id);
+    if (r.acmeAccounts.length === 1) pubHttpsAcme.value = String(r.acmeAccounts[0].id);
+    if (r.dnsAccounts.length === 1) pubHttpsDns.value = String(r.dnsAccounts[0].id);
+    pubMsg.textContent = r.existingSsl ? "已找到该域名的现有证书,将直接绑定启用" : `已读取 ${r.acmeAccounts.length} 个 ACME 账号、${r.dnsAccounts.length} 个 DNS 账号`;
+  } catch (e) {
+    pubMsg.textContent = "读取失败: " + e.message;
+  }
+}
 
 function setPublishStatus(text, cls) {
   publishStatusEl.textContent = text;
@@ -406,6 +458,23 @@ async function openPublishSettings() {
   pubDomain.value = c.domain || "";
   pubAlias.value = c.alias || "";
   pubGroup.value = c.groupID || 1;
+  const h = c.https || {};
+  pubHttpsEnabled.checked = !!h.enabled;
+  pubHttpsMethod.value = h.method || "dnsAccount";
+  pubHttpsRedirect.value = h.httpConfig || "HTTPToHTTPS";
+  pubHttpsHsts.checked = !!h.hsts;
+  // Keep previously chosen ids selectable until the list is re-read.
+  const seed = (sel, id, label) => {
+    sel.innerHTML = "";
+    const o = document.createElement("option");
+    o.value = String(id || 0);
+    o.textContent = id ? `${label} #${id}` : label;
+    sel.appendChild(o);
+  };
+  seed(pubHttpsDns, h.dnsAccountId, "— 请选择 —");
+  seed(pubHttpsAcme, h.acmeAccountId, "— 请选择 —");
+  seed(pubHttpsSsl, h.sslId, "— 无,申请新证书 —");
+  syncHttpsUi();
   pubMsg.textContent = "";
   pubEl.hidden = false;
 }
@@ -418,8 +487,18 @@ async function savePublishSettings() {
     domain: pubDomain.value.trim(),
     alias: pubAlias.value.trim(),
     groupID: Number(pubGroup.value) || 1,
+    https: {
+      enabled: pubHttpsEnabled.checked,
+      method: pubHttpsMethod.value,
+      acmeAccountId: Number(pubHttpsAcme.value) || 0,
+      dnsAccountId: Number(pubHttpsDns.value) || 0,
+      sslId: Number(pubHttpsSsl.value) || 0,
+      httpConfig: pubHttpsRedirect.value,
+      hsts: pubHttpsHsts.checked,
+    },
   });
   pubMsg.textContent = r.ok ? "已保存" : "保存失败";
+  return r;
 }
 
 async function testConnection() {
@@ -458,6 +537,12 @@ btnPublishCancel.addEventListener("click", () => window.api.publishCancel());
 btnPublishSettings.addEventListener("click", openPublishSettings);
 document.getElementById("btn-pub-save").addEventListener("click", savePublishSettings);
 document.getElementById("btn-pub-test").addEventListener("click", testConnection);
+document.getElementById("btn-pub-https-load").addEventListener("click", async () => {
+  await savePublishSettings(); // the panel read uses the saved base/domain/key
+  await loadHttpsOptions();
+});
+pubHttpsEnabled.addEventListener("change", syncHttpsUi);
+pubHttpsMethod.addEventListener("change", syncHttpsUi);
 document.getElementById("btn-pub-cancel").addEventListener("click", () => {
   pubEl.hidden = true;
 });

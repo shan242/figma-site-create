@@ -11,7 +11,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require("electron");
 const path = require("path");
 const { writeFileSync, readFileSync, renameSync, existsSync } = require("fs");
-const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, machineCode: computeMachineCode, checkLicense } = require("./worker.cjs");
+const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, machineCode: computeMachineCode, checkLicense } = require("./worker.cjs");
 
 let win = null;
 let chatRunning = false;
@@ -39,7 +39,10 @@ function defaultOutDir() {
 // --- AI config persistence (userData/config.json, key encrypted if possible) --
 
 const configFile = () => path.join(app.getPath("userData"), "config.json");
-const defaultConfig = () => ({ apiKey: "", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", autoApply: false, maxWords: 60, recentDirs: [], publish: { baseUrl: "", apiKey: "", domain: "", alias: "", groupID: 1 }, machineCode: "" });
+// HTTPS options for the publish flow. The account ids point at rows that
+// already exist in 1Panel — the app never stores DNS/CA credentials itself.
+const defaultHttps = () => ({ enabled: false, method: "dnsAccount", acmeAccountId: 0, dnsAccountId: 0, sslId: 0, httpConfig: "HTTPToHTTPS", hsts: false });
+const defaultConfig = () => ({ apiKey: "", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", autoApply: false, maxWords: 60, recentDirs: [], publish: { baseUrl: "", apiKey: "", domain: "", alias: "", groupID: 1, https: defaultHttps() }, machineCode: "" });
 const RECENT_DIRS_MAX = 8;
 
 function decryptKey(v) {
@@ -59,7 +62,7 @@ function loadConfig() {
     raw.apiKey = decryptKey(raw.apiKey);
     if (raw.publish) raw.publish.apiKey = decryptKey(raw.publish.apiKey);
     const d = defaultConfig();
-    return { ...d, ...raw, apiKey: raw.apiKey, publish: { ...d.publish, ...(raw.publish || {}) } };
+    return { ...d, ...raw, apiKey: raw.apiKey, publish: { ...d.publish, ...(raw.publish || {}), https: { ...d.publish.https, ...(raw.publish?.https || {}) } } };
   } catch {
     return defaultConfig();
   }
@@ -333,10 +336,11 @@ ipcMain.handle("chat:cancel", () => {
 // plain, apiKey safeStorage-encrypted; progress streams over "publish:event".
 ipcMain.handle("publish-config:get", () => {
   const p = loadConfig().publish || {};
-  return { baseUrl: p.baseUrl, domain: p.domain, alias: p.alias, groupID: p.groupID, hasKey: !!p.apiKey };
+  return { baseUrl: p.baseUrl, domain: p.domain, alias: p.alias, groupID: p.groupID, hasKey: !!p.apiKey, https: { ...defaultHttps(), ...(p.https || {}) } };
 });
 
 ipcMain.handle("publish-config:set", (event, cfg) => {
+  const h = cfg.https || {};
   saveConfig({
     publish: {
       baseUrl: String(cfg.baseUrl || "").trim() || undefined,
@@ -344,9 +348,28 @@ ipcMain.handle("publish-config:set", (event, cfg) => {
       alias: String(cfg.alias || "").trim() || undefined,
       groupID: Number(cfg.groupID) || 1,
       apiKey: cfg.apiKey, // empty string keeps the stored key (see saveConfig)
+      https: {
+        enabled: !!h.enabled,
+        method: ["dnsAccount", "dnsManual", "http"].includes(h.method) ? h.method : "dnsAccount",
+        acmeAccountId: Number(h.acmeAccountId) || 0,
+        dnsAccountId: Number(h.dnsAccountId) || 0,
+        sslId: Number(h.sslId) || 0,
+        httpConfig: ["HTTPToHTTPS", "HTTPSOnly", "HTTPAlso"].includes(h.httpConfig) ? h.httpConfig : "HTTPToHTTPS",
+        hsts: !!h.hsts,
+      },
     },
   });
   return { ok: true };
+});
+
+// Populate the HTTPS form: the ACME/DNS accounts already configured in 1Panel,
+// plus any certificate the panel already holds for this domain (which makes the
+// apply step a pure bind). Read-only against the panel.
+ipcMain.handle("publish:https-options", async () => {
+  const p = loadConfig().publish || {};
+  if (!p.baseUrl || !p.apiKey) throw new Error("请先填写服务器地址与 API Key");
+  const res = await httpsOptions({ baseUrl: p.baseUrl, apiKey: p.apiKey, domain: p.domain });
+  return { ok: true, ...res };
 });
 
 ipcMain.handle("publish:run", async (event, { outDir }) => {
@@ -375,10 +398,14 @@ ipcMain.handle("publish:run", async (event, { outDir }) => {
       domain: p.domain,
       alias: p.alias,
       groupID: p.groupID,
+      https: p.https,
       onLog: (line) => send({ type: "log", text: line }),
       signal: abort.signal,
     });
-    send({ type: "done", text: `共上传 ${result.uploaded} 个文件` });
+    send({
+      type: "done",
+      text: result.https ? `共上传 ${result.uploaded} 个文件 · HTTPS ${result.https.changed ? "已启用" : "已是最新"}` : `共上传 ${result.uploaded} 个文件`,
+    });
     return { ok: true, ...result };
   } catch (e) {
     send({ type: "error", text: e.message });

@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("api", {
   setPublishConfig: (cfg) => ipcRenderer.invoke("publish-config:set", cfg),
   publishRun: (outDir) => ipcRenderer.invoke("publish:run", { outDir }),
   publishTest: () => ipcRenderer.invoke("publish:test"),
+  publishHttpsOptions: () => ipcRenderer.invoke("publish:https-options"),
   publishCancel: () => ipcRenderer.invoke("publish:cancel"),
   onPublishEvent: (cb) => ipcRenderer.on("publish:event", (_e, evt) => cb(evt)),
 

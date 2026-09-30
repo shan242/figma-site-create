@@ -439,7 +439,13 @@ test("RECTANGLE and SVG with their own NAVIGATE interaction render as anchors", 
   await buildSite(dir);
   const html = readFileSync(join(dir, "index.html"), "utf8");
   assert.ok(html.includes('<a href="page-5.html" style="position: absolute; top: 300px'), "interactive RECTANGLE renders as an anchor");
-  assert.ok(html.includes('<a href="page-5.html"><img src="assets/bb33cc44.svg"'), "interactive SVG renders as an anchor-wrapped img");
+  // An interactive SVG anchors its FULL bbox (the nav hotspots are tiny empty
+  // SVGs inside huge hit areas), so the <a> carries the position style and the
+  // <img> is stretched inside it — not `<a href><img …` back to back.
+  assert.ok(
+    /<a href="page-5\.html" style="[^"]*"><img src="assets\/bb33cc44\.svg"/.test(html),
+    "interactive SVG renders as an anchor-wrapped img",
+  );
 });
 
 test("fluid canvas: CENTER nodes stay centered, plain nodes keep px, body follows canvas bg", async () => {

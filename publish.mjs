@@ -183,7 +183,7 @@ export async function uploadFile(base, key, localPath, targetDir, signal) {
 
 // --- Orchestration -----------------------------------------------------------
 
-export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, groupID, onLog, signal }) {
+export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, groupID, https, onLog, signal }) {
   if (!baseUrl || !apiKey) throw new Error("请先在发布设置里填写服务器地址与 API Key");
   if (!domain) throw new Error("请填写要发布到的域名");
   const log = onLog || (() => {});
@@ -207,7 +207,14 @@ export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, grou
   });
   await Promise.all(workers);
   log(`✅ 发布完成,共上传 ${uploaded} 个文件`);
-  return { uploaded, root, created };
+  // Optional second phase: make https://<domain> work. Reuses the certificate
+  // and accounts already configured in the panel (see ensureHttps).
+  let httpsResult = null;
+  if (https?.enabled) {
+    log("— 配置 HTTPS —");
+    httpsResult = await ensureHttps({ ...https, base, baseUrl, apiKey, domain, onLog: log, signal });
+  }
+  return { uploaded, root, created, https: httpsResult };
 }
 
 // Lightweight check for the GUI "测试连接" button: verifies the API key and
@@ -216,4 +223,249 @@ export async function testPanel({ baseUrl, apiKey, domain, signal }) {
   const base = await detectApiBase(baseUrl, apiKey, signal);
   const site = domain ? await findWebsite(base, apiKey, domain, signal) : null;
   return { base, found: !!site, root: site?.sitePath ? posixJoin(site.sitePath, "index") : null };
+}
+
+// --- ACME / DNS accounts -----------------------------------------------------
+// Read-only. The panel owns these credentials (DNS provider keys, CA accounts);
+// the app only lists them so the user can pick one — it never stores or sends
+// provider secrets itself.
+
+export async function listAcmeAccounts(base, key, signal) {
+  return unwrap(
+    await panelFetch(base, key, "/websites/acme/search", {
+      method: "POST",
+      body: { page: 1, pageSize: 999999 },
+      signal,
+    }),
+  );
+}
+
+export async function listDnsAccounts(base, key, signal) {
+  return unwrap(
+    await panelFetch(base, key, "/websites/dns/search", {
+      method: "POST",
+      body: { page: 1, pageSize: 999999 },
+      signal,
+    }),
+  );
+}
+
+// --- Certificates ------------------------------------------------------------
+
+export async function listSsls(base, key, signal) {
+  return unwrap(
+    await panelFetch(base, key, "/websites/ssl/search", {
+      method: "POST",
+      body: { page: 1, pageSize: 999999 },
+      signal,
+    }),
+  );
+}
+
+// A certificate covers a primary domain plus comma-separated `domains`.
+export function sslDomainMatches(ssl, domain) {
+  const names = [ssl?.primaryDomain, ...String(ssl?.domains || "").split(",")]
+    .map((d) => String(d || "").trim())
+    .filter(Boolean);
+  return names.includes(domain);
+}
+
+export async function findSslByDomain(base, key, domain, signal) {
+  const list = await listSsls(base, key, signal);
+  return list.find((s) => sslDomainMatches(s, domain)) || null;
+}
+
+// Some endpoints answer with the record directly, others wrap it in { data }.
+const record = (res) => (res && typeof res === "object" && "data" in res ? res.data : res);
+
+export async function getSsl(base, key, id, signal) {
+  return record(await panelFetch(base, key, `/websites/ssl/${id}`, { signal }));
+}
+
+// Create the certificate RECORD for `primaryDomain` using the ACME account and
+// (for DNS validation) the DNS account already configured in the panel.
+// provider selects how the domain is validated:
+//   dnsAccount — the panel writes the _acme-challenge TXT through the DNS
+//                account's API (fully automatic, no inbound port needed)
+//   dnsManual  — the panel prints the TXT record for the user to add by hand
+//   http       — the CA fetches http://<domain>/.well-known/acme-challenge/…
+export async function createSsl(
+  base,
+  key,
+  { acmeAccountId, primaryDomain, otherDomains, provider = "dnsAccount", dnsAccountId, keyType = "P256", autoRenew = true, apply = false, skipDNS = false, nameserver1, nameserver2, description },
+  signal,
+) {
+  await panelFetch(base, key, "/websites/ssl", {
+    method: "POST",
+    body: {
+      acmeAccountId,
+      primaryDomain,
+      otherDomains: otherDomains || "",
+      provider,
+      dnsAccountId: provider === "dnsAccount" ? dnsAccountId : 0,
+      keyType,
+      autoRenew,
+      apply,
+      skipDNS,
+      nameserver1: nameserver1 || "",
+      nameserver2: nameserver2 || "",
+      description: description || "",
+      pushDir: false,
+      execShell: false,
+      disableCNAME: false,
+    },
+    signal,
+  });
+  const ssl = await findSslByDomain(base, key, primaryDomain, signal);
+  if (!ssl) throw new Error("证书已创建但未能查询到,请稍后在 1Panel 中确认");
+  return ssl;
+}
+
+// Kick off the ACME challenge for a certificate record. For dnsAccount/http the
+// create call can pass `apply: true` instead; dnsManual must create first, let
+// the user add the TXT record, then call this.
+export async function applySsl(base, key, id, { skipDNSCheck = false, nameservers } = {}, signal) {
+  await panelFetch(base, key, "/websites/ssl/obtain", {
+    method: "POST",
+    body: { ID: Number(id), skipDNSCheck, ...(nameservers?.length ? { nameservers } : {}) },
+    signal,
+  });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Poll until the certificate carries an expiry (issued). `message` is the
+// panel's last log line — surfaced verbatim on timeout so a DNS/port/CA failure
+// is visible rather than a bare "timed out".
+export async function pollSslUntilIssued(base, key, id, { timeoutMs = 180000, intervalMs = 3000, onLog, signal } = {}) {
+  const log = onLog || (() => {});
+  const deadline = Date.now() + timeoutMs;
+  let last = "";
+  let reported = "";
+  while (Date.now() < deadline) {
+    const ssl = await getSsl(base, key, id, signal);
+    if (ssl?.expireDate) return ssl;
+    last = ssl?.message || last;
+    if (last && last !== reported) {
+      reported = last;
+      log(`  ${last}`);
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(`证书申请超时(${Math.round(timeoutMs / 1000)} 秒)${last ? ` — ${last}` : ""}`);
+}
+
+// --- Website HTTPS -----------------------------------------------------------
+
+export async function getWebsiteHttps(base, key, websiteId, signal) {
+  return record(await panelFetch(base, key, `/websites/${websiteId}/https`, { signal }));
+}
+
+// Bind `websiteSSLId` to the site and turn HTTPS on. `type: "existed"` means
+// "use this certificate record"; SSLProtocol/algorithm are passed through from
+// the site's current config so the panel's own TLS defaults are preserved.
+export async function enableHttps(
+  base,
+  key,
+  { websiteId, websiteSSLId, httpConfig = "HTTPToHTTPS", hsts = false, SSLProtocol, algorithm },
+  signal,
+) {
+  await panelFetch(base, key, `/websites/${websiteId}/https`, {
+    method: "POST",
+    body: {
+      websiteId,
+      type: "existed",
+      websiteSSLId: Number(websiteSSLId),
+      enable: true,
+      httpConfig,
+      hsts: !!hsts,
+      SSLProtocol: SSLProtocol?.length ? SSLProtocol : ["TLSv1.2", "TLSv1.3"],
+      algorithm: algorithm || "",
+    },
+    signal,
+  });
+}
+
+// Orchestrate "make https://<domain> work": reuse the certificate already in the
+// panel when one covers the domain, otherwise apply for one with the accounts
+// the user selected (both read from the panel), then bind it and enable HTTPS.
+// Idempotent — re-running with the same inputs skips the work.
+export async function ensureHttps({
+  base: knownBase,
+  baseUrl,
+  apiKey,
+  domain,
+  method = "dnsAccount",
+  acmeAccountId,
+  dnsAccountId,
+  sslId,
+  httpConfig = "HTTPToHTTPS",
+  hsts,
+  autoRenew = true,
+  timeoutMs = 180000,
+  onLog,
+  signal,
+}) {
+  if (!apiKey) throw new Error("请先在发布设置里填写服务器地址与 API Key");
+  if (!domain) throw new Error("请填写要启用 HTTPS 的域名");
+  const log = onLog || (() => {});
+  const base = knownBase || (await detectApiBase(baseUrl, apiKey, signal));
+
+  const site = await findWebsite(base, apiKey, domain, signal);
+  if (!site) throw new Error(`未在 1Panel 中找到域名 ${domain} 的网站,请先发布一次`);
+
+  let ssl = sslId ? await getSsl(base, apiKey, sslId, signal) : await findSslByDomain(base, apiKey, domain, signal);
+  if (ssl?.id) {
+    log(`已复用现有证书 #${ssl.id}${ssl.expireDate ? `(到期 ${ssl.expireDate})` : ""}`);
+  } else {
+    if (!acmeAccountId) throw new Error("请选择 ACME 账号(1Panel 中还没有的话,请先在面板里创建一个)");
+    if (method === "dnsAccount" && !dnsAccountId) throw new Error("自动 DNS 验证需要选择一个已配置的 DNS 账号");
+    log(`申请新证书(${method === "http" ? "HTTP 验证" : method === "dnsManual" ? "手动 DNS 验证" : "自动 DNS 验证"})…`);
+    ssl = await createSsl(
+      base,
+      apiKey,
+      { acmeAccountId, dnsAccountId, provider: method, primaryDomain: domain, autoRenew, apply: method !== "dnsManual" },
+      signal,
+    );
+    if (method === "dnsManual") await applySsl(base, apiKey, ssl.id, {}, signal);
+    ssl = await pollSslUntilIssued(base, apiKey, ssl.id, { timeoutMs, onLog: log, signal });
+    log(`证书已签发${ssl.expireDate ? `(到期 ${ssl.expireDate})` : ""}`);
+  }
+
+  const current = await getWebsiteHttps(base, apiKey, site.id, signal);
+  if (current?.enable && record(current.SSL)?.id === ssl.id && current?.httpConfig === httpConfig) {
+    log("HTTPS 已启用且证书一致,无需改动");
+    return { base, site, ssl, changed: false };
+  }
+  await enableHttps(
+    base,
+    apiKey,
+    {
+      websiteId: site.id,
+      websiteSSLId: ssl.id,
+      httpConfig,
+      hsts: hsts ?? current?.hsts ?? false,
+      SSLProtocol: current?.SSLProtocol,
+      algorithm: current?.algorithm,
+    },
+    signal,
+  );
+  log(`✅ 已为 ${domain} 启用 HTTPS(${httpConfig})`);
+  return { base, site, ssl, changed: true };
+}
+
+// Settings the GUI needs to render the HTTPS form: the accounts to choose from
+// plus any certificate already covering the domain.
+export async function httpsOptions({ baseUrl, apiKey, domain, signal }) {
+  const base = await detectApiBase(baseUrl, apiKey, signal);
+  const [acme, dns] = await Promise.all([listAcmeAccounts(base, apiKey, signal), listDnsAccounts(base, apiKey, signal)]);
+  const site = domain ? await findWebsite(base, apiKey, domain, signal) : null;
+  const ssl = domain ? await findSslByDomain(base, apiKey, domain, signal) : null;
+  return {
+    base,
+    acmeAccounts: acme.map((a) => ({ id: a.id, email: a.email, type: a.type })),
+    dnsAccounts: dns.map((d) => ({ id: d.id, name: d.name, type: d.type })),
+    existingSsl: ssl ? { id: ssl.id, domains: ssl.domains, expireDate: ssl.expireDate } : null,
+    site: site ? { id: site.id, primaryDomain: site.primaryDomain } : null,
+  };
 }

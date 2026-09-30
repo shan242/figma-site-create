@@ -172,6 +172,44 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   compute `font-weight: 400` while local computes 700. Both render the same bold font —
   treat as a non-diff in verification.
 
+## Publishing to 1Panel + HTTPS
+
+`publish.mjs` deploys the built folder to a 1Panel static site and can then make
+`https://<domain>` work. Auth is a per-request HMAC (`md5("1panel" + apiKey +
+timestamp)`) in the `1Panel-Token`/`1Panel-Timestamp` headers; the API prefix is
+probed (`/api/v2`, falling back to `/api/v1`); a business failure arrives as
+**HTTP 200 with `code != 200`**, which `panelFetch` raises.
+
+**The app never stores DNS or CA credentials.** The panel owns them; the app only
+lists what is already configured and passes the resulting ids:
+
+- `POST /websites/acme/search` → ACME accounts (`listAcmeAccounts`)
+- `POST /websites/dns/search` → DNS accounts (`listDnsAccounts`)
+- `POST /websites/ssl/search` → certificates (`listSsls`, `findSslByDomain`)
+
+Applying for a certificate needs **three** things, and `provider` is the
+**validation method**, not the CA:
+
+| field | meaning |
+|---|---|
+| `acmeAccountId` | which CA account signs (Let's Encrypt / ZeroSSL / …) |
+| `provider` | `dnsAccount` (panel writes the TXT through the DNS account's API), `dnsManual` (user adds the TXT), `http` (CA fetches port 80), `selfSigned` |
+| `dnsAccountId` | the DNS account, required only for `provider: "dnsAccount"` |
+
+`ensureHttps` orchestrates: reuse a certificate already covering the domain →
+otherwise create the record with the selected accounts → apply → poll
+(`pollSslUntilIssued` looks for `expireDate`; the panel's `message` is surfaced on
+timeout) → `POST /websites/{websiteId}/https` with
+`{ type: "existed", websiteSSLId, enable: true, httpConfig }`, carrying the site's
+existing `SSLProtocol`/`algorithm` through so the panel's TLS defaults survive.
+It is **idempotent** — an already-enabled site on the same certificate is skipped.
+
+`dnsAccount`/`http` pass `apply: true` on create (fully automatic); `dnsManual`
+creates first and applies after the user adds the TXT record.
+
+The GUI reads the accounts with `publish:https-options` and renders dropdowns only
+(see the "申请并启用 HTTPS" block in `renderer/index.html`) — no credential fields.
+
 ## Verification
 
 `node verify.mjs <live-url> <out.json>` captures computed styles of leaf text nodes;

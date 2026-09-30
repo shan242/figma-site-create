@@ -119,6 +119,22 @@ input[type="checkbox"] { accent-color: var(--accent); }
   font-family: inherit;
 }
 .recent-row select:focus { outline: none; border-color: var(--accent); }
+
+/* HTTPS options in the publish modal: dropdowns and inline help */
+#pub-https-body { display: flex; flex-direction: column; gap: 10px; border-left: 2px solid var(--border); padding-left: 10px; }
+#pub-https-body select {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: inherit;
+}
+#pub-https-body select:focus { outline: none; border-color: var(--accent); }
+.field .check { flex-direction: row; align-items: center; gap: 6px; font-size: 12px; }
+.hint { font-size: 11px; color: var(--muted); margin: 0; line-height: 1.5; }
 .dir-status { font-size: 11px; white-space: nowrap; }
 .dir-status.ok { color: var(--ok); }
 .dir-status.warn { color: #f59e0b; }

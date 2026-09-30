@@ -110,7 +110,53 @@
         <label for="pub-group">分组 ID(默认 1)</label>
         <input id="pub-group" type="number" spellcheck="false" value="1">
       </div>
+
+      <div class="field">
+        <label class="check">
+          <input id="pub-https-enabled" type="checkbox">
+          发布后申请并启用 HTTPS
+        </label>
+      </div>
+      <div id="pub-https-body" hidden>
+        <div class="field">
+          <label for="pub-https-method">验证方式</label>
+          <select id="pub-https-method">
+            <option value="dnsAccount">自动 DNS 验证(推荐,无需开放端口)</option>
+            <option value="http">HTTP 验证(需 80 端口外网可达)</option>
+            <option value="dnsManual">手动 DNS 验证(需自行添加 TXT 记录)</option>
+          </select>
+        </div>
+        <div class="field" id="pub-https-dns-field">
+          <label for="pub-https-dns">DNS 账号(1Panel 中已配置)</label>
+          <select id="pub-https-dns"><option value="0">— 请选择 —</option></select>
+        </div>
+        <div class="field">
+          <label for="pub-https-acme">ACME 账号(1Panel 中已配置)</label>
+          <select id="pub-https-acme"><option value="0">— 请选择 —</option></select>
+        </div>
+        <div class="field">
+          <label for="pub-https-ssl">已有证书(有则直接绑定,不重复申请)</label>
+          <select id="pub-https-ssl"><option value="0">— 无,申请新证书 —</option></select>
+        </div>
+        <div class="field">
+          <label for="pub-https-redirect">HTTP 跳转</label>
+          <select id="pub-https-redirect">
+            <option value="HTTPToHTTPS">HTTP → HTTPS 跳转</option>
+            <option value="HTTPSOnly">仅 HTTPS</option>
+            <option value="HTTPAlso">HTTP 与 HTTPS 均可</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="check">
+            <input id="pub-https-hsts" type="checkbox">
+            启用 HSTS
+          </label>
+        </div>
+        <p class="hint">账号与证书均从 1Panel 读取,凭据由面板保管,本软件不保存。</p>
+      </div>
+
       <div class="modal-actions">
+        <button id="btn-pub-https-load">读取 1Panel 账号/证书</button>
         <button id="btn-pub-test">测试连接</button>
         <button id="btn-pub-save" class="primary">保存</button>
         <button id="btn-pub-cancel">关闭</button>
