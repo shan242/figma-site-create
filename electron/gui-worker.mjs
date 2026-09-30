@@ -6,7 +6,7 @@ import { scrapeSite } from "../scrape.mjs";
 import { buildSite } from "../build.mjs";
 import { runAgent, createDeepSeekModel, makeTools } from "../ai.mjs";
 import { layoutWordCloud } from "../wordcloud.mjs";
-import { publishSite, testPanel } from "../publish.mjs";
+import { publishSite, testPanel, httpsOptions, ensureHttps } from "../publish.mjs";
 import { machineCode, checkLicense } from "../license.mjs";
 
-export { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, layoutWordCloud, publishSite, testPanel, machineCode, checkLicense };
+export { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, layoutWordCloud, publishSite, testPanel, httpsOptions, ensureHttps, machineCode, checkLicense };

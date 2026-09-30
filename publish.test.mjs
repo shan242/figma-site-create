@@ -4,7 +4,7 @@
 // to end without touching a server.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -421,8 +421,7 @@ test("httpsOptions returns the accounts and any existing certificate", async () 
   assert.equal(opts.site.id, 42);
 });
 
-test("publishSite runs the HTTPS phase after uploading when asked", async () => {
-  const { calls } = stubHttps({ ssls: [SSL_RECORD] });
+test("publishSite runs the HTTPS phase after uploading when asked", async () => {  const { calls } = stubHttps({ ssls: [SSL_RECORD] });
   const dir = makeOutDir();
   const logs = [];
   const res = await publishSite({
@@ -440,3 +439,24 @@ test("publishSite runs the HTTPS phase after uploading when asked", async () => 
   assert.ok(calls.some((c) => /\/websites\/42\/https$/.test(c.url) && c.method === "POST"));
 });
 
+
+// The Electron main process requires worker.cjs, which esbuild builds from
+// gui-worker.mjs. gui-worker re-exports an EXPLICIT list, so adding a function to
+// publish.mjs and forgetting the re-export only shows up at runtime as
+// "X is not a function" in the GUI. This guards the whole surface.
+test("gui-worker re-exports every symbol main.js requires from worker.cjs", async () => {
+  const worker = await import("./electron/gui-worker.mjs");
+  const main = readFileSync(new URL("./electron/main.js", import.meta.url), "utf8");
+  const names = [...main.matchAll(/const \{([^}]+)\} = require\("\.\/worker\.cjs"\)/g)]
+    .flatMap((m) => m[1].split(","))
+    .map((s) => s.trim())
+    .filter(Boolean)
+    // "machineCode: computeMachineCode" binds the export `machineCode` locally
+    .map((s) => (s.includes(":") ? s.split(":")[0].trim() : s));
+  assert.ok(names.length >= 5, `parsed the worker destructuring (got ${names.length})`);
+  const missing = names.filter((n) => typeof worker[n] !== "function");
+  assert.deepEqual(missing, [], `gui-worker.mjs must export: ${missing.join(", ")}`);
+  // the HTTPS feature specifically
+  assert.equal(typeof worker.httpsOptions, "function");
+  assert.equal(typeof worker.ensureHttps, "function");
+});
