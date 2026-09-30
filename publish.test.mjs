@@ -25,7 +25,9 @@ import {
   sslDomainMatches,
   createSsl,
   pollSslUntilIssued,
+  sslLooksIssued,
   enableHttps,
+  enableHttpsResilient,
   ensureHttps,
   httpsOptions,
 } from "./publish.mjs";
@@ -232,11 +234,11 @@ test("testPanel reports connection and existing-site status", async () => {
 const SITE_RECORD = { ...SITE, id: 42 };
 const ACME = { id: 3, email: "me@mail.com", type: "letsencrypt", keyType: "P256" };
 const DNS_ACC = { id: 5, name: "我的阿里云", type: "AliYun" };
-const SSL_RECORD = { id: 7, primaryDomain: DOMAIN, domains: DOMAIN, expireDate: "2027-01-01", message: "" };
+const SSL_RECORD = { id: 7, primaryDomain: DOMAIN, domains: DOMAIN, expireDate: "2027-01-01", status: "ready", message: "" };
 
-function stubHttps({ acme = [ACME], dns = [DNS_ACC], ssls = [], httpState = {}, createdSsl = [SSL_RECORD], issued = true, site = SITE_RECORD } = {}) {
+function stubHttps({ acme = [ACME], dns = [DNS_ACC], ssls = [], httpState = {}, createdSsl = [SSL_RECORD], issued = true, site = SITE_RECORD, failEnableTimes = 0 } = {}) {
   const calls = [];
-  const state = { ssls: [...ssls] };
+  const state = { ssls: [...ssls], enableFails: failEnableTimes };
   globalThis.fetch = async (url, opts = {}) => {
     const method = opts.method || "GET";
     const body = typeof opts.body === "string" ? JSON.parse(opts.body) : undefined;
@@ -253,10 +255,14 @@ function stubHttps({ acme = [ACME], dns = [DNS_ACC], ssls = [], httpState = {}, 
     if (url.endsWith("/websites/ssl/obtain")) return jsonResponse(200, {});
     if (/\/websites\/ssl\/\d+$/.test(url)) {
       const rec = state.ssls.find((s) => Number(s.id) === Number(url.match(/(\d+)$/)[1]));
-      return jsonResponse(200, { data: issued ? rec || SSL_RECORD : { id: 7, message: "DNS 记录未生效" } });
+      return jsonResponse(200, { data: issued ? rec || SSL_RECORD : { id: 7, message: "DNS 记录未生效", status: "applying" } });
     }
     if (/\/websites\/\d+\/https$/.test(url)) {
       if (method === "GET") return jsonResponse(200, { data: httpState });
+      if (state.enableFails > 0) {
+        state.enableFails--;
+        return jsonResponse(200, { code: 500, message: "服务错误: 证书文件异常，请检查证书状态！" });
+      }
       return jsonResponse(200, {});
     }
     if (url.endsWith("/files/upload")) return jsonResponse(200, {});
@@ -321,9 +327,10 @@ test("createSsl fails loudly when the new record is not visible afterwards", asy
   assert.ok(calls.some((c) => c.url.endsWith("/websites/ssl") && c.method === "POST"));
 });
 
-test("pollSslUntilIssued returns once the record carries an expiry", async () => {
+test("pollSslUntilIssued returns once the record reports status=ready", async () => {
   stubHttps({ ssls: [SSL_RECORD] });
   const ssl = await pollSslUntilIssued(`${BASE}/api/v2`, KEY, 7, { intervalMs: 5 });
+  assert.equal(ssl.status, "ready");
   assert.equal(ssl.expireDate, "2027-01-01");
 });
 
@@ -335,6 +342,73 @@ test("pollSslUntilIssued times out and surfaces the panel's message", async () =
     /证书申请超时.*DNS 记录未生效/s,
   );
   assert.ok(logs.some((l) => l.includes("DNS 记录未生效")));
+});
+
+// The backend seeds ExpireDate to time.Now() at creation and only writes the
+// real cert.NotAfter after issuance, so a record whose expiry is ~now is NOT
+// issued. Trusting it made the app enable HTTPS immediately and the panel
+// answered "证书文件异常，请检查证书状态！".
+test("a placeholder expireDate is not treated as an issued certificate", async () => {
+  const placeholder = { id: 7, primaryDomain: DOMAIN, domains: DOMAIN, expireDate: new Date().toISOString(), message: "" };
+  assert.equal(sslLooksIssued(placeholder), false, "expiry at ~now must not count as issued");
+  assert.equal(sslLooksIssued({ ...placeholder, status: "applying" }), false);
+  assert.equal(sslLooksIssued({ ...placeholder, status: "init" }), false);
+  assert.equal(sslLooksIssued({ ...placeholder, status: "ready" }), true);
+  assert.equal(sslLooksIssued({ expireDate: new Date(Date.now() + 90 * 864e5).toISOString() }), true, "no status: fall back to a real not-after");
+  assert.equal(sslLooksIssued({ pem: "-----BEGIN CERTIFICATE-----\nMII..." }), true, "no status/expiry: a PEM body proves it");
+  assert.equal(sslLooksIssued({}), false);
+
+  // and the poll keeps waiting rather than declaring success
+  stubHttps({ issued: false });
+  await assert.rejects(() => pollSslUntilIssued(`${BASE}/api/v2`, KEY, 7, { timeoutMs: 30, intervalMs: 5 }), /证书申请超时/);
+});
+
+test("pollSslUntilIssued fails fast on status=applyError with the panel's reason", async () => {
+  globalThis.fetch = async (url) => {
+    if (url.endsWith("/websites/ssl/7")) {
+      return jsonResponse(200, { data: { id: 7, status: "applyError", message: "DNS 记录未生效" } });
+    }
+    return jsonResponse(404, {});
+  };
+  const started = Date.now();
+  await assert.rejects(
+    () => pollSslUntilIssued(`${BASE}/api/v2`, KEY, 7, { timeoutMs: 30000, intervalMs: 5 }),
+    /证书申请失败: DNS 记录未生效/,
+  );
+  assert.ok(Date.now() - started < 5000, "must not burn the whole timeout on a hard failure");
+});
+
+test("enableHttpsResilient retries while the panel reports the cert files are not ready", async () => {
+  const { calls, state } = stubHttps({ ssls: [SSL_RECORD], failEnableTimes: 2 });
+  const logs = [];
+  const waited = [];
+  await enableHttpsResilient(
+    `${BASE}/api/v2`,
+    KEY,
+    { websiteId: 42, websiteSSLId: 7, httpConfig: "HTTPToHTTPS" },
+    { onLog: (l) => logs.push(l), initialDelayMs: 10, sleepFn: async (ms) => waited.push(ms) },
+  );
+  const posts = calls.filter((c) => /\/websites\/42\/https$/.test(c.url) && c.method === "POST");
+  assert.equal(posts.length, 3, "two failures then a success");
+  assert.equal(state.enableFails, 0);
+  assert.equal(waited.length, 2, "backed off between attempts");
+  assert.ok(waited[1] > waited[0], "delay grows");
+  assert.ok(logs.some((l) => l.includes("证书文件异常") && l.includes("重试")));
+});
+
+test("enableHttpsResilient gives up after the attempt budget and keeps the panel error", async () => {
+  stubHttps({ ssls: [SSL_RECORD], failEnableTimes: 99 });
+  await assert.rejects(
+    () => enableHttpsResilient(`${BASE}/api/v2`, KEY, { websiteId: 42, websiteSSLId: 7 }, { attempts: 3, sleepFn: async () => {} }),
+    /证书文件异常/,
+  );
+});
+
+test("ensureHttps rides out a transient 'cert files not ready' response", async () => {
+  const { state } = stubHttps({ ssls: [SSL_RECORD], failEnableTimes: 1 });
+  const res = await ensureHttps({ baseUrl: BASE, apiKey: KEY, domain: DOMAIN });
+  assert.equal(res.changed, true);
+  assert.equal(state.enableFails, 0);
 });
 
 test("enableHttps binds type=existed with the chosen certificate", async () => {
@@ -392,12 +466,17 @@ test("ensureHttps applies a new certificate with the selected accounts", async (
   assert.ok(calls.some((c) => /\/websites\/42\/https$/.test(c.url) && c.method === "POST"));
 });
 
-test("ensureHttps applies separately for the manual DNS flow", async () => {
+test("ensureHttps hands the manual DNS flow to the panel instead of stalling", async () => {
   const { calls } = stubHttps({ ssls: [] });
-  await ensureHttps({ baseUrl: BASE, apiKey: KEY, domain: DOMAIN, method: "dnsManual", acmeAccountId: 3 });
+  const logs = [];
+  const res = await ensureHttps({ baseUrl: BASE, apiKey: KEY, domain: DOMAIN, method: "dnsManual", acmeAccountId: 3, onLog: (l) => logs.push(l) });
   const create = calls.find((c) => c.url.endsWith("/websites/ssl") && c.method === "POST");
-  assert.equal(create.body.apply, false, "manual flow creates first, applies after the TXT record");
-  assert.ok(calls.some((c) => c.url.endsWith("/websites/ssl/obtain")));
+  assert.equal(create.body.apply, false, "the panel must not start the order — a human adds the TXT record");
+  assert.equal(res.pendingManual, true);
+  assert.equal(res.changed, false);
+  assert.ok(logs.some((l) => l.includes("手动 DNS 验证需要在 1Panel 面板中完成")));
+  assert.equal(calls.some((c) => c.url.endsWith("/websites/ssl/obtain")), false, "no blocking order call");
+  assert.equal(calls.some((c) => /\/websites\/42\/https$/.test(c.url) && c.method === "POST"), false, "nothing to bind yet");
 });
 
 test("ensureHttps validates its inputs", async () => {

@@ -334,25 +334,49 @@ export async function applySsl(base, key, id, { skipDNSCheck = false, nameserver
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Poll until the certificate carries an expiry (issued). `message` is the
-// panel's last log line — surfaced verbatim on timeout so a DNS/port/CA failure
-// is visible rather than a bare "timed out".
+// Does this record prove the certificate exists?
+//
+// `status` is authoritative (the backend runs init → applying → ready, and
+// applyError on failure). Older panels omit it, and there the only signal is
+// `expireDate` — which the backend SEEDS TO time.Now() at creation and only
+// overwrites with the real cert.NotAfter once issuance succeeds. So a value
+// merely near "now" must never count as issued: doing that made the app enable
+// HTTPS a second after applying, and the panel answered
+// "证书文件异常，请检查证书状态！". A real certificate is ~90 days out.
+export function sslLooksIssued(ssl) {
+  if (ssl?.status) return ssl.status === "ready";
+  const pem = ssl?.pem;
+  if (typeof pem === "string" && pem.includes("BEGIN CERTIFICATE")) return true;
+  const t = Date.parse(ssl?.expireDate || "");
+  return Number.isFinite(t) && t - Date.now() > 6 * 3600 * 1000;
+}
+
+// Poll until the certificate is issued. Applying over DNS takes real time: the
+// backend runs the ACME order (writing the TXT record, waiting for propagation,
+// then fetching the cert) before it flips the status to ready.
 export async function pollSslUntilIssued(base, key, id, { timeoutMs = 180000, intervalMs = 3000, onLog, signal } = {}) {
   const log = onLog || (() => {});
   const deadline = Date.now() + timeoutMs;
   let last = "";
   let reported = "";
-  while (Date.now() < deadline) {
+  for (;;) {
     const ssl = await getSsl(base, key, id, signal);
-    if (ssl?.expireDate) return ssl;
+    if (sslLooksIssued(ssl)) return ssl;
+    const status = ssl?.status;
+    // A hard failure must surface at once rather than burning the whole timeout.
+    if (status === "applyError" || status === "error") {
+      throw new Error(`证书申请失败${ssl?.message ? `: ${ssl.message}` : "(1Panel 未返回原因,请在面板中查看证书日志)"}`);
+    }
     last = ssl?.message || last;
     if (last && last !== reported) {
       reported = last;
       log(`  ${last}`);
     }
+    if (Date.now() >= deadline) {
+      throw new Error(`证书申请超时(${Math.round(timeoutMs / 1000)} 秒,当前状态 ${status || "未知"})${last ? ` — ${last}` : ""}`);
+    }
     await sleep(intervalMs);
   }
-  throw new Error(`证书申请超时(${Math.round(timeoutMs / 1000)} 秒)${last ? ` — ${last}` : ""}`);
 }
 
 // --- Website HTTPS -----------------------------------------------------------
@@ -384,6 +408,26 @@ export async function enableHttps(
     },
     signal,
   });
+}
+
+// Bind + enable, retrying a few times. Even once the record reads `ready` the
+// panel can momentarily answer "证书文件异常，请检查证书状态！" while the nginx
+// config picks the freshly written files up, so a couple of spaced retries turn
+// a transient panel-side race into a success instead of a failed publish.
+export async function enableHttpsResilient(base, key, opts, { attempts = 5, initialDelayMs = 2000, sleepFn = sleep, onLog, signal } = {}) {
+  const log = onLog || (() => {});
+  let delay = initialDelayMs;
+  for (let i = 1; ; i++) {
+    try {
+      return await enableHttps(base, key, opts, signal);
+    } catch (e) {
+      if (i >= attempts || signal?.aborted) throw e;
+      const why = String(e.message).replace(/^1Panel 错误 \([^)]*\) — /, "").slice(0, 70);
+      log(`  ${why} — ${Math.round(delay / 1000)} 秒后重试(${i}/${attempts - 1})…`);
+      await sleepFn(delay);
+      delay = Math.min(Math.round(delay * 1.6), 15000);
+    }
+  }
 }
 
 // Orchestrate "make https://<domain> work": reuse the certificate already in the
@@ -421,13 +465,29 @@ export async function ensureHttps({
     if (!acmeAccountId) throw new Error("请选择 ACME 账号(1Panel 中还没有的话,请先在面板里创建一个)");
     if (method === "dnsAccount" && !dnsAccountId) throw new Error("自动 DNS 验证需要选择一个已配置的 DNS 账号");
     log(`申请新证书(${method === "http" ? "HTTP 验证" : method === "dnsManual" ? "手动 DNS 验证" : "自动 DNS 验证"})…`);
+    if (method === "dnsManual") {
+      // The panel's manual flow needs a human to add the TXT record (its own UI
+      // prints the value and waits), so driving the order from here would stall
+      // the publish. Create the record and hand that step to the panel; the next
+      // publish finds the issued certificate and just binds it.
+      ssl = await createSsl(
+        base,
+        apiKey,
+        { acmeAccountId, dnsAccountId, provider: method, primaryDomain: domain, autoRenew, apply: false },
+        signal,
+      );
+      log(`已创建证书记录 #${ssl.id},手动 DNS 验证需要在 1Panel 面板中完成:`);
+      log("  网站 → SSL → 证书 → 找到该记录,按提示添加 TXT 记录后继续申请。");
+      log("  签发完成后重新发布即可自动绑定(不会重复申请)。");
+      return { base, site, ssl, changed: false, pendingManual: true };
+    }
     ssl = await createSsl(
       base,
       apiKey,
-      { acmeAccountId, dnsAccountId, provider: method, primaryDomain: domain, autoRenew, apply: method !== "dnsManual" },
+      { acmeAccountId, dnsAccountId, provider: method, primaryDomain: domain, autoRenew, apply: true },
       signal,
     );
-    if (method === "dnsManual") await applySsl(base, apiKey, ssl.id, {}, signal);
+    log("证书申请已开始(1Panel 在后台异步签发,通常需要几十秒)…");
     ssl = await pollSslUntilIssued(base, apiKey, ssl.id, { timeoutMs, onLog: log, signal });
     log(`证书已签发${ssl.expireDate ? `(到期 ${ssl.expireDate})` : ""}`);
   }
@@ -437,7 +497,7 @@ export async function ensureHttps({
     log("HTTPS 已启用且证书一致,无需改动");
     return { base, site, ssl, changed: false };
   }
-  await enableHttps(
+  await enableHttpsResilient(
     base,
     apiKey,
     {
@@ -448,7 +508,7 @@ export async function ensureHttps({
       SSLProtocol: current?.SSLProtocol,
       algorithm: current?.algorithm,
     },
-    signal,
+    { onLog: log, signal },
   );
   log(`✅ 已为 ${domain} 启用 HTTPS(${httpConfig})`);
   return { base, site, ssl, changed: true };

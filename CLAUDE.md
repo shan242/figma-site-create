@@ -197,15 +197,34 @@ Applying for a certificate needs **three** things, and `provider` is the
 | `dnsAccountId` | the DNS account, required only for `provider: "dnsAccount"` |
 
 `ensureHttps` orchestrates: reuse a certificate already covering the domain →
-otherwise create the record with the selected accounts → apply → poll
-(`pollSslUntilIssued` looks for `expireDate`; the panel's `message` is surfaced on
-timeout) → `POST /websites/{websiteId}/https` with
-`{ type: "existed", websiteSSLId, enable: true, httpConfig }`, carrying the site's
-existing `SSLProtocol`/`algorithm` through so the panel's TLS defaults survive.
-It is **idempotent** — an already-enabled site on the same certificate is skipped.
+otherwise create the record with the selected accounts → poll → bind and enable
+with `POST /websites/{websiteId}/https` (`{ type: "existed", websiteSSLId,
+enable: true, httpConfig }`), carrying the site's existing `SSLProtocol`/
+`algorithm` through so the panel's TLS defaults survive. It is **idempotent** —
+an already-enabled site on the same certificate is skipped.
 
-`dnsAccount`/`http` pass `apply: true` on create (fully automatic); `dnsManual`
-creates first and applies after the user adds the TXT record.
+**Certificate issuance is asynchronous — poll the record's `status`, never its
+`expireDate`.** Two traps, both confirmed in the 1Panel backend:
+
+- `POST /websites/ssl` with `apply: true` runs the ACME order in a **goroutine**
+  and returns immediately, so the certificate does not exist yet when create
+  returns.
+- The backend seeds `ExpireDate: time.Now()` at creation and only overwrites it
+  with the real `cert.NotAfter` after issuance, so an `expireDate` near "now"
+  proves nothing. Trusting it made the app enable HTTPS a second after applying
+  and the panel answered `服务错误: 证书文件异常，请检查证书状态！`.
+
+The status machine is `init` → `applying` → `ready`, with `applyError`/`error`
+on failure (`sslLooksIssued` also falls back to a PEM body or a genuinely future
+expiry for panels that omit `status`). `pollSslUntilIssued` waits for `ready`,
+fails fast on `applyError` with the panel's `message`, and `enableHttpsResilient`
+retries the bind a few times with backoff for the window where the record reads
+ready but nginx has not picked the files up yet.
+
+`provider: "dnsManual"` is **not** driven from here: the panel's manual flow
+waits on a human adding the TXT record, so `ensureHttps` creates the record and
+returns `pendingManual: true`, telling the user to finish in the panel. The next
+publish finds the issued certificate and just binds it.
 
 The GUI reads the accounts with `publish:https-options` and renders dropdowns only
 (see the "申请并启用 HTTPS" block in `renderer/index.html`) — no credential fields.

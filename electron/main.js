@@ -402,10 +402,9 @@ ipcMain.handle("publish:run", async (event, { outDir }) => {
       onLog: (line) => send({ type: "log", text: line }),
       signal: abort.signal,
     });
-    send({
-      type: "done",
-      text: result.https ? `共上传 ${result.uploaded} 个文件 · HTTPS ${result.https.changed ? "已启用" : "已是最新"}` : `共上传 ${result.uploaded} 个文件`,
-    });
+    const h = result.https;
+    const httpsNote = !h ? "" : h.pendingManual ? " · HTTPS 待在 1Panel 中完成手动 DNS 验证" : ` · HTTPS ${h.changed ? "已启用" : "已是最新"}`;
+    send({ type: "done", text: `共上传 ${result.uploaded} 个文件${httpsNote}` });
     return { ok: true, ...result };
   } catch (e) {
     send({ type: "error", text: e.message });
