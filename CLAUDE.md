@@ -59,11 +59,16 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   `width:100%; min-width:{design width}px` (live: `min-width:max(100%,1440px)`), so
   the page fills the viewport and only clips below the design width. The body
   background is set to the canvas color (live: `body:has([data-breakpoint-id])`)
-  with `overflow-x:hidden` to swallow the min-width overflow. A node whose
-  `constraints.horizontal === "CENTER"` (Figma keeps its offset from the canvas
-  center) renders `left: calc(50% ± offpx)` where `off = designLeft - W/2` — at the
-  design width this evaluates to `designLeft` exactly, so nothing moves on a 1440
-  viewport, but the node stays centered as the viewport grows.
+  with `overflow-x:hidden` to swallow the min-width overflow. A node that moves
+  with the canvas **centre** renders `left: calc(50% ± offpx)` where
+  `off = designLeft - W/2` — at the design width this evaluates to `designLeft`
+  exactly, so nothing moves on a 1440 viewport, but the node stays centered as the
+  viewport grows. "Moves with the centre" means the node is CENTER-constrained
+  **or sits inside a CENTER-constrained ancestor frame** (`hasCenteredAncestor`):
+  the live site NESTS content inside its centred frame, so an auto-layout child
+  with no constraints of its own (e.g. a hero heading) still shifts with the
+  viewport. Using plain px for those drifted them left of the centered frame on
+  viewports wider than the design width. SCALE nodes keep their own path.
 - **`constraints.horizontal === "SCALE"` nodes reflow with the viewport**: the
   live site positions such nodes as a **percentage of the design width**, so they
   stretch as the canvas fills a wider viewport (the alias-grid site is all-SCALE

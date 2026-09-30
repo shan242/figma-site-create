@@ -79,7 +79,21 @@ export function makeAssetUrl(assetDir) {
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
+// True when the node moves with the canvas centre: it is CENTER-constrained
+// itself, or sits inside an ancestor frame that is. The live site NESTS content
+// inside its centred frame (`left:50% + translateX(-50%)`), so the whole subtree
+// shifts with the viewport — a heading whose own constraints are unset (an
+// auto-layout child) still moves because its frame does.
+export function hasCenteredAncestor(node, parentOf) {
+  let cur = node;
+  while (cur) {
+    if (cur.constraints?.horizontal === "CENTER") return true;
+    cur = parentOf?.get(cur.id);
+  }
+  return false;
+}
+
+export function nodeStyle(node, canvas, fontStackFn, assetUrl, centered) {
   const bb = node.absoluteBoundingBox;
   const left = Math.round(bb.x - canvas.x);
   const top = Math.round(bb.y - canvas.y);
@@ -87,12 +101,13 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl) {
   const h = Math.round(bb.height);
   const st = { position: "absolute", top: `${top}px`, width: `${w}px`, height: `${h}px` };
   // The build renders the canvas fluid (width:100%; min-width:W) to match the
-  // live site. A node Figma constrained horizontal=CENTER keeps its distance
-  // from the canvas center as the viewport stretches, so its left is a calc:
-  // at canvas width W it sits at design px `left`; at any wider viewport it
-  // must land at 50% + (left - W/2). calc(50% + (left - W/2))px is exactly
-  // that. Nodes without CENTER keep their fixed design px.
-  if (node.constraints?.horizontal === "CENTER") {
+  // live site. A node that moves with the canvas centre keeps its distance from
+  // that centre as the viewport stretches, so its left is a calc: at canvas
+  // width W it sits at design px `left`; at any wider viewport it must land at
+  // 50% + (left - W/2). `centered` is the caller's decision (own constraint or
+  // an ancestor's); nodes that don't move with the centre keep their fixed px.
+  const useCenter = centered ?? node.constraints?.horizontal === "CENTER";
+  if (useCenter) {
     const off = left - Math.round(canvas.width) / 2;
     st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off))}px)`;
   } else {
@@ -464,9 +479,13 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // Click target for this node: its own NAVIGATE interaction, or the nearest
   // ancestor GROUP's (buttons are groups whose interaction lives on the group).
   const href = linkHref(node, pathToFile, ctx.parentOf);
+  // Inherit canvas-centre tracking from a CENTER-constrained ancestor frame
+  // (see hasCenteredAncestor). SCALE nodes keep their own percentage path.
+  const centered =
+    node.constraints?.horizontal === "SCALE" ? false : hasCenteredAncestor(node, ctx.parentOf);
 
   if (tag === "SVG" && node.isLine) {
-    const st = nodeStyle(node, canvas, fontStack, assetUrl);
+    const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
     if (overlay) Object.assign(st, overlay);
     const col = fmtColor(node.strokes?.[0]?.color);
     st.background = col;
@@ -506,7 +525,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // Vector icons are served as generated .svg assets referenced by node.hash.
   if (tag === "SVG") {
     if (node.hash) {
-      const st = nodeStyle(node, canvas, fontStack, assetUrl);
+      const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
       if (overlay) Object.assign(st, overlay);
       st.display = "block";
       // The live site places vector assets at Figma's own isolated render
@@ -608,7 +627,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     const scroll = node.overflowDirection;
     const hasFill = (node.fills || []).some((f) => f.visible);
     if (!scroll && !hasFill) return;
-    const st = nodeStyle(node, canvas, fontStack, assetUrl);
+    const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
     if (overlay) Object.assign(st, overlay);
     if (scroll === "HORIZONTAL_SCROLLING") {
       st["overflow-x"] = "auto";
@@ -637,7 +656,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
 
   if (tag === "TEXT") {
     const eff = applyTextEdit(node, ctx.edits?.get(node.id));
-    const st = nodeStyle(eff, canvas, fontStack, assetUrl);
+    const st = nodeStyle(eff, canvas, fontStack, assetUrl, centered);
     if (overlay) Object.assign(st, overlay);
     applyScaleH(node, st, canvas);
     // The "active" nav item (current page) carries textDecoration UNDERLINE
@@ -689,7 +708,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   }
 
   if (tag === "RECTANGLE" || tag === "IMAGE") {
-    const st = nodeStyle(node, canvas, fontStack, assetUrl);
+    const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
     if (overlay) Object.assign(st, overlay);
     // Mask-group images carry their asset in node.hash, not in fills.
     if (tag === "IMAGE" && node.hash && !st["background-image"]) {
