@@ -303,8 +303,10 @@ AI: bind_data(...)  →  databinds.json  →  build.mjs  →  databind.mjs 注�
 - SVG 是矢量,模型**看不了**,`list_images` 会标 `readable:false`。
 
 ⚠️ **多模态是模型能力,不是代码能补的**:纯文本模型收到图片会 400,客户端会把
-这条错误翻译成"请把模型换成 deepseek-flash",而不是抛一串 API 术语。因为图片进的是
-**同一个会话**,一次对话里只能用一个模型 —— 想要看图就必须让主模型是多模态的。
+这条错误翻译成"请在设置里换一个多模态模型(deepseek-v4-flash 或 deepseek-flash)",
+而不是抛一串 API 术语。因为图片进的是**同一个会话**,一次对话里只能用一个模型 ——
+想要看图就必须让主模型是多模态的。本项目实测 `deepseek-v4-flash` 与 `deepseek-flash`
+都能接收图片,所以默认模型无需改动。
 
 `vision-check.mjs` 是独立实测脚本(要 API Key,不进 CI):同一个模型名打一遍、
 把图片发过去,直接看他能不能描述出来、以及哪个模型名该填进设置。

@@ -78,10 +78,10 @@
         <label for="cfg-model">模型</label>
         <input id="cfg-model" type="text" spellcheck="false" list="model-suggestions">
         <datalist id="model-suggestions">
-          <option value="deepseek-flash">deepseek-flash(多模态,支持看图片)</option>
-          <option value="deepseek-v4-flash">deepseek-v4-flash(纯文本)</option>
+          <option value="deepseek-v4-flash">deepseek-v4-flash</option>
+          <option value="deepseek-flash">deepseek-flash</option>
         </datalist>
-        <p class="hint">需要 AI 看懂图片(如识别页面里的世界地图)时必须用多模态模型 deepseek-flash。</p>
+        <p class="hint">要让 AI 看懂图片(如识别页面里的世界地图),模型必须是多模态的;deepseek-v4-flash 与 deepseek-flash 实测都支持。若看图请求被拒,换另一个再试。</p>
       </div>
       <label class="check"><input id="cfg-auto" type="checkbox"> 自动应用修改(跳过确认)</label>
       <div class="modal-actions">

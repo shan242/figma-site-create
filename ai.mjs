@@ -70,7 +70,7 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 - 需要看图片时:先 list_images(slug) 拿到图片节点的 nodeId,再 view_image({slug, nodeId})。图片会附在下一条消息里给你,之后你就能描述它、判断内容,或据此改动页面(例如替换该图片节点、调整尺寸/样式)。
   · 只支持 JPEG/PNG/GIF/WebP,单张 ≤32MB;SVG 这类矢量只能当文本读源码,无法"看图"。
   · 只看大概用 detail:'low'(快、省 token);要看细节用 detail:'original'。
-  · 若 view_image 报错说模型不支持图片,说明当前模型不是多模态的,需在设置里换成 deepseek-flash。
+  · 若 view_image 报错说模型不支持图片,说明当前模型不是多模态的,需在设置里换一个多模态模型(deepseek-v4-flash 或 deepseek-flash)。
 - 修改页面文本:调用 edit_text(slug, nodeId, 以及 text/fontSize/fontWeight/color 中至少一个)。nodeId 来自 read_page_text 返回的 all 列表中 type=TEXT 的节点;color 用 #RRGGBB。持久保存,重新生成后仍在。
 - 修改任意节点(文本/图片/矩形)的样式:调用 edit_node(slug, nodeId, style)。style 是原始 CSS 属性对象,如 {color:'#ff0000','font-size':'24px'};nodeId 来自 read_page_text 的 all 列表。持久保存,重新生成后仍在。
 - 全站全局样式:调用 append_css(css),会追加到 styles.css 末尾,作用于所有页面。
@@ -328,7 +328,7 @@ export function createDeepSeekModel(config) {
         const hasImage = JSON.stringify(body.messages).includes('"image_url"');
         if (hasImage && res.status === 400 && /image|vision|multimodal|多模态|图片/i.test(detail)) {
           throw new Error(
-            `当前模型「${modelName}」不支持图片理解。请在设置里把模型换成 deepseek-flash(多模态版)后重试。原始错误:${detail.slice(0, 180)}`,
+            `当前模型「${modelName}」不支持图片理解。请在设置里换一个多模态模型(deepseek-v4-flash 或 deepseek-flash)后重试。原始错误:${detail.slice(0, 180)}`,
           );
         }
         throw new Error(`${label || `API 错误 ${res.status}`}${detail ? ` — ${detail.slice(0, 200)}` : ""}`);
