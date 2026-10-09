@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime } from "./ai.mjs";
 import { buildSite } from "./build.mjs";
 
 // --- parseSSE -----------------------------------------------------------------
@@ -657,6 +657,145 @@ test("databinds.json 在 write_file 的禁写名单里", async () => {
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   const r = await handlers.write_file({ path: "databinds.json", content: "{}" });
   assert.ok(r.error, "必须拒绝直接改写 databinds.json");
+});
+
+// --- 图片理解(view_image / list_images) --------------------------------------
+// DeepSeek 的图像理解:只接受 JPEG/PNG/GIF/WebP,且**图片只能出现在 user 消息里**
+// (system/assistant 带图 400;工具结果是 role:"tool",同样不能带)。所以图片必须
+// 由 runAgent 补一条 user 消息送达 —— 这组测试就是钉住这一点。
+
+const PNG_1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+function imageFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "rep-img-"));
+  mkdirSync(join(dir, "data"));
+  mkdirSync(join(dir, "assets"));
+  writeFileSync(
+    join(dir, "manifest.json"),
+    JSON.stringify({
+      liveBase: "https://example.figma.site",
+      siteTitle: "T",
+      pages: [{ path: "/", slug: "index", file: "index.html", title: "Home", json: "data/index.json" }],
+    }),
+  );
+  writeFileSync(
+    join(dir, "data", "index.json"),
+    JSON.stringify({
+      roots: ["1:1"],
+      nodeById: {
+        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 800, height: 600 }, children: ["1:2", "1:3"] },
+        // 一张位图(可被模型理解)
+        "1:2": {
+          id: "1:2",
+          type: "RECTANGLE",
+          name: "世界地图",
+          absoluteBoundingBox: { x: 10, y: 10, width: 400, height: 300 },
+          fills: [{ type: "IMAGE", visible: true, imageRef: "deadbeef" }],
+        },
+        // 一个矢量图标(不能"看图",只能读源码)
+        "1:3": { id: "1:3", type: "SVG", name: "icon", hash: "cafe0001", absoluteBoundingBox: { x: 10, y: 400, width: 24, height: 24 } },
+      },
+    }),
+  );
+  writeFileSync(join(dir, "assets", "deadbeef.png"), Buffer.from(PNG_1x1, "base64"));
+  writeFileSync(join(dir, "assets", "cafe0001.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"></svg>');
+  return dir;
+}
+
+test("sniffImageMime 按文件内容判格式(不看扩展名)", () => {
+  assert.equal(sniffImageMime(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0, 0, 0, 0, 0])), "image/jpeg");
+  assert.equal(sniffImageMime(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])), "image/png");
+  assert.equal(sniffImageMime(Buffer.from(`GIF89a${"0".repeat(6)}`)), "image/gif");
+  assert.equal(sniffImageMime(Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")])), "image/webp");
+  assert.equal(sniffImageMime(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null, "SVG 不是模型支持的图片");
+  assert.equal(sniffImageMime(Buffer.alloc(4)), null, "太短");
+});
+
+test("list_images 列出图片节点,并标出能否被模型读取", async () => {
+  const dir = imageFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.list_images({ slug: "index" });
+  assert.equal(r.count, 2);
+  const map = Object.fromEntries(r.images.map((i) => [i.nodeId, i]));
+  assert.equal(map["1:2"].name, "世界地图");
+  assert.equal(map["1:2"].readable, true, "PNG 应可读");
+  assert.equal(map["1:2"].w, 400);
+  assert.equal(map["1:3"].readable, false, "SVG 不能被模型看图");
+  assert.ok((await handlers.list_images({ slug: "nope" })).error);
+});
+
+test("view_image 把图放进待发队列,而不是塞进工具返回值", async () => {
+  const dir = imageFixture();
+  const tools = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await tools.handlers.view_image({ slug: "index", nodeId: "1:2" });
+  assert.equal(r.queued, true);
+  assert.equal(r.mime, "image/png");
+  assert.equal(JSON.stringify(r).includes("base64"), false, "工具返回值里不能带图片数据");
+
+  const imgs = tools.takePendingImages();
+  assert.equal(imgs.length, 1);
+  assert.match(imgs[0].dataUrl, /^data:image\/png;base64,/);
+  assert.equal(imgs[0].detail, "auto", "默认 detail=auto");
+  assert.deepEqual(tools.takePendingImages(), [], "取走即清空,避免重复发送");
+});
+
+test("view_image 支持 path、detail,并拒绝非法输入", async () => {
+  const dir = imageFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  assert.equal((await handlers.view_image({ path: "assets/deadbeef.png", detail: "low" })).detail, "low");
+  assert.ok((await handlers.view_image({ slug: "index", nodeId: "1:3" })).error, "SVG 节点应被拒绝");
+  assert.ok((await handlers.view_image({ slug: "index", nodeId: "nope" })).error);
+  assert.ok((await handlers.view_image({ slug: "nope", nodeId: "1:2" })).error);
+  assert.ok((await handlers.view_image({ path: "assets/missing.png" })).error);
+  assert.ok((await handlers.view_image({})).error, "必须给出 path 或 slug+nodeId");
+  assert.ok((await handlers.view_image({ path: "../outside.png" })).error, "路径逃逸要被挡住");
+});
+
+test("runAgent 把 view_image 的图片作为 user 消息发给模型", async () => {
+  const dir = imageFixture();
+  const tools = makeTools({ outDir: dir, confirm: allowAll });
+  const seen = [];
+  const model = async (messages) => {
+    seen.push(JSON.parse(JSON.stringify(messages)));
+    if (seen.length === 1) {
+      return { content: "", toolCalls: [{ id: "c1", name: "view_image", arguments: { slug: "index", nodeId: "1:2" } }] };
+    }
+    return { content: "我看到一张世界地图", toolCalls: [] };
+  };
+  const res = await runAgent({ messages: [{ role: "user", content: "看看这张图" }], model, tools, config: {}, maxTurns: 3 });
+  assert.equal(res.text, "我看到一张世界地图");
+  assert.equal(seen.length, 2, "第一轮请求工具,第二轮带图再问");
+
+  const second = seen[1];
+  const imgMsg = second.find((m) => m.role === "user" && Array.isArray(m.content));
+  assert.ok(imgMsg, "必须补一条带图片的 user 消息");
+  const block = imgMsg.content.find((b) => b.type === "image_url");
+  assert.ok(block, "user 消息里要有 image_url 块");
+  assert.match(block.image_url.url, /^data:image\/png;base64,/);
+
+  // 关键约束:图片只能出现在 user 消息里,别处带上会被 API 400
+  for (const m of second) {
+    if (m.role === "user") continue;
+    assert.equal(String(m.content ?? "").includes("image_url"), false, `${m.role} 消息不能带图片`);
+  }
+  // 工具结果本身必须是纯文本
+  const toolMsg = second.find((m) => m.role === "tool");
+  assert.ok(toolMsg && typeof toolMsg.content === "string", "工具结果必须是字符串");
+});
+
+test("runAgent 在 view_image 失败时不追加图片消息", async () => {
+  const dir = imageFixture();
+  const tools = makeTools({ outDir: dir, confirm: allowAll });
+  const seen = [];
+  const model = async (messages) => {
+    seen.push(JSON.parse(JSON.stringify(messages)));
+    if (seen.length === 1) {
+      return { content: "", toolCalls: [{ id: "c1", name: "view_image", arguments: { slug: "index", nodeId: "1:3" } }] };
+    }
+    return { content: "好的", toolCalls: [] };
+  };
+  await runAgent({ messages: [{ role: "user", content: "看图" }], model, tools, config: {}, maxTurns: 3 });
+  assert.equal(seen[1].some((m) => Array.isArray(m.content) && JSON.stringify(m.content).includes("image_url")), false);
 });
 
 test("run_build invokes the injected build function", async () => {

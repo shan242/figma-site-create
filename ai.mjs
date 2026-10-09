@@ -14,11 +14,46 @@
 // generated files; edits are gated behind a human confirmation unless
 // autoApply is on. There is no shell access.
 
-import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync } from "node:fs";
-import { resolve, dirname, sep } from "node:path";
+import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync, statSync } from "node:fs";
+import { resolve, dirname, sep, join, basename } from "node:path";
 import { buildSite } from "./build.mjs";
 import { findCanvas, hexToColor } from "./lib.mjs";
 import { extractKeywordsLocal } from "./wordcloud.mjs";
+
+// --- 图片理解 ------------------------------------------------------------------
+// DeepSeek 的图像理解只接受 JPEG/PNG/GIF/WebP,且**只允许出现在 user 消息里**
+// (system/assistant 带图会 400,见 api-docs.deepseek.com/zh-cn/guides/vision)。
+// 因为工具结果是 role:"tool" 消息,图片**不能**经工具返回值传给模型 —— 所以
+// view_image 只是把图片放进一个待发队列,由 runAgent 在工具轮之后补一条 user
+// 消息把图带过去。
+const IMG_MIME = {
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+const MAX_IMAGE_BYTES = 32 * 1024 * 1024; // 文档限制:base64/URL 单图 32 MiB
+
+// 按**文件内容**判断格式(文档明确说以内容为准,不看扩展名)。
+export function sniffImageMime(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return IMG_MIME.jpeg;
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return IMG_MIME.png;
+  if (buf.slice(0, 3).toString("latin1") === "GIF") return IMG_MIME.gif;
+  if (buf.slice(0, 4).toString("latin1") === "RIFF" && buf.slice(8, 12).toString("latin1") === "WEBP") return IMG_MIME.webp;
+  return null;
+}
+
+// assets/ 里的文件可能是 .png 名字装着 JPEG 字节(scrape 会嗅探后按真实扩展名落盘),
+// 所以这里按 base 名找所有可能扩展名,再由内容定 mime。
+function findAssetFile(assetDir, hash) {
+  if (!hash) return null;
+  for (const ext of ["png", "jpg", "jpeg", "gif", "webp", "svg"]) {
+    const p = join(assetDir, `${hash}.${ext}`);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
 
 const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助手。用户会描述想对生成的站点做什么(常见是放置词云、调整文本、查看页面)。
 
@@ -32,6 +67,10 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
   · 参与人数:kind='counter',options.unit 填单位(如「人已参与」)。
   · fallback 必填,且形状要与 kind 对应(bar/wordcloud 给 {buckets:[{key,count}],total};list 给 {items:[{data:{...}}]};counter 给 {total})——后端不可用时访客看到的就是它。
   · rect 用画布坐标,宽度别超出画布;纵向可以放在内容下方。
+- 需要看图片时:先 list_images(slug) 拿到图片节点的 nodeId,再 view_image({slug, nodeId})。图片会附在下一条消息里给你,之后你就能描述它、判断内容,或据此改动页面(例如替换该图片节点、调整尺寸/样式)。
+  · 只支持 JPEG/PNG/GIF/WebP,单张 ≤32MB;SVG 这类矢量只能当文本读源码,无法"看图"。
+  · 只看大概用 detail:'low'(快、省 token);要看细节用 detail:'original'。
+  · 若 view_image 报错说模型不支持图片,说明当前模型不是多模态的,需在设置里换成 deepseek-flash。
 - 修改页面文本:调用 edit_text(slug, nodeId, 以及 text/fontSize/fontWeight/color 中至少一个)。nodeId 来自 read_page_text 返回的 all 列表中 type=TEXT 的节点;color 用 #RRGGBB。持久保存,重新生成后仍在。
 - 修改任意节点(文本/图片/矩形)的样式:调用 edit_node(slug, nodeId, style)。style 是原始 CSS 属性对象,如 {color:'#ff0000','font-size':'24px'};nodeId 来自 read_page_text 的 all 列表。持久保存,重新生成后仍在。
 - 全站全局样式:调用 append_css(css),会追加到 styles.css 末尾,作用于所有页面。
@@ -284,6 +323,14 @@ export function createDeepSeekModel(config) {
       if (!res.ok) {
         const detail = await res.text().catch(() => "");
         const label = { 401: "API Key 无效", 403: "API 无权限", 429: "请求过于频繁" }[res.status];
+        // 图片理解只对多模态模型开放。DeepSeek 会以 400 拒绝,但错误文案比较绕,
+        // 这里翻译成"该改哪个设置",否则用户只会看到一串 API 术语。
+        const hasImage = JSON.stringify(body.messages).includes('"image_url"');
+        if (hasImage && res.status === 400 && /image|vision|multimodal|多模态|图片/i.test(detail)) {
+          throw new Error(
+            `当前模型「${modelName}」不支持图片理解。请在设置里把模型换成 deepseek-flash(多模态版)后重试。原始错误:${detail.slice(0, 180)}`,
+          );
+        }
         throw new Error(`${label || `API 错误 ${res.status}`}${detail ? ` — ${detail.slice(0, 200)}` : ""}`);
       }
 
@@ -369,6 +416,21 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
       onEvent?.({ type: "tool_end", tool: tc.name, ok, summary: summarize(tc.name, result) });
       history.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
     }
+
+    // view_image 请求的图片只能以 **user** 消息送达 —— DeepSeek 的图像理解
+    // 不接受 system/assistant 消息带图,而工具结果是 role:"tool",同样不能带。
+    // 所以在工具轮之后补一条 user 消息把图交给模型。
+    const imgs = tools.takePendingImages?.() || [];
+    if (imgs.length) {
+      history.push({
+        role: "user",
+        content: [
+          { type: "text", text: `以下是你请求查看的图片(${imgs.map((i) => i.label).join("、")}),请据此回答:` },
+          ...imgs.map((i) => ({ type: "image_url", image_url: { url: i.dataUrl, detail: i.detail } })),
+        ],
+      });
+      onEvent?.({ type: "images", count: imgs.length, labels: imgs.map((i) => i.label) });
+    }
   }
   onEvent?.({ type: "done", text: finalText, turnCount: limit });
   return { text: finalText, turnCount: limit };
@@ -378,6 +440,8 @@ function summarize(name, result) {
   if (result?.error) return `失败: ${result.error}`;
   if (name === "list_pages") return `共 ${result?.pages?.length ?? 0} 个页面`;
   if (name === "read_page_text") return `${result?.slug ?? ""} 页面文本 ${result?.text?.length ?? 0} 字符`;
+  if (name === "list_images") return `${result?.count ?? 0} 张图片`;
+  if (name === "view_image") return result?.error ? result.error : `已把图片交给模型查看: ${result?.label ?? ""}`;
   if (name === "read_file") return `已读 ${result?.path ?? ""}`;
   if (name === "write_file") return `已写入 ${result?.path ?? ""}`;
   if (name === "apply_wordcloud") return `词云 ${result?.wordCount ?? 0} 词 → ${result?.slug ?? ""}`;
@@ -405,6 +469,10 @@ const WRITE_DENY = ["manifest.json", "wordclouds.json", "databinds.json", "edits
 
 export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   const root = resolve(outDir);
+  const assetDir = join(root, "assets");
+  // view_image 把图放这里;runAgent 在工具轮之后用它补一条 user 消息
+  // (图片不能出现在 role:"tool" 的消息里,见文件头的说明)。
+  const pendingImages = [];
   const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
   const rootNorm = norm(realpathSync(root));
 
@@ -559,6 +627,79 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         if (all.length >= 150) break;
       }
       return { slug, canvas: cb ? { width: cb.width, height: cb.height } : null, text: truncated, all };
+    },
+
+    // 列出页面上的图片节点,让模型知道"有哪些图可以看"以及它们的 id。
+    // read_page_text 的 all 里看不出哪个节点带图片填充,所以需要这个。
+    async list_images({ slug }) {
+      const page = loadPages().find((p) => p.slug === slug);
+      if (!page) return { error: `没有这个页面: ${slug}` };
+      const { data } = pageTextOf(slug);
+      const images = [];
+      for (const n of Object.values(data.nodeById || {})) {
+        const refs = [n.hash, ...(n.fills || []).filter((f) => f.type === "IMAGE").map((f) => f.imageRef)].filter(Boolean);
+        if (!refs.length) continue;
+        const ref = refs[0];
+        const file = findAssetFile(assetDir, ref);
+        const bb = n.absoluteBoundingBox || {};
+        images.push({
+          nodeId: n.id,
+          type: n.type,
+          name: n.name || "",
+          w: Math.round(bb.width || 0),
+          h: Math.round(bb.height || 0),
+          asset: file ? basename(file) : `${ref} (文件缺失,需重新抓取)`,
+          kb: file ? Math.round(statSync(file).size / 1024) : 0,
+          readable: !!file && !!sniffImageMime(readFileSync(file)),
+        });
+      }
+      return { slug, count: images.length, images };
+    },
+
+    // 让模型"看"一张图。图片不能走工具返回值(role:"tool" 不支持图片),
+    // 所以这里只把图放进待发队列,由 runAgent 补一条 user 消息带给模型。
+    async view_image({ slug, nodeId, path, detail }) {
+      let file = null;
+      let label = "";
+      if (path) {
+        try {
+          file = resolveInDir(path);
+        } catch (e) {
+          return { error: e.message };
+        }
+        if (!existsSync(file)) return { error: `文件不存在: ${path}` };
+        label = basename(file);
+      } else if (slug && nodeId) {
+        const page = loadPages().find((p) => p.slug === slug);
+        if (!page) return { error: `没有这个页面: ${slug}` };
+        const { data } = pageTextOf(slug);
+        const n = data.nodeById?.[nodeId];
+        if (!n) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
+        const ref = [n.hash, ...(n.fills || []).filter((f) => f.type === "IMAGE").map((f) => f.imageRef)].filter(Boolean)[0];
+        if (!ref) return { error: `节点 ${nodeId} 不是图片节点。可用 list_images 查看该页有哪些图。` };
+        file = findAssetFile(assetDir, ref);
+        if (!file) return { error: `节点 ${nodeId} 的图片文件缺失(${ref}),请重新抓取站点` };
+        label = `${n.name || nodeId} (${basename(file)})`;
+      } else {
+        return { error: "需要 path,或 slug + nodeId" };
+      }
+
+      const buf = readFileSync(file);
+      const mime = sniffImageMime(buf);
+      if (!mime) return { error: `不是支持的图片格式(仅 JPEG/PNG/GIF/WebP): ${basename(file)}` };
+      if (buf.length > MAX_IMAGE_BYTES) {
+        return { error: `图片 ${(buf.length / 1048576).toFixed(1)}MB 超过 32MB 上限,模型无法接收` };
+      }
+      const d = detail === "low" || detail === "high" || detail === "original" ? detail : "auto";
+      pendingImages.push({ dataUrl: `data:${mime};base64,${buf.toString("base64")}`, detail: d, label });
+      return {
+        queued: true,
+        label,
+        mime,
+        kb: Math.round(buf.length / 1024),
+        detail: d,
+        note: "图片已附在下一条消息里,你现在就能看到它。",
+      };
     },
 
     async read_file({ path }) {
@@ -908,6 +1049,35 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     {
       type: "function",
       function: {
+        name: "list_images",
+        description:
+          "列出某个页面上的所有图片节点(nodeId、名称、尺寸、资源文件、是否可读给模型)。想看某张图之前先用它拿到 nodeId —— read_page_text 的 all 列表看不出哪个节点带图片填充",
+        parameters: { type: "object", properties: { slug: { type: "string", description: "页面 slug" } }, required: ["slug"] },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "view_image",
+        description:
+          "真正让模型『看到』一张图片并理解其内容(例如识别图中的世界地图、图表、截图文字)。图片会在下一条消息里附给你。" +
+          "用法:传 slug + nodeId(来自 list_images),或传 path(输出目录内任意图片文件)。" +
+          "注意:只能看 JPEG/PNG/GIF/WebP,单张上限 32MB。图片理解需要多模态模型;" +
+          "若返回错误说明当前模型不支持图片,需在设置里把模型换成 deepseek-flash。",
+        parameters: {
+          type: "object",
+          properties: {
+            slug: { type: "string", description: "页面 slug;与 nodeId 搭配使用" },
+            nodeId: { type: "string", description: "图片节点 id,来自 list_images" },
+            path: { type: "string", description: "或直接指定输出目录内的图片路径" },
+            detail: { type: "string", enum: ["low", "auto", "original"], description: "low 更快更省 token(缩到 512×512);默认 auto" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "read_file",
         description: "读取输出目录里的一个文件(html/json 等)",
         parameters: { type: "object", properties: { path: { type: "string", description: "相对于输出目录的路径" } }, required: ["path"] },
@@ -1126,5 +1296,13 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     },
   ];
 
-  return { handlers, schemas, root };
+  return {
+    handlers,
+    schemas,
+    root,
+    // 取走待发图片(取走即清空,避免重复发送同一张图浪费 token)
+    takePendingImages() {
+      return pendingImages.splice(0, pendingImages.length);
+    },
+  };
 }

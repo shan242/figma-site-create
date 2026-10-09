@@ -278,6 +278,37 @@ AI: bind_data(...)  →  databinds.json  →  build.mjs  →  databind.mjs 注�
 `databind-e2e.mjs` 用 headless Chrome 打真实后端跑通读/写/去重全链路
 (需要 `DA_TOKEN`,依赖外网与本机 Chrome,所以不进 CI)。
 
+## 图片理解(view_image / list_images)
+
+让 AI **看懂**页面里的位图(地图、图表、截图文字),而不只是改它们的 CSS。
+
+**关键约束(决定了实现形态)**:DeepSeek 的图像理解只接受 JPEG/PNG/GIF/WebP,
+且**图片只能出现在 `user` 消息里** —— `system`/`assistant` 带图返回 400,而工具
+结果是 `role:"tool"` 消息,同样不能带图。所以:
+
+- `view_image` **不通过返回值传图**。它只把图片推进 `makeTools` 内部的
+  `pendingImages` 队列,返回一句纯文本;
+- `runAgent` 在工具轮结束后调 `tools.takePendingImages()`,补一条
+  **`user` 消息**(`content` 为块数组:一个 text + N 个 image_url)把图交给模型。
+  取走即清空,避免同一张图被重复发送浪费 token。
+
+这和"AI 不写浏览器脚本"是同一个思路:**能力由框架提供,模型只做声明**。
+
+- `list_images(slug)` 先列出页面上的图片节点(nodeId / 名称 / 尺寸 / 资源文件 /
+  能否被模型读取)。`read_page_text` 的 `all` 看不出哪个节点带图片填充,所以需要它。
+- `view_image({slug, nodeId})` 或 `view_image({path})`,可选 `detail`
+  (`low` 缩到 512×512 更省 token / `original` 看细节 / 默认 `auto`)。
+- 格式按**文件内容**嗅探(`sniffImageMime`),不看扩展名 —— assets 里 `.png`
+  可能是 JPEG 字节。单图上限 32MB(API 硬限制)。
+- SVG 是矢量,模型**看不了**,`list_images` 会标 `readable:false`。
+
+⚠️ **多模态是模型能力,不是代码能补的**:纯文本模型收到图片会 400,客户端会把
+这条错误翻译成"请把模型换成 deepseek-flash",而不是抛一串 API 术语。因为图片进的是
+**同一个会话**,一次对话里只能用一个模型 —— 想要看图就必须让主模型是多模态的。
+
+`vision-check.mjs` 是独立实测脚本(要 API Key,不进 CI):同一个模型名打一遍、
+把图片发过去,直接看他能不能描述出来、以及哪个模型名该填进设置。
+
 ## Packaging & CI
 
 `.github/workflows/build.yml` builds the Electron GUI (`electron/`) on three

@@ -191,6 +191,13 @@ function handleChatEvent(evt) {
       lastToolEl = null;
       chatEl.scrollTop = chatEl.scrollHeight;
       break;
+    case "images": {
+      // view_image 把图片作为一条 user 消息发给模型(工具结果不能带图)
+      const el = chatBubble("tool");
+      el.textContent = `🖼 已把 ${evt.count} 张图片交给模型查看${evt.labels?.length ? ":" + evt.labels.join("、") : ""}`;
+      chatEl.scrollTop = chatEl.scrollHeight;
+      break;
+    }
     case "log":
       // run_build 的构建输出回到左侧日志面板
       appendLog(evt.text);

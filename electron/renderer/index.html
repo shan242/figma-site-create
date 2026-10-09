@@ -76,7 +76,12 @@
       </div>
       <div class="field">
         <label for="cfg-model">模型</label>
-        <input id="cfg-model" type="text" spellcheck="false">
+        <input id="cfg-model" type="text" spellcheck="false" list="model-suggestions">
+        <datalist id="model-suggestions">
+          <option value="deepseek-flash">deepseek-flash(多模态,支持看图片)</option>
+          <option value="deepseek-v4-flash">deepseek-v4-flash(纯文本)</option>
+        </datalist>
+        <p class="hint">需要 AI 看懂图片(如识别页面里的世界地图)时必须用多模态模型 deepseek-flash。</p>
       </div>
       <label class="check"><input id="cfg-auto" type="checkbox"> 自动应用修改(跳过确认)</label>
       <div class="modal-actions">
