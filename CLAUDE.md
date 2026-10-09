@@ -229,6 +229,41 @@ publish finds the issued certificate and just binds it.
 The GUI reads the accounts with `publish:https-options` and renders dropdowns only
 (see the "申请并启用 HTTPS" block in `renderer/index.html`) — no credential fields.
 
+## Packaging & CI
+
+`.github/workflows/build.yml` builds the Electron GUI (`electron/`) on three
+runners and uploads one artifact per platform:
+
+| job | runner | args | artifact |
+|---|---|---|---|
+| `windows-x64` | `windows-latest` | `--win` | `FigmaSiteReplica-1.0.0-portable.exe` + `-setup.exe` |
+| `macos-arm64` | `macos-latest` | `--mac --arm64` | `FigmaSiteReplica-1.0.0-arm64.dmg` / `.zip` |
+| `macos-x64` | `macos-latest` | `--mac --x64` | `FigmaSiteReplica-1.0.0-x64.dmg` / `.zip` |
+
+**Both macOS builds run on the arm64 runner.** `macos-latest` is macOS arm64, and
+the x64 macOS images (`macos-*-intel`, `*-large`) are GitHub *larger* runners — a
+separate, billed class. Cross-compiling is safe and free here because the app has
+`dependencies: {}` and no native modules (no `gypfile`/`.node`), so electron-builder
+just downloads Electron's prebuilt `darwin-x64` binary and repackages it. Two traps
+worth remembering:
+
+- `dmg-builder` picks its helper with **`process.arch`** (the host), not the target
+  arch (`dmg-builder/out/dmgUtil.js`), so producing an x64 DMG on arm64 needs no
+  Rosetta.
+- `@electron/rebuild` for `arch=x64` is a no-op only because there are no native
+  modules. Adding one turns this into a real cross-build that needs the x64 toolchain.
+
+The macOS job verifies the result with `lipo -archs`, so a silent fallback to the
+host architecture fails the build instead of shipping the wrong binary.
+
+**Artifacts are unsigned** (`CSC_IDENTITY_AUTO_DISCOVERY: "false"`), so the CI log
+shows `skipped macOS application code signing`. Consequences: Windows shows a
+SmartScreen warning, and macOS reports the app as damaged on first launch — the user
+must right-click → Open or run `xattr -cr <app>`. Removing that entirely needs an
+Apple Developer ID ($99/yr) and notarization; ad-hoc signing alone only softens it.
+
+Electron 43 requires macOS 12 or newer, on both architectures.
+
 ## Verification
 
 `node verify.mjs <live-url> <out.json>` captures computed styles of leaf text nodes;

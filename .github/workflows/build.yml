@@ -1,6 +1,11 @@
-# Dual-OS CI: build the Electron GUI (FigmaSiteReplica) for Windows + macOS on
-# every push to main and on version tags. Runs `npm ci` + `build:worker` on the
-# target OS itself, so no cross-compilation hacks are needed.
+# Multi-OS CI: build the Electron GUI (FigmaSiteReplica) for Windows, macOS
+# Apple Silicon and macOS Intel on every push to main and on version tags.
+#
+# Both macOS artifacts come off the same arm64 runner: the app has NO runtime
+# dependencies and no native modules, so electron-builder just downloads
+# Electron's prebuilt x64 binary and packages it (`--mac --x64`). Building natively
+# on an Intel runner would need a `macos-*-intel`/`-large` runner, which is a
+# separate (billed) runner class — the free macOS runner is arm64 only.
 #
 # Trigger from a tag:        git tag v1.0.0 && git push origin v1.0.0
 # The tag job also publishes a GitHub Release with all built artifacts.
@@ -19,16 +24,21 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
+            name: windows-x64
             args: --win
           - os: macos-latest
-            args: --mac
+            name: macos-arm64
+            args: --mac --arm64
+          - os: macos-latest
+            name: macos-x64
+            args: --mac --x64
     env:
       # No signing certificate on CI runners — tell electron-builder to skip
       # codesign instead of probing for an identity and failing.
@@ -51,14 +61,33 @@ jobs:
         working-directory: electron
         run: npm run build:worker
 
-      - name: Package ${{ matrix.os }}
+      - name: Package ${{ matrix.name }}
         working-directory: electron
         run: npx electron-builder ${{ matrix.args }}
+
+      # Guard the cross-compiled Intel build: it is produced on an arm64 host, so
+      # a silent fallback to the host arch would ship the wrong binary.
+      - name: Verify macOS architecture
+        if: runner.os == 'macOS'
+        working-directory: electron
+        shell: bash
+        run: |
+          APP=$(find dist -maxdepth 3 -name "FigmaSiteReplica.app" | head -1)
+          BIN="$APP/Contents/MacOS/FigmaSiteReplica"
+          echo "app: $APP"
+          file "$BIN"
+          ARCH=$(lipo -archs "$BIN")
+          echo "arch: $ARCH"
+          EXPECTED=${{ contains(matrix.name, 'arm64') && 'arm64' || 'x86_64' }}
+          if [ "$ARCH" != "$EXPECTED" ]; then
+            echo "::error::expected $EXPECTED but the app is $ARCH"
+            exit 1
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: FigmaSiteReplica-${{ matrix.os }}
+          name: FigmaSiteReplica-${{ matrix.name }}
           path: |
             electron/dist/*.exe
             electron/dist/*.dmg
