@@ -167,6 +167,13 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   `<link>`, built from the union of `(family, weight)` across all pages.
 - Any other family → **self-host**: download its woff2 from `fonts[name].url` into
   `fonts/` and emit `@font-face` (exact family base-name + weight) into `styles.css`.
+  The download **retries 3× with backoff and reports the real reason**: the failure
+  mode is a transient drop on a 4–7 MB file (Noto Sans SC/JP), not a missing URL —
+  the same URL is 200 on the next attempt. Two rules learned the hard way:
+  - a font that never landed must **not** get a `@font-face` rule (the browser would
+    404 it and silently fall back, hiding the problem);
+  - `catch {}` with a generic "could not fetch" made this bug undiagnosable.
+  A site whose fonts all failed still builds — it just uses the fallback stack.
 - **Known cosmetic quirk (accepted, not a bug)**: live computed `font-family` values
   carry weight suffixes ("Inter:Medium", "Inria Sans:Bold") and some named-bold faces
   compute `font-weight: 400` while local computes 700. Both render the same bold font —

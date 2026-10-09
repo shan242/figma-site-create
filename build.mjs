@@ -157,33 +157,65 @@ function googleFontsLink(google) {
 
 // Download the site's own woff2 for fonts Google Fonts can't serve, and emit
 // the @font-face rules into styles.css.
+//
+// Retries and loud diagnostics, because the failure mode here is a TRANSIENT
+// network drop on a multi-megabyte download (Noto Sans SC/JP are 4–7 MB each),
+// not a missing file: the same URL succeeds on the next attempt. The old
+// `catch {}` printed "could not fetch" with no reason and emitted a @font-face
+// pointing at a file that was never written, so the page silently 404'd its
+// font. Now the reason is surfaced, the rule is only emitted for a file that
+// really landed, and a failure is summarised with what to do about it.
 async function selfHostedCss(selfHost) {
   if (!selfHost.size) return "";
   mkdirSync(fontDir, { recursive: true });
   const rules = [];
+  let failed = 0;
   for (const [name, info] of selfHost) {
     const url = info.url;
     if (!url) continue;
     const file = basename(url);
     const dest = join(fontDir, file);
-    try {
-      // Skip the re-download when the file already exists — the chat agent
-      // rebuilds after every edit, and re-fetching fonts on each rebuild is
-      // wasted network for an unchanged site.
-      if (!existsSync(dest) || statSync(dest).size === 0) {
-        const res = await fetch(`${manifest.liveBase}${url}`);
-        if (res.ok) writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+    // Skip the re-download when the file already exists — the chat agent
+    // rebuilds after every edit, and re-fetching fonts on each rebuild is
+    // wasted network for an unchanged site.
+    const have = existsSync(dest) && statSync(dest).size > 0;
+    let lastErr = "";
+    if (!have) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch(`${manifest.liveBase}${url}`);
+          if (!res.ok) {
+            // Drain the body: an unconsumed response keeps the connection out of
+            // undici's pool and can wedge later requests to the same origin.
+            try {
+              await res.body?.cancel();
+            } catch {}
+            throw new Error(`HTTP ${res.status}`);
+          }
+          writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+          lastErr = "";
+          break;
+        } catch (e) {
+          lastErr = e?.message || String(e);
+          if (attempt < 3) await new Promise((r) => setTimeout(r, 500 * attempt));
+        }
       }
-      rules.push(`@font-face {
+    }
+    if (lastErr) {
+      failed++;
+      console.warn(`  ⚠ 字体 ${name} 下载失败(${url}):${lastErr}`);
+      continue; // 不写出指向不存在文件的 @font-face;浏览器会退到字体栈的下一项
+    }
+    rules.push(`@font-face {
   font-family: '${name.split(":")[0]}';
   font-weight: ${info.weight || 400};
   font-style: ${info.italic ? "italic" : "normal"};
   src: url(fonts/${file}) format('woff2');
 }`);
-      console.log(`  ✓ self-hosted font ${name} (${file})`);
-    } catch {
-      console.warn(`  ⚠ could not fetch font ${name} from ${url}`);
-    }
+    console.log(`  ✓ self-hosted font ${name} (${file})`);
+  }
+  if (failed) {
+    console.warn(`  ⚠ 有 ${failed} 个字体未能自托管,相关页面会退回系统字体;重新生成一次通常即可(网络抖动)`);
   }
   return rules.join("\n\n");
 }
