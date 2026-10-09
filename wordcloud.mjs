@@ -126,6 +126,22 @@ export function extractKeywordsLocal(text) {
 // neutralize "<" so a word can never close the script tag (e.g. "</script>").
 const safeJson = (v) => JSON.stringify(v).replace(/</g, "\\u003c");
 
+// The same layout math, as SOURCE TEXT, so databind.mjs can embed it in the
+// browser runtime. Live word clouds get their words after the page loads (they
+// come from the data backend), so they cannot be laid out at build time — the
+// browser has to run this. Emitted via Function.prototype.toString so the two
+// copies can never drift; databind.test.mjs evaluates the result and compares
+// it against layoutWordCloud() itself.
+export const layoutRuntime = [
+  `var DEFAULT_COLORS = ${JSON.stringify(DEFAULT_COLORS)};`,
+  `var MAX_TRIES = ${MAX_TRIES};`,
+  `var GAP = ${GAP};`,
+  `var clamp = ${clamp.toString()};`,
+  `var measureText = ${measureText.toString()};`,
+  `var PUNCT_ONLY = ${PUNCT_ONLY.toString()};`,
+  `var layoutWordCloud = ${layoutWordCloud.toString()};`,
+].join("\n");
+
 // Browser-side renderer. Exposed as window.renderWordCloud(canvas, layout);
 // draws with devicePixelRatio scaling, dims non-hovered words, shows a tooltip
 // with the word + weight. Deliberately plain ES5-ish so it needs no build.

@@ -25,6 +25,13 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 你可以调用工具。规则:
 - 站点输出目录里的文件是唯一可写范围;不要在对话里编造文件名,先 list_pages / read_file / read_page_text 再动手。
 - 放置词云:调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。
+- 需要跨访客持久化的功能一律用 bind_data,不要自己写 <script> 去 fetch 后端:
+  · 投票:kind='bar',read.groupBy 填选项字段(如 choice),write.target 指向页面上的按钮节点、write.field 填同一字段;访客点按钮即投票,已经投过的人不会再被要求投。
+  · 收集关键词做实时词云:kind='wordcloud',write.input=true(矩形内自动生成输入框+按钮),write.field 用 text。
+  · 留言板:kind='list',write.input=true,field 用内容字段名。
+  · 参与人数:kind='counter',options.unit 填单位(如「人已参与」)。
+  · fallback 必填,且形状要与 kind 对应(bar/wordcloud 给 {buckets:[{key,count}],total};list 给 {items:[{data:{...}}]};counter 给 {total})——后端不可用时访客看到的就是它。
+  · rect 用画布坐标,宽度别超出画布;纵向可以放在内容下方。
 - 修改页面文本:调用 edit_text(slug, nodeId, 以及 text/fontSize/fontWeight/color 中至少一个)。nodeId 来自 read_page_text 返回的 all 列表中 type=TEXT 的节点;color 用 #RRGGBB。持久保存,重新生成后仍在。
 - 修改任意节点(文本/图片/矩形)的样式:调用 edit_node(slug, nodeId, style)。style 是原始 CSS 属性对象,如 {color:'#ff0000','font-size':'24px'};nodeId 来自 read_page_text 的 all 列表。持久保存,重新生成后仍在。
 - 全站全局样式:调用 append_css(css),会追加到 styles.css 末尾,作用于所有页面。
@@ -33,7 +40,7 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 - 修改颜色/字号/间距/圆角前,先 read_file('design-report.md') 读设计报告,复用报告里的原子变量(主色/辅色/背景色/文字色、字号阶梯、间距、圆角)与布局模式,不要凭空发明与报告不符的值。报告由抓取时自动生成;旧目录没有该文件时跳过此步即可。
 - 需要大改页面结构时,可以用 write_file 改写生成的 *.html(也可以写 data/ 下的页面数据)。改写 *.html 后,系统会在每次重新生成后把你改的内容自动套回去(记录在 file-locks.json),所以是持久的。
 - 注意:对同一个页面,要么用 edit_text / edit_node / apply_wordcloud 这类覆盖层工具改,要么用 write_file 整体改写 HTML,不要混用——整体改写会把该页覆盖层的改动盖掉。append_css 与 write_file 改 styles.css 同理。
-- 不要改写 manifest.json、wordclouds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json(它们是构建元数据/覆盖层来源/设计报告,直接改会破坏一致性)。
+- 不要改写 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json(它们是构建元数据/覆盖层来源/设计报告,直接改会破坏一致性)。
 - 修改类工具成功后,系统会自动重新生成页面,你一般无需调用 run_build;如确需立即重建可调用。
 - 用中文回答;完成后的回复要简短说明改了什么。`;
 
@@ -123,7 +130,7 @@ body { overflow-x: hidden; }
 - 不要用 zoom 缩放做重排(那是 width-adaptive 的方案)。
 - 不要混用两种标准(同一 styles.css 里既 zoom 又重排)。
 - 不要继续用绝对定位 left/top 摆节点——重排的关键就是放弃绝对定位。
-- 不要改写 manifest.json、wordclouds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json。
+- 不要改写 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json。
 
 说明:
 - 优先重排「框架级容器」,文字与图片等叶节点保持原样,不要逐节点重写。
@@ -375,6 +382,8 @@ function summarize(name, result) {
   if (name === "write_file") return `已写入 ${result?.path ?? ""}`;
   if (name === "apply_wordcloud") return `词云 ${result?.wordCount ?? 0} 词 → ${result?.slug ?? ""}`;
   if (name === "delete_wordcloud") return `已删除词云 ${result?.id ?? ""}`;
+  if (name === "bind_data") return result?.error ? result.error : `数据绑定 ${result?.collection ?? ""}(${result?.kind ?? ""} · ${result?.mode ?? ""}) → ${result?.slug ?? ""}`;
+  if (name === "delete_databind") return `已删除数据绑定 ${result?.id ?? ""}`;
   if (name === "edit_text") return `已保存文本/样式修改 → ${result?.nodeId ?? ""}`;
   if (name === "delete_edit") return `已撤销修改 ${result?.id ?? ""}`;
   if (name === "edit_node") return `已保存节点样式 → ${result?.nodeId ?? ""}`;
@@ -392,7 +401,7 @@ function summarize(name, result) {
 // them corrupts the build or bypasses the dedicated overlay tools. Everything
 // else under the out dir (generated *.html, styles.css, data/**, aux files) is
 // writable.
-const WRITE_DENY = ["manifest.json", "wordclouds.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"];
+const WRITE_DENY = ["manifest.json", "wordclouds.json", "databinds.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"];
 
 export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   const root = resolve(outDir);
@@ -437,6 +446,21 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
 
   const saveWordClouds = (items) => {
     const file = resolve(root, "wordclouds.json");
+    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
+    renameSync(`${file}.tmp`, file);
+  };
+
+  const loadDatabinds = () => {
+    try {
+      const d = JSON.parse(readFileSync(resolve(root, "databinds.json"), "utf8"));
+      return Array.isArray(d?.items) ? d.items : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveDatabinds = (items) => {
+    const file = resolve(root, "databinds.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
   };
@@ -622,6 +646,103 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       return { id, slug: hit.slug };
     },
 
+    // 把页面元素接到数据后端(投票 / 词云采集 / 留言 / 计数)。
+    // 只写 databinds.json,构建时由 databind.mjs 注入 —— AI 不直接写浏览器脚本,
+    // 因此不存在"AI 生成任意 JS"的攻击面。
+    async bind_data({ id, slug, rect, collection, kind, read, write, fallback, options }) {
+      const page = loadPages().find((p) => p.slug === slug);
+      if (!page) return { error: `没有这个页面: ${slug}` };
+
+      const COLL_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+      if (!COLL_RE.test(String(collection || ""))) {
+        return { error: "collection 必须是 [a-z0-9-] 组成的标识,如 votes / words / guestbook" };
+      }
+      const k = kind || "bar";
+      if (!["bar", "counter", "list", "wordcloud"].includes(k)) {
+        return { error: "kind 必须是 bar(占比条,投票) / counter(计数) / list(列表,留言) / wordcloud(实时词云)" };
+      }
+      if (!rect || !["left", "top", "width", "height"].every((f) => Number.isFinite(rect[f]))) {
+        return { error: "rect 需要 {left,top,width,height} 数值" };
+      }
+      const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,31}$/;
+      const rd = read || {};
+      if ((k === "bar" || k === "wordcloud") && !FIELD_RE.test(String(rd.groupBy || ""))) {
+        return { error: "read.groupBy 必须是合法字段名(字母/下划线开头),例如 choice / text" };
+      }
+
+      let w = null;
+      if (write) {
+        if (!FIELD_RE.test(String(write.field || ""))) return { error: "write.field 必须是合法字段名" };
+        if (write.target) {
+          const data = JSON.parse(readFileSync(resolve(root, "data", `${slug}.json`), "utf8"));
+          if (!data.nodeById?.[write.target]) {
+            return { error: `页面 ${slug} 没有节点 ${write.target},请先用 read_page_text 拿到正确的节点 id` };
+          }
+          w = { event: "click", target: String(write.target), field: write.field, value: write.value };
+        } else if (write.input) {
+          w = {
+            input: true,
+            field: write.field,
+            placeholder: write.placeholder || "",
+            button: write.button || "提交",
+            maxLength: Math.min(200, Math.max(1, Number(write.maxLength) || 40)),
+          };
+        } else {
+          return { error: "write 需要 target(点某个节点就提交) 或 input:true(给访客一个输入框)" };
+        }
+      }
+
+      // 与 apply_wordcloud 同一套夹取:横向不出画布;纵向允许低于画布(构建时扩高)。
+      const { data } = pageTextOf(slug);
+      const cw = findCanvas(data)?.absoluteBoundingBox?.width ?? rect.width;
+      const r = {
+        left: Math.max(0, Math.min(rect.left, cw - Math.min(rect.width, cw))),
+        top: Math.max(0, rect.top),
+        width: Math.min(Math.max(1, rect.width), cw),
+        height: Math.max(1, rect.height),
+      };
+
+      const newId = id || `db-${Date.now().toString(36)}`;
+      // 集合模式:投票/词云这类"每次提交都是一条"用 append(默认,不去重);
+      // "每个人的个人内容"(资料、个人留言)用 single —— 同一访客后写覆盖前写。
+      const mode = options?.mode === "single" ? "single" : "append";
+      const item = {
+        id: newId,
+        slug,
+        rect: r,
+        collection: String(collection),
+        kind: k,
+        mode,
+        read: rd,
+        write: w,
+        fallback: fallback || null,
+        options: options || {},
+        createdAt: new Date().toISOString(),
+      };
+      if (!(await confirm({ kind: "databind", payload: item }))) return { error: "用户拒绝了这次数据绑定" };
+      const items = loadDatabinds().filter((i) => i.id !== newId);
+      items.push(item);
+      saveDatabinds(items);
+      return {
+        id: newId,
+        slug,
+        collection: item.collection,
+        kind: k,
+        mode: w ? (w.target ? `点击节点 ${w.target} 提交` : "访客输入后提交") : "只读",
+      };
+    },
+
+    async delete_databind({ id }) {
+      const items = loadDatabinds();
+      const hit = items.find((i) => i.id === id);
+      if (!hit) return { error: `没有这个数据绑定 id: ${id}` };
+      if (!(await confirm({ kind: "databind", payload: { id, slug: hit.slug, delete: true } }))) {
+        return { error: "用户拒绝了删除" };
+      }
+      saveDatabinds(items.filter((i) => i.id !== id));
+      return { id, slug: hit.slug };
+    },
+
     async edit_text({ id, slug, nodeId, text, fontSize, fontWeight, color }) {
       const page = loadPages().find((p) => p.slug === slug);
       if (!page) return { error: `没有这个页面: ${slug}` };
@@ -796,7 +917,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       type: "function",
       function: {
         name: "write_file",
-        description: "在输出目录写入/覆盖一个文件(可写生成的 *.html、styles.css、data/ 下文件;不能改 manifest.json、wordclouds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json)。改写 *.html / styles.css 会记录到 file-locks.json,重新生成后仍保留。会请求用户确认",
+        description: "在输出目录写入/覆盖一个文件(可写生成的 *.html、styles.css、data/ 下文件;不能改 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json)。改写 *.html / styles.css 会记录到 file-locks.json,重新生成后仍保留。会请求用户确认",
         parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
       },
     },
@@ -830,6 +951,84 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       function: {
         name: "delete_wordcloud",
         description: "删除一个已放置的词云(按 id)。会请求用户确认",
+        parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "bind_data",
+        description:
+          "把页面元素接到数据后端,实现跨访客持久化:投票、实时词云、留言板、参与人数。用户说「让访客投票」「收集关键词做词云」「显示多少人参与」「留言」时用它。" +
+          "kind=bar 显示各选项占比条(投票);wordcloud 显示实时词云;list 显示最近内容(留言);counter 只显示一个数字。" +
+          "写入两种方式:write.target 指向页面上的节点(如投票按钮),访客点它就提交;write.input=true 在矩形内自动生成输入框+按钮,访客输入后提交(采集关键词用)。不传 write 即只读展示。" +
+          "fallback 是后端不可用时展示的静态内容,形状要与 kind 对应。" +
+          "后端按浏览器本地标识记住每位访客,所以「投过的人不用再投」是自动的。会请求用户确认",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "可选;更新已有绑定时传它的 id" },
+            slug: { type: "string", description: "页面 slug,来自 list_pages" },
+            rect: {
+              type: "object",
+              description: "画布坐标系内的展示矩形",
+              properties: { left: { type: "number" }, top: { type: "number" }, width: { type: "number" }, height: { type: "number" } },
+              required: ["left", "top", "width", "height"],
+            },
+            collection: { type: "string", description: "数据集合名,小写字母/数字/短横线,如 votes / words / guestbook" },
+            kind: { type: "string", enum: ["bar", "wordcloud", "list", "counter"], description: "展示形态" },
+            read: {
+              type: "object",
+              description: "读取参数",
+              properties: {
+                groupBy: { type: "string", description: "按哪个字段聚合(bar/wordcloud 必填),如 choice / text" },
+                limit: { type: "number", description: "取前 N 项;bar/wordcloud 默认 10,list 默认 20" },
+                refreshMs: { type: "number", description: "轮询间隔毫秒,默认 15000;0 表示不轮询" },
+              },
+            },
+            write: {
+              type: "object",
+              description: "写入方式;不传则只读",
+              properties: {
+                target: { type: "string", description: "节点 id(来自 read_page_text),访客点它就提交" },
+                input: { type: "boolean", description: "true 则在矩形内生成输入框+按钮" },
+                field: { type: "string", description: "写入的字段名,如 choice / text" },
+                value: { type: "string", description: "点击式写入时固定提交的值;省略则取被点节点的文字" },
+                placeholder: { type: "string", description: "输入框提示文字" },
+                button: { type: "string", description: "按钮文字,默认「提交」" },
+                maxLength: { type: "number", description: "输入长度上限,默认 40" },
+              },
+              required: ["field"],
+            },
+            fallback: { type: "object", description: "后端不可用时的静态兜底内容(形状见工具说明)" },
+            options: {
+              type: "object",
+              description: "展示选项",
+              properties: {
+                colors: { type: "array", items: { type: "string" }, description: "词云配色,建议与页面一致" },
+                maxFont: { type: "number" },
+                minFont: { type: "number" },
+                maxWords: { type: "number" },
+                unit: { type: "string", description: "counter 的后缀,如「人已参与」" },
+                empty: { type: "string", description: "无数据时的提示文字" },
+                done: { type: "string", description: "已提交后的提示文字,默认「已提交」" },
+                mode: {
+                  type: "string",
+                  enum: ["append", "single"],
+                  description: "append(默认)=每次提交都新增一条,适合投票/词云;single=同一位访客只保留一条、后写覆盖,适合「每个人自己的内容」(资料、个人留言)",
+                },
+              },
+            },
+          },
+          required: ["slug", "rect", "collection", "kind"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "delete_databind",
+        description: "删除一个数据绑定(按 id)。会请求用户确认",
         parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
       },
     },
@@ -921,7 +1120,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       type: "function",
       function: {
         name: "run_build",
-        description: "重新生成所有静态页面(把 wordclouds.json 与 edits.json 的改动渲染进 HTML)",
+        description: "重新生成所有静态页面(把 wordclouds.json、databinds.json 与 edits.json 的改动渲染进 HTML)",
         parameters: { type: "object", properties: {} },
       },
     },

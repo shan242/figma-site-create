@@ -11,7 +11,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require("electron");
 const path = require("path");
 const { writeFileSync, readFileSync, renameSync, existsSync } = require("fs");
-const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, machineCode: computeMachineCode, checkLicense } = require("./worker.cjs");
+const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense } = require("./worker.cjs");
 
 let win = null;
 let chatRunning = false;
@@ -42,7 +42,10 @@ const configFile = () => path.join(app.getPath("userData"), "config.json");
 // HTTPS options for the publish flow. The account ids point at rows that
 // already exist in 1Panel — the app never stores DNS/CA credentials itself.
 const defaultHttps = () => ({ enabled: false, method: "dnsAccount", acmeAccountId: 0, dnsAccountId: 0, sslId: 0, httpConfig: "HTTPToHTTPS", hsts: false });
-const defaultConfig = () => ({ apiKey: "", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", autoApply: false, maxWords: 60, recentDirs: [], publish: { baseUrl: "", apiKey: "", domain: "", alias: "", groupID: 1, https: defaultHttps() }, machineCode: "" });
+// 数据后端(见 data-api/):页面里的投票/词云等从这里读写。
+// adminToken 与 1Panel 的 apiKey 同级加密保存,且**绝不注入生成的页面**。
+const defaultDataApi = () => ({ baseUrl: "", adminToken: "" });
+const defaultConfig = () => ({ apiKey: "", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", autoApply: false, maxWords: 60, recentDirs: [], publish: { baseUrl: "", apiKey: "", domain: "", alias: "", groupID: 1, https: defaultHttps(), dataApi: defaultDataApi() }, machineCode: "" });
 const RECENT_DIRS_MAX = 8;
 
 function decryptKey(v) {
@@ -62,7 +65,7 @@ function loadConfig() {
     raw.apiKey = decryptKey(raw.apiKey);
     if (raw.publish) raw.publish.apiKey = decryptKey(raw.publish.apiKey);
     const d = defaultConfig();
-    return { ...d, ...raw, apiKey: raw.apiKey, publish: { ...d.publish, ...(raw.publish || {}), https: { ...d.publish.https, ...(raw.publish?.https || {}) } } };
+    return { ...d, ...raw, apiKey: raw.apiKey, publish: { ...d.publish, ...(raw.publish || {}), https: { ...d.publish.https, ...(raw.publish?.https || {}) }, dataApi: { ...d.publish.dataApi, ...(raw.publish?.dataApi || {}) } } };
   } catch {
     return defaultConfig();
   }
@@ -141,6 +144,15 @@ function startLicenseLoop() {
 // Run one pipeline step, forwarding every console line to `send`. Console is
 // temporarily swapped because the core modules report progress via console.*;
 // the swap is restored in all cases.
+// 数据后端地址(已规范化到 /api/v1)。未配置时返回空串 → 构建不注入任何脚本,
+// 页面与以前完全一致(纯静态)。
+function dataApiBase() {
+  const d = loadConfig().publish?.dataApi || {};
+  const raw = String(d.baseUrl || "").trim().replace(/\/+$/, "");
+  if (!raw) return "";
+  return /\/api\/v\d+$/.test(raw) ? raw : `${raw}/api/v1`;
+}
+
 async function runPipeline(cmd, url, outDir, send) {
   const orig = { log: console.log, warn: console.warn, error: console.error };
   console.log = (...a) => send(a.join(" "));
@@ -148,7 +160,7 @@ async function runPipeline(cmd, url, outDir, send) {
   console.error = (...a) => send("✗ " + a.join(" "));
   try {
     if (cmd === "scrape") await scrapeSite(outDir, url);
-    else if (cmd === "build") await buildSite(outDir);
+    else if (cmd === "build") await buildSite(outDir, { dataApi: dataApiBase() });
     else throw new Error(`unknown command: ${cmd}`);
     send("\n✅ 完成");
     return { ok: true };
@@ -291,6 +303,10 @@ ipcMain.handle("chat:send", async (event, { message, outDir }) => {
       outDir,
       confirm: (payload) => (config.autoApply ? Promise.resolve(true) : requestConfirm(payload)),
       onLog: (line) => send({ type: "log", text: line }),
+      // The agent's auto-rebuild must inject the same data-backend base as a
+      // manual build, otherwise a bind_data edit would rebuild without the
+      // runtime and the page would silently lose its live behaviour.
+      buildFn: (dir) => buildSite(dir, { dataApi: dataApiBase() }),
     });
     const result = await runAgent({
       messages: [{ role: "user", content: message }],
@@ -336,11 +352,22 @@ ipcMain.handle("chat:cancel", () => {
 // plain, apiKey safeStorage-encrypted; progress streams over "publish:event".
 ipcMain.handle("publish-config:get", () => {
   const p = loadConfig().publish || {};
-  return { baseUrl: p.baseUrl, domain: p.domain, alias: p.alias, groupID: p.groupID, hasKey: !!p.apiKey, https: { ...defaultHttps(), ...(p.https || {}) } };
+  const d = p.dataApi || {};
+  return {
+    baseUrl: p.baseUrl,
+    domain: p.domain,
+    alias: p.alias,
+    groupID: p.groupID,
+    hasKey: !!p.apiKey,
+    https: { ...defaultHttps(), ...(p.https || {}) },
+    dataApi: { baseUrl: d.baseUrl || "", hasToken: !!d.adminToken },
+  };
 });
 
 ipcMain.handle("publish-config:set", (event, cfg) => {
   const h = cfg.https || {};
+  // Admin Token 与 1Panel 的 apiKey 同规则:留空表示保持已存的那个。
+  const da = cfg.dataApi || {};
   saveConfig({
     publish: {
       baseUrl: String(cfg.baseUrl || "").trim() || undefined,
@@ -357,9 +384,21 @@ ipcMain.handle("publish-config:set", (event, cfg) => {
         httpConfig: ["HTTPToHTTPS", "HTTPSOnly", "HTTPAlso"].includes(h.httpConfig) ? h.httpConfig : "HTTPToHTTPS",
         hsts: !!h.hsts,
       },
+      dataApi: {
+        baseUrl: String(da.baseUrl || "").trim() || undefined,
+        adminToken: da.adminToken,
+      },
     },
   });
   return { ok: true };
+});
+
+// 数据后端「测试连接」:health + 用 token 列一次站点(能列出就说明 token 有效)。
+ipcMain.handle("data-api:test", async () => {
+  const d = loadConfig().publish?.dataApi || {};
+  if (!d.baseUrl) throw new Error("请先填写数据后端地址");
+  const res = await dataApiHealth({ baseUrl: d.baseUrl, adminToken: d.adminToken });
+  return { ok: true, ...res };
 });
 
 // Populate the HTTPS form: the ACME/DNS accounts already configured in 1Panel,
@@ -399,6 +438,8 @@ ipcMain.handle("publish:run", async (event, { outDir }) => {
       alias: p.alias,
       groupID: p.groupID,
       https: p.https,
+      dataApi: p.dataApi?.baseUrl ? p.dataApi.baseUrl : "",
+      dataToken: p.dataApi?.adminToken || "",
       onLog: (line) => send({ type: "log", text: line }),
       signal: abort.signal,
     });

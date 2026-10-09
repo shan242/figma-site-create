@@ -229,6 +229,48 @@ publish finds the issued certificate and just binds it.
 The GUI reads the accounts with `publish:https-options` and renders dropdowns only
 (see the "申请并启用 HTTPS" block in `renderer/index.html`) — no credential fields.
 
+## 数据绑定(bind_data / databind.mjs)
+
+让生成的静态页面具备**跨访客持久化**能力:投票、实时词云、留言、参与人数。
+后端是独立部署的 `data-api/`(见 `docs/data-api.md`),页面通过 `bind_data`
+声明式接入 —— **AI 不写浏览器脚本**,只产出 spec,注入由 `databind.mjs` 负责,
+所以不存在"AI 生成任意 JS"的攻击面。
+
+数据流与词云完全同构:
+
+```
+AI: bind_data(...)  →  databinds.json  →  build.mjs  →  databind.mjs 注入
+   (apply_wordcloud → wordclouds.json → cloudInjection 是同一套模式)
+```
+
+- **`data-node-id`**:`lib.mjs` 给每个渲染出的元素带上 Figma 节点 id ——
+  这是"点这个按钮就是投票"能定位到元素的前提。属性放在 `style` **之后**,
+  既有 HTML 断言的前缀不受影响。
+- **站点命名空间由浏览器自己推导**:`slugify(location.hostname)`。构建时**不需要**
+  知道将来发布到哪个域名,同一份产物发到多个域名各自成为独立命名空间。
+  这个函数必须与 `data-api/slug.mjs`、`publish.mjs` 的 `slugifySite` **逐字符一致**
+  —— `databind.test.mjs` 用同一批样本同时比对三处。
+- **实时词云的布局跑在浏览器里**(词是加载后才到的,没法在构建期排布)。
+  `wordcloud.mjs` 用 `Function.prototype.toString()` 导出 `layoutRuntime`,
+  `databind.test.mjs` 求值后与 `layoutWordCloud()` 比对,保证两份永不漂移。
+- **后端地址**:构建时从 `--data-api` 或 `REPLICA_DATA_API` 取;GUI 把它(读自已保存的
+  「数据后端」设置)传给每次 build,**包括 AI 自动重建那一次** —— 否则一次 bind_data
+  改动的重建会丢掉运行时,页面静默失去动态能力。未配置时整段脚本不注入,
+  与纯静态完全一致。
+- **优雅降级是硬要求**:`fallback` 先画,后端不可用时保留它,绝不白屏;
+  写失败只在角落提示,不阻塞页面其他交互。
+- **"投过就不用再投"**:运行时用 localStorage 的匿名 UUID(`__dc_<site>`,按站点隔离)
+  查 `/{site}/{collection}/mine`;有记录就回显并禁用提交。服务端**不做去重**(按设计),
+  清掉 localStorage 即可重投 —— 已知且接受的边界。`options.mode:"single"` 时后端
+  对同一 client 后写覆盖前写,适合"每个人的个人内容"。
+  ⚠️ `refresh()` 成功回调**不能**清空提示:否则刚显示的"已提交"会被立刻擦掉,
+  访客以为没提交成功(首次实现踩过,`databind-e2e.mjs` 现在钉住这一条)。
+- **Admin Token 绝不进生成的页面**:页面只拿到公开的后端地址。
+
+验证分两层:`databind.test.mjs` 覆盖纯函数(slug 三处一致、布局等价、注入转义),
+`databind-e2e.mjs` 用 headless Chrome 打真实后端跑通读/写/去重全链路
+(需要 `DA_TOKEN`,依赖外网与本机 Chrome,所以不进 CI)。
+
 ## Packaging & CI
 
 `.github/workflows/build.yml` builds the Electron GUI (`electron/`) on three

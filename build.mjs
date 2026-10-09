@@ -9,6 +9,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "no
 import { join, basename, resolve, sep } from "node:path";
 import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
+import { databindInjection, databindHead } from "./databind.mjs";
 
 // Populated inside main() so the packaged CLI can normalize argv first.
 let outDir, manifest, assetDir, fontDir, HAS_CJK;
@@ -16,6 +17,10 @@ let outDir, manifest, assetDir, fontDir, HAS_CJK;
 // build only reads this file — writing it happens in ai.mjs — so a rebuild of
 // the same spec reproduces the same pages byte-for-byte.
 let WORDCLOUDS = [];
+// Data bindings persisted by the AI chat tool (bind_data): 把页面元素接到数据
+// 后端。同样只读;后端地址来自 --data-api 或 REPLICA_DATA_API,空则不注入。
+let DATABINDS = [];
+let DATA_API = "";
 // Text/style edits persisted by the AI chat tool (edit_text). Same read-only
 // contract: ai.mjs owns the write, the build just applies the overlay.
 let EDITS = [];
@@ -35,6 +40,7 @@ const readWordClouds = (dir) => readItems(join(dir, "wordclouds.json"));
 const readEdits = (dir) => readItems(join(dir, "edits.json"));
 const readNodeStyles = (dir) => readItems(join(dir, "nodeStyles.json"));
 const readOverrides = (dir) => readItems(join(dir, "overrides.json"));
+const readDatabinds = (dir) => readItems(join(dir, "databinds.json"));
 
 // Files the AI locked via write_file survive a rebuild by being re-applied
 // after the build regenerates them. file-locks.json is owned by ai.mjs; the
@@ -231,12 +237,21 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
     }
   }
 
+  // Data bindings the AI wired up (bind_data): 页面元素 ↔ 数据后端。
+  // 未配置 --data-api 时 databindHead 返回空串,页面里只剩 fallback 静态内容。
+  const binds = DATABINDS.filter((b) => b.slug === page.slug);
+  for (const b of binds) {
+    out.push(databindInjection(b, { canvasWidth: Math.round(cb.width) }));
+  }
+
   // A word cloud may sit below the design canvas bottom (the AI places it in
   // canvas coordinates with top > canvas height); grow the canvas to cover it
   // so the page background reaches the cloud instead of clipping it. Matched
   // to the same rounded rect cloudInjection emits.
   const cloudBottom = clouds.length ? Math.max(...clouds.map((c) => Math.round(c.rect.top) + Math.round(c.rect.height))) : 0;
-  const canvasHeight = Math.max(Math.round(cb.height), cloudBottom);
+  const bindBottom = binds.length ? Math.max(...binds.map((b) => Math.round(b.rect.top) + Math.round(b.rect.height))) : 0;
+  const canvasHeight = Math.max(Math.round(cb.height), cloudBottom, bindBottom);
+  const dataHead = databindHead(DATA_API, { hasBindings: binds.length > 0 });
 
   const bg = fillToCss((canvas.fills || []).find((f) => f.visible), makeAssetUrl(assetDir)) ?? {};
   // Fluid canvas: the live site renders width:100% with a min-width equal to
@@ -257,6 +272,7 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
   <link href="${googleLink}" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
   <style>body { background-color: ${bodyBg}; overflow-x: hidden; }</style>
+${dataHead}
 </head>
 <body>
   <div class="canvas" style="width:100%;min-width:${canvasW}px;min-height:${canvasHeight}px;${cssText(bg)}">
@@ -271,12 +287,15 @@ ${out.join("\n")}
 
 // Core entry shared by the CLI (main) and the Electron GUI. Progress is
 // reported through console.log/console.warn, which the GUI intercepts.
-export async function buildSite(outDirParam) {
+export async function buildSite(outDirParam, opts = {}) {
   outDir = outDirParam;
   manifest = JSON.parse(readFileSync(join(outDir, "manifest.json"), "utf8"));
   assetDir = join(outDir, "assets");
   fontDir = join(outDir, "fonts");
   WORDCLOUDS = readWordClouds(outDir);
+  DATABINDS = readDatabinds(outDir);
+  // 后端地址:显式参数优先,其次环境变量。空 = 数据功能关闭(纯静态,与以前一致)。
+  DATA_API = String(opts.dataApi ?? process.env.REPLICA_DATA_API ?? "").trim().replace(/\/+$/, "");
   EDITS = readEdits(outDir);
   NODE_STYLES = readNodeStyles(outDir);
   HAS_CJK = manifest.pages.some((p) => /[一-鿿]/.test(JSON.stringify(loadData(p.json).nodeById)));
@@ -293,6 +312,26 @@ body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
 .line { position: absolute; }
 .wordcloud { position: absolute; }
 .wordcloud canvas { width: 100%; height: 100%; display: block; }
+/* 数据绑定(databind.mjs):结果面板 + 采集表单 */
+.databind { position: absolute; font-family: "Inter", system-ui, sans-serif; }
+.databind .db-body { width: 100%; height: 100%; }
+.databind .db-body canvas { width: 100%; height: 100%; display: block; }
+.databind .db-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; line-height: 1.4; }
+.databind .db-label { flex: 0 0 auto; min-width: 4em; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.databind .db-track { flex: 1 1 auto; height: 8px; background: rgba(0,0,0,.08); border-radius: 4px; overflow: hidden; }
+.databind .db-fill { height: 100%; background: #2563eb; border-radius: 4px; transition: width .3s ease; }
+.databind .db-count { flex: 0 0 auto; min-width: 2.5em; text-align: right; color: #475569; font-variant-numeric: tabular-nums; }
+.databind .db-num { font-size: 42px; font-weight: 700; line-height: 1.1; color: #0f172a; }
+.databind .db-unit { font-size: 14px; font-weight: 400; margin-left: 4px; color: #64748b; }
+.databind .db-item { font-size: 13px; line-height: 1.6; padding: 2px 0; border-bottom: 1px solid rgba(0,0,0,.06); }
+.databind .db-empty { font-size: 13px; color: #94a3b8; }
+.databind .db-note { font-size: 12px; margin-top: 4px; color: #64748b; }
+.databind .db-note.db-ok { color: #16a34a; }
+.databind .db-note.db-err { color: #b91c1c; }
+.databind .db-form { display: flex; gap: 6px; margin-top: 8px; pointer-events: auto; }
+.databind .db-input { flex: 1 1 auto; min-width: 0; padding: 6px 8px; font-size: 13px; border: 1px solid #cbd5e1; border-radius: 6px; font-family: inherit; }
+.databind .db-btn { flex: 0 0 auto; padding: 6px 12px; font-size: 13px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; font-family: inherit; }
+.databind .db-btn:hover { background: #1d4ed8; }
 `;
   const extraCss = await selfHostedCss(selfHost);
   // AI global CSS (append_css) goes last so its rules take precedence over the
@@ -311,8 +350,10 @@ export async function main() {
   const args = process.argv.slice(2);
   const outIdx = args.indexOf("--out");
   const outDirArg = outIdx >= 0 && args[outIdx + 1] ? args[outIdx + 1] : "replica-out";
+  const apiIdx = args.indexOf("--data-api");
+  const dataApi = apiIdx >= 0 && args[apiIdx + 1] ? args[apiIdx + 1] : undefined;
   try {
-    await buildSite(outDirArg);
+    await buildSite(outDirArg, { dataApi });
   } catch (e) {
     console.error(`✗ ${e.message}`);
     process.exit(1);

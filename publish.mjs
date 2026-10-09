@@ -183,7 +183,7 @@ export async function uploadFile(base, key, localPath, targetDir, signal) {
 
 // --- Orchestration -----------------------------------------------------------
 
-export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, groupID, https, onLog, signal }) {
+export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, groupID, https, dataApi, dataToken, onLog, signal }) {
   if (!baseUrl || !apiKey) throw new Error("请先在发布设置里填写服务器地址与 API Key");
   if (!domain) throw new Error("请填写要发布到的域名");
   const log = onLog || (() => {});
@@ -214,7 +214,24 @@ export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, grou
     log("— 配置 HTTPS —");
     httpsResult = await ensureHttps({ ...https, base, baseUrl, apiKey, domain, onLog: log, signal });
   }
-  return { uploaded, root, created, https: httpsResult };
+  // 数据后端:把域名白名单 + 集合声明同步过去,页面里的绑定才能读写。
+  // 只动数据后端,不碰 1Panel 上的任何站点文件。
+  let dataResult = null;
+  if (dataApi) {
+    log("— 注册数据后端 —");
+    try {
+      dataResult = await registerSite({ dataApi, adminToken: dataToken, domain, outDir, signal });
+      if (dataResult) {
+        const cols = Object.keys(dataResult.collections);
+        log(`✅ 数据站点 ${dataResult.site}(来源 ${dataResult.origins.join(", ")}${cols.length ? `;集合 ${cols.join(", ")}` : ""})`);
+      }
+    } catch (e) {
+      // 静态站点已经发布成功,数据注册失败不该让整次发布算失败。
+      dataResult = { error: e.message };
+      log(`⚠ 数据后端注册失败: ${e.message}(静态站点已发布,可稍后重试)`);
+    }
+  }
+  return { uploaded, root, created, https: httpsResult, data: dataResult };
 }
 
 // Lightweight check for the GUI "测试连接" button: verifies the API key and
@@ -528,4 +545,96 @@ export async function httpsOptions({ baseUrl, apiKey, domain, signal }) {
     existingSsl: ssl ? { id: ssl.id, domains: ssl.domains, expireDate: ssl.expireDate } : null,
     site: site ? { id: site.id, primaryDomain: site.primaryDomain } : null,
   };
+}
+
+// --- 数据后端(见 docs/data-api.md) ------------------------------------------
+// 站点命名空间必须与 data-api/slug.mjs、注入页面的运行时逐字符一致。
+// databind.test.mjs 用同一批样本钉住浏览器与后端两处,这里是第三处。
+
+export function slugifySite(host) {
+  return String(host || "")
+    .toLowerCase()
+    .replace(/^www\./, "")
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .replace(/-+$/, "");
+}
+
+// 用户可能只填域名,也可能填到 /api/v1;两种都接受。
+export function normalizeDataApi(url) {
+  const base = String(url || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  return /\/api\/v\d+$/.test(base) ? base : `${base}/api/v1`;
+}
+
+// 从 databinds.json 推导要声明的集合。构建产物里有什么,后端就注册什么 ——
+// 避免"页面在用但后端没声明"的静默 404。
+export function collectionsFromDatabinds(outDir) {
+  let items = [];
+  try {
+    const d = JSON.parse(readFileSync(join(outDir, "databinds.json"), "utf8"));
+    items = Array.isArray(d?.items) ? d.items : [];
+  } catch {
+    return {};
+  }
+  const out = {};
+  for (const b of items) {
+    if (!b?.collection) continue;
+    // 同一集合被多处使用时,只要有一处要 single 就取 single(更严格的那个)
+    const want = b.mode === "single" ? "single" : "append";
+    out[b.collection] = { mode: out[b.collection]?.mode === "single" ? "single" : want };
+  }
+  return out;
+}
+
+async function dataFetch(base, token, path, { method = "GET", body, signal } = {}) {
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/json" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
+  const text = await res.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (!res.ok || (data && data.ok === false)) {
+    const msg = data?.error?.message || `数据后端错误 ${res.status}`;
+    throw new Error(`${msg} (${path})`);
+  }
+  return data;
+}
+
+export async function dataApiHealth({ baseUrl, adminToken, signal }) {
+  const base = normalizeDataApi(baseUrl);
+  if (!base) throw new Error("请先填写数据后端地址");
+  const health = await dataFetch(base, adminToken || "", "/health", { signal });
+  let sites = null;
+  if (adminToken) {
+    const list = await dataFetch(base, adminToken, "/admin/sites", { signal });
+    sites = (list?.sites || []).length;
+  }
+  return { base, version: health?.version, sites };
+}
+
+// 发布成功后把域名白名单与集合声明同步到数据后端(幂等)。
+// 失败不应让发布整体失败 —— 静态站点已经传上去了,数据功能晚一步注册即可。
+export async function registerSite({ dataApi, adminToken, domain, outDir, signal }) {
+  const base = normalizeDataApi(dataApi);
+  if (!base) return null;
+  if (!adminToken) throw new Error("请先填写数据后端的 Admin Token");
+  const site = slugifySite(domain);
+  if (!site) throw new Error(`无法从域名推导站点标识: ${domain}`);
+  const collections = outDir ? collectionsFromDatabinds(outDir) : {};
+  // 默认只放行这个域名和它的 www 变体。**不自动加通配** —— 通配共享托管域
+  // (如 *.figma.site)会等于把后端开放给全世界,必须由人显式决定。
+  const alt = domain.startsWith("www.") ? domain.slice(4) : `www.${domain}`;
+  const payload = {
+    origins: [`https://${domain}`, `https://${alt}`],
+    collections,
+  };
+  const r = await dataFetch(base, adminToken, `/admin/sites/${site}`, { method: "PUT", body: payload, signal });
+  return { base, site, collections, origins: r?.site?.origins || payload.origins };
 }

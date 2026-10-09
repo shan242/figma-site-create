@@ -389,6 +389,15 @@ const pubHttpsAcme = document.getElementById("pub-https-acme");
 const pubHttpsSsl = document.getElementById("pub-https-ssl");
 const pubHttpsRedirect = document.getElementById("pub-https-redirect");
 const pubHttpsHsts = document.getElementById("pub-https-hsts");
+// 数据后端:地址明文、Admin Token 加密保存;token 绝不进生成的页面。
+const pubDataEnabled = document.getElementById("pub-data-enabled");
+const pubDataBody = document.getElementById("pub-data-body");
+const pubDataBase = document.getElementById("pub-data-base");
+const pubDataToken = document.getElementById("pub-data-token");
+
+function syncDataUi() {
+  pubDataBody.hidden = !pubDataEnabled.checked;
+}
 
 function syncHttpsUi() {
   pubHttpsBody.hidden = !pubHttpsEnabled.checked;
@@ -474,6 +483,13 @@ async function openPublishSettings() {
   seed(pubHttpsDns, h.dnsAccountId, "— 请选择 —");
   seed(pubHttpsAcme, h.acmeAccountId, "— 请选择 —");
   seed(pubHttpsSsl, h.sslId, "— 无,申请新证书 —");
+  // 数据后端:token 留空表示保持已存的那个
+  const da = c.dataApi || {};
+  pubDataEnabled.checked = !!da.baseUrl;
+  pubDataBase.value = da.baseUrl || "";
+  pubDataToken.value = "";
+  pubDataToken.placeholder = da.hasToken ? "已配置(留空保持不变)" : "后端首次启动时打印的 64 位令牌";
+  syncDataUi();
   syncHttpsUi();
   pubMsg.textContent = "";
   pubEl.hidden = false;
@@ -495,6 +511,10 @@ async function savePublishSettings() {
       sslId: Number(pubHttpsSsl.value) || 0,
       httpConfig: pubHttpsRedirect.value,
       hsts: pubHttpsHsts.checked,
+    },
+    dataApi: {
+      baseUrl: pubDataEnabled.checked ? pubDataBase.value.trim() : "",
+      adminToken: pubDataToken.value.trim(),
     },
   });
   pubMsg.textContent = r.ok ? "已保存" : "保存失败";
@@ -543,6 +563,18 @@ document.getElementById("btn-pub-https-load").addEventListener("click", async ()
 });
 pubHttpsEnabled.addEventListener("change", syncHttpsUi);
 pubHttpsMethod.addEventListener("change", syncHttpsUi);
+pubDataEnabled.addEventListener("change", syncDataUi);
+document.getElementById("btn-data-test").addEventListener("click", async () => {
+  await savePublishSettings(); // 测试用的是已保存的地址与令牌
+  pubMsg.textContent = "测试数据后端…";
+  try {
+    const r = await window.api.dataApiTest();
+    if (!r.ok) throw new Error(r.error || "未知错误");
+    pubMsg.textContent = `数据后端正常 · ${r.base} · 版本 ${r.version}${r.sites != null ? ` · 已有 ${r.sites} 个站点` : ""}`;
+  } catch (e) {
+    pubMsg.textContent = "数据后端连接失败: " + e.message;
+  }
+});
 document.getElementById("btn-pub-cancel").addEventListener("click", () => {
   pubEl.hidden = true;
 });

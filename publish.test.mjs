@@ -30,7 +30,14 @@ import {
   enableHttpsResilient,
   ensureHttps,
   httpsOptions,
+  slugifySite,
+  normalizeDataApi,
+  collectionsFromDatabinds,
+  registerSite,
+  dataApiHealth,
 } from "./publish.mjs";
+// 后端那份 slugify —— 三处必须逐字符一致
+import { slugify as serverSlugify } from "./data-api/slug.mjs";
 
 const BASE = "http://panel:8080";
 const KEY = "sk-test";
@@ -409,6 +416,97 @@ test("ensureHttps rides out a transient 'cert files not ready' response", async 
   const res = await ensureHttps({ baseUrl: BASE, apiKey: KEY, domain: DOMAIN });
   assert.equal(res.changed, true);
   assert.equal(state.enableFails, 0);
+});
+
+// --- 数据后端注册(P5) ------------------------------------------------------
+
+test("slugifySite 与后端/浏览器三处同规则", () => {
+  const cases = [
+    ["didsdi.com", "didsdi-com"],
+    ["scopetest.net", "scopetest-net"],
+    ["www.my-shop.com", "my-shop-com"],
+    ["my-shop.com", "my-shop-com"],
+    ["tool-steam-65311718.figma.site", "tool-steam-65311718-figma-site"],
+    ["127.0.0.1", "127-0-0-1"],
+    ["", ""],
+  ];
+  for (const [host, want] of cases) {
+    assert.equal(slugifySite(host), want, `slugifySite(${host})`);
+    // 与后端实现逐字符一致(后端那份在 data-api/slug.mjs)
+    assert.equal(slugifySite(host), serverSlugify(host), `软件端 vs 后端 ${host}`);
+  }
+});
+
+test("normalizeDataApi 接受裸域名或已带 /api/v1 的地址", () => {
+  assert.equal(normalizeDataApi("https://data.scopetest.net"), "https://data.scopetest.net/api/v1");
+  assert.equal(normalizeDataApi("https://data.scopetest.net/"), "https://data.scopetest.net/api/v1");
+  assert.equal(normalizeDataApi("https://data.scopetest.net/api/v1"), "https://data.scopetest.net/api/v1");
+  assert.equal(normalizeDataApi("https://x/api/v2/"), "https://x/api/v2");
+  assert.equal(normalizeDataApi(""), "");
+  assert.equal(normalizeDataApi(undefined), "");
+});
+
+test("collectionsFromDatabinds 从绑定推导集合声明", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pub-data-"));
+  writeFileSync(
+    join(dir, "databinds.json"),
+    JSON.stringify({
+      version: 1,
+      items: [
+        { id: "a", slug: "index", collection: "votes", kind: "bar", mode: "append" },
+        { id: "b", slug: "index", collection: "votes", kind: "counter" },
+        { id: "c", slug: "other", collection: "profile", kind: "list", mode: "single" },
+      ],
+    }),
+  );
+  assert.deepEqual(collectionsFromDatabinds(dir), { votes: { mode: "append" }, profile: { mode: "single" } });
+  assert.deepEqual(collectionsFromDatabinds(mkdtempSync(join(tmpdir(), "pub-none-"))), {}, "缺少 databinds.json 不能抛");
+});
+
+test("registerSite 注册域名白名单与集合声明", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url, method: opts.method, body: opts.body ? JSON.parse(opts.body) : undefined, auth: opts.headers?.Authorization });
+    return jsonResponse(200, { ok: true, site: { site: "didsdi-com" } });
+  };
+  const dir = mkdtempSync(join(tmpdir(), "pub-reg-"));
+  writeFileSync(join(dir, "databinds.json"), JSON.stringify({ items: [{ collection: "votes", mode: "single" }] }));
+  const r = await registerSite({ dataApi: "https://data.example.com", adminToken: "tok", domain: "didsdi.com", outDir: dir });
+  assert.equal(r.site, "didsdi-com");
+  const call = calls[0];
+  assert.equal(call.url, "https://data.example.com/api/v1/admin/sites/didsdi-com");
+  assert.equal(call.method, "PUT");
+  assert.equal(call.auth, "Bearer tok");
+  assert.deepEqual(call.body.collections, { votes: { mode: "single" } });
+  assert.deepEqual(call.body.origins, ["https://didsdi.com", "https://www.didsdi.com"]);
+  // 默认不加通配 —— 通配共享托管域等于把后端开放给全世界
+  assert.equal(call.body.origins.some((o) => o.includes("*")), false);
+});
+
+test("registerSite:www 与裸域互推、要求 token、透传后端错误", async () => {
+  const bodies = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    bodies.push(JSON.parse(opts.body));
+    return jsonResponse(200, { ok: true });
+  };
+  await registerSite({ dataApi: "https://data.example.com/api/v1", adminToken: "t", domain: "www.shop.com" });
+  assert.deepEqual(bodies[0].origins, ["https://www.shop.com", "https://shop.com"]);
+
+  await assert.rejects(() => registerSite({ dataApi: "https://x", adminToken: "", domain: "a.com" }), /Admin Token/);
+
+  globalThis.fetch = async () => jsonResponse(403, { ok: false, error: { code: "ORIGIN_DENIED", message: "该来源未被允许访问此数据" } });
+  await assert.rejects(() => registerSite({ dataApi: "https://x", adminToken: "t", domain: "a.com" }), /该来源未被允许/);
+});
+
+test("dataApiHealth 返回版本与站点数", async () => {
+  globalThis.fetch = async (url) => {
+    if (url.endsWith("/health")) return jsonResponse(200, { ok: true, version: "1.0.0" });
+    return jsonResponse(200, { ok: true, sites: [{ site: "a" }, { site: "b" }] });
+  };
+  const r = await dataApiHealth({ baseUrl: "https://data.example.com", adminToken: "t" });
+  assert.equal(r.base, "https://data.example.com/api/v1");
+  assert.equal(r.version, "1.0.0");
+  assert.equal(r.sites, 2);
 });
 
 test("enableHttps binds type=existed with the chosen certificate", async () => {

@@ -155,6 +155,29 @@
         <p class="hint">账号与证书均从 1Panel 读取,凭据由面板保管,本软件不保存。</p>
       </div>
 
+      <div class="field">
+        <label class="check">
+          <input id="pub-data-enabled" type="checkbox">
+          启用数据后端(访客投票 / 实时词云 / 留言)
+        </label>
+      </div>
+      <div id="pub-data-body" hidden>
+        <div class="field">
+          <label for="pub-data-base">后端地址</label>
+          <input id="pub-data-base" type="text" spellcheck="false" placeholder="https://data.example.com">
+        </div>
+        <div class="field">
+          <label for="pub-data-token">Admin Token</label>
+          <input id="pub-data-token" type="password" spellcheck="false" placeholder="后端首次启动时打印的 64 位令牌">
+        </div>
+        <p class="hint">
+          填一次即可。发布时会把本站域名与用到的集合自动注册到后端;<b>Admin Token 只存在本机,不会写进生成的网页</b>。
+        </p>
+        <div class="modal-actions">
+          <button id="btn-data-test">测试数据后端</button>
+        </div>
+      </div>
+
       <div class="modal-actions">
         <button id="btn-pub-https-load">读取 1Panel 账号/证书</button>
         <button id="btn-pub-test">测试连接</button>

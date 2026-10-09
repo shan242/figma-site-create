@@ -197,7 +197,7 @@ test("tools reject path traversal", async () => {
 test("write_file refuses metadata / overlay files", async () => {
   const dir = fixture();
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
-  for (const p of ["manifest.json", "wordclouds.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"]) {
+  for (const p of ["manifest.json", "wordclouds.json", "databinds.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"]) {
     const r = await handlers.write_file({ path: p, content: "{}" });
     assert.ok(r.error, `${p} must be denied`);
   }
@@ -443,7 +443,7 @@ test("RECTANGLE and SVG with their own NAVIGATE interaction render as anchors", 
   // SVGs inside huge hit areas), so the <a> carries the position style and the
   // <img> is stretched inside it — not `<a href><img …` back to back.
   assert.ok(
-    /<a href="page-5\.html" style="[^"]*"><img src="assets\/bb33cc44\.svg"/.test(html),
+    /<a href="page-5\.html" style="[^"]*"[^>]*><img src="assets\/bb33cc44\.svg"/.test(html),
     "interactive SVG renders as an anchor-wrapped img",
   );
 });
@@ -513,8 +513,9 @@ test("SVG asset with an effect gutter renders at natural size, content-aligned t
   );
   await buildSite(dir);
   const html = readFileSync(join(dir, "index.html"), "utf8");
-  const img = /<img src="assets\/aa11bb22\.svg" alt="" style="([^"]+)" \/>/.exec(html);
+  const img = /<img src="assets\/aa11bb22\.svg" alt="" style="([^"]+)"[^>]*\/>/.exec(html);
   assert.ok(img, "SVG node rendered as an img referencing its asset");
+  assert.match(html, /data-node-id="1:2"/, "元素带上 Figma 节点 id(bind_data 的定位依据)");
   assert.match(img[1], /width: 276px/, "renders at the asset's natural width");
   assert.match(img[1], /height: 396px/, "renders at the asset's natural height");
   assert.match(img[1], /left: 90px/, "content-aligned: bbox left 100 - content offset 10");
@@ -536,6 +537,126 @@ test("delete_wordcloud removes an entry", async () => {
   assert.equal(d.id, a.id);
   const stored = JSON.parse(readFileSync(join(dir, "wordclouds.json"), "utf8"));
   assert.equal(stored.items.length, 0);
+});
+
+// --- bind_data / delete_databind -------------------------------------------
+
+test("bind_data:点击式投票绑定写入 databinds.json", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.bind_data({
+    slug: "index",
+    rect: { left: 10, top: 20, width: 300, height: 120 },
+    collection: "votes",
+    kind: "bar",
+    read: { groupBy: "choice", limit: 10 },
+    write: { target: "1:2", field: "choice", value: "A" },
+    fallback: { buckets: [{ key: "A", count: 0 }], total: 0 },
+  });
+  assert.ok(r.id, JSON.stringify(r));
+  assert.equal(r.mode, "点击节点 1:2 提交");
+  const stored = JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8"));
+  assert.equal(stored.items.length, 1);
+  const item = stored.items[0];
+  assert.equal(item.collection, "votes");
+  assert.equal(item.kind, "bar");
+  assert.deepEqual(item.rect, { left: 10, top: 20, width: 300, height: 120 });
+  assert.equal(item.write.target, "1:2");
+  assert.equal(item.write.value, "A");
+});
+
+test("bind_data:输入式词云采集(自动生成输入框)", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.bind_data({
+    slug: "index",
+    rect: { left: 0, top: 0, width: 400, height: 300 },
+    collection: "words",
+    kind: "wordcloud",
+    read: { groupBy: "text", limit: 40 },
+    write: { input: true, field: "text", placeholder: "写一个词" },
+  });
+  assert.equal(r.mode, "访客输入后提交");
+  const item = JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8")).items[0];
+  assert.equal(item.write.input, true);
+  assert.equal(item.write.maxLength, 40, "默认长度上限");
+  assert.equal(item.write.button, "提交");
+});
+
+test("bind_data 的写入式绑定会更新同 id 的旧条目", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const base = { slug: "index", rect: { left: 0, top: 0, width: 100, height: 50 }, collection: "votes", kind: "bar", read: { groupBy: "choice" } };
+  const a = await handlers.bind_data({ ...base, write: { target: "1:2", field: "choice", value: "A" } });
+  const b = await handlers.bind_data({ ...base, id: a.id, write: { target: "1:2", field: "choice", value: "B" } });
+  assert.ok(b.id, JSON.stringify(b));
+  assert.equal(b.id, a.id);
+  const items = JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8")).items;
+  assert.equal(items.length, 1, "同 id 应覆盖而不是追加");
+  assert.equal(items[0].write.value, "B");
+});
+
+test("bind_data 拒绝非法输入", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const rect = { left: 0, top: 0, width: 100, height: 50 };
+  const cases = [
+    [{ slug: "nope", rect, collection: "votes", kind: "bar", read: { groupBy: "choice" } }, /没有这个页面/],
+    [{ slug: "index", rect, collection: "Bad Name", kind: "bar", read: { groupBy: "choice" } }, /collection/],
+    [{ slug: "index", rect, collection: "votes", kind: "pie", read: { groupBy: "choice" } }, /kind/],
+    [{ slug: "index", rect: { left: 0, top: 0, width: 100 }, collection: "votes", kind: "bar" }, /rect/],
+    [{ slug: "index", rect, collection: "votes", kind: "bar" }, /groupBy/],
+    [{ slug: "index", rect, collection: "votes", kind: "bar", read: { groupBy: "choice" }, write: { field: "choice" } }, /target.*input|input/],
+    [{ slug: "index", rect, collection: "votes", kind: "bar", read: { groupBy: "choice" }, write: { target: "9:9", field: "choice" } }, /没有节点/],
+    [{ slug: "index", rect, collection: "votes", kind: "bar", read: { groupBy: "choice" }, write: { target: "1:2", field: "bad field" } }, /write\.field/],
+  ];
+  for (const [args, re] of cases) {
+    const r = await handlers.bind_data(args);
+    assert.ok(r.error, `应报错: ${JSON.stringify(args).slice(0, 80)}`);
+    assert.match(r.error, re);
+  }
+  // 一条都不该落盘
+  assert.equal(existsSync(join(dir, "databinds.json")), false);
+});
+
+test("bind_data 横向夹进画布、纵向允许低于画布(与词云同规则)", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.bind_data({
+    slug: "index",
+    rect: { left: 9999, top: 800, width: 400, height: 200 },
+    collection: "words",
+    kind: "counter",
+  });
+  const item = JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8")).items[0];
+  assert.ok(item.rect.left + item.rect.width <= 500, "不超出画布宽度");
+  assert.equal(item.rect.top, 800, "纵向不被夹取:可以放在内容下方");
+  assert.ok(r.id);
+});
+
+test("bind_data 被拒绝时不落盘", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: async () => false });
+  const r = await handlers.bind_data({ slug: "index", rect: { left: 0, top: 0, width: 10, height: 10 }, collection: "votes", kind: "counter" });
+  assert.match(r.error, /拒绝/);
+  assert.equal(existsSync(join(dir, "databinds.json")), false);
+});
+
+test("delete_databind 删除条目", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const a = await handlers.bind_data({ slug: "index", rect: { left: 0, top: 0, width: 10, height: 10 }, collection: "votes", kind: "counter" });
+  const d = await handlers.delete_databind({ id: a.id });
+  assert.equal(d.id, a.id);
+  assert.equal(JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8")).items.length, 0);
+  assert.ok((await handlers.delete_databind({ id: "nope" })).error);
+});
+
+test("databinds.json 在 write_file 的禁写名单里", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.write_file({ path: "databinds.json", content: "{}" });
+  assert.ok(r.error, "必须拒绝直接改写 databinds.json");
 });
 
 test("run_build invokes the injected build function", async () => {

@@ -466,6 +466,11 @@ function applyScaleH(node, st, canvas) {
   return st;
 }
 
+// 每个渲染出的元素都带上 Figma 节点 id。这是 AI 的 bind_data 能"指向某个节点"
+// 的前提 —— 例如"点这个按钮就是投票"需要能定位到它。
+// 放在 style **之后**,既有 HTML 断言的前缀不受影响。
+const nodeAttr = (node) => (node?.id ? ` data-node-id="${node.id}"` : "");
+
 export function renderNode(node, nodes, canvas, out, ctx) {
   const { assetDir, pathToFile, fontStack } = ctx;
   const assetUrl = makeAssetUrl(assetDir);
@@ -517,8 +522,8 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st.top = `${Math.round(bb.y - canvas.y - thick / 2)}px`;
     }
     applyScaleH(node, st, canvas);
-    const line = `  <div class="line" style="${cssText(st)}"></div>`;
-    out.push(href ? `  <a href="${href}">${line}</a>` : line);
+    const line = `  <div class="line" style="${cssText(st)}"${nodeAttr(node)}></div>`;
+    out.push(href ? `  <a href="${href}"${nodeAttr(node)}>${line}</a>` : line);
     return;
   }
 
@@ -545,7 +550,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
         delete st["background-image"];
         applyScaleH(node, st, canvas);
         const fill = `<img src="${assetUrl(node.hash)}" alt="" style="width: 100%; height: 100%; display: block" />`;
-        out.push(`  <a href="${href}" style="${cssText(st)}">${fill}</a>`);
+        out.push(`  <a href="${href}" style="${cssText(st)}"${nodeAttr(node)}>${fill}</a>`);
         return;
       }
       if (rotated) {
@@ -609,8 +614,8 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       delete st["background-color"];
       delete st["background-image"];
       applyScaleH(node, st, canvas);
-      const img = `<img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}" />`;
-      out.push(href ? `  <a href="${href}">${img}</a>` : img);
+      const img = `<img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}"${nodeAttr(node)} />`;
+      out.push(href ? `  <a href="${href}"${nodeAttr(node)}>${img}</a>` : img);
     }
     return;
   }
@@ -640,7 +645,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     }
     applyScaleH(node, st, canvas);
     const isLink = !!href;
-    out.push(isLink ? `  <a href="${href}" style="${cssText(st)}">` : `  <div style="${cssText(st)}">`);
+    out.push(isLink ? `  <a href="${href}" style="${cssText(st)}"${nodeAttr(node)}>` : `  <div style="${cssText(st)}"${nodeAttr(node)}>`);
     if (scroll) {
       // Scroll containers own their subtree: children sit inside the scroll box.
       for (const childId of node.children || []) {
@@ -720,9 +725,9 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     // The live site renders each interactive node (rect button, hotspot
     // marker, …) as an <a>; an interactive group's children link to its target.
     if (href) {
-      out.push(`  <a href="${href}" style="${cssText(st)}"></a>`);
+      out.push(`  <a href="${href}" style="${cssText(st)}"${nodeAttr(node)}></a>`);
     } else {
-      out.push(`  <div style="${cssText(st)}"></div>`);
+      out.push(`  <div style="${cssText(st)}"${nodeAttr(node)}></div>`);
     }
     return;
   }
