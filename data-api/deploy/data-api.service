@@ -1,0 +1,36 @@
+[Unit]
+Description=Figma Replica Data API (生成的静态站点的数据后端)
+Documentation=https://github.com/shan242/figma-site-create/blob/main/docs/data-api.md
+After=network.target
+
+[Service]
+Type=simple
+User=dataapi
+Group=dataapi
+WorkingDirectory=/opt/data-api
+
+Environment=PORT=3210
+Environment=DATA_DIR=/opt/data-api/data
+# 反代后面必须为 1,否则限流会把所有访客当成同一个 IP(nginx 的地址)
+Environment=TRUST_PROXY=1
+Environment=LOG_LEVEL=info
+# node:sqlite 仍是实验特性,会打印 ExperimentalWarning;抑制掉保持日志干净
+Environment=NODE_OPTIONS=--disable-warning=ExperimentalWarning
+
+ExecStart=/usr/bin/node /opt/data-api/server.mjs
+Restart=always
+RestartSec=3
+
+# --- 加固 -------------------------------------------------------------------
+# 数据只应写到 DATA_DIR;其余文件系统只读
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/data-api/data
+
+[Install]
+WantedBy=multi-user.target

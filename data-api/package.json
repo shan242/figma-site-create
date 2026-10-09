@@ -1,0 +1,16 @@
+{
+  "name": "figma-replica-data-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "数据后端:为生成的静态站点提供词云采集 / 投票 / 留言等持久化能力",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,5 @@
+# 运行时数据:SQLite 与 config.json(含 adminToken),绝不入库
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
