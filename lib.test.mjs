@@ -6,7 +6,118 @@
 // 一个子节点都取不到。这里的用例把这个还原逻辑钉死。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandInstances, collectAll, renderNode } from "./lib.mjs";
+import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime } from "./lib.mjs";
+
+// 组件变体轮播(SWAP_STATE)用的 fixture:
+//   组件集 18:40 里有 2 个变体(18:20 主 / 18:30),
+//   实例 18:10 用主变体,里面的箭头点一下切到 18:30。
+function variantFixture({ withSwap = true } = {}) {
+  const arrow = {
+    id: "18:22",
+    type: "SVG",
+    name: "Arrow",
+    hash: "arrowhash",
+    absoluteBoundingBox: { x: 2050, y: 700, width: 12, height: 12 },
+    children: [],
+    interactions: withSwap
+      ? [{ event: { interactionType: "ON_CLICK" }, actions: [{ navigationType: "SWAP_STATE", connectionType: "INTERNAL_NODE", transitionNodeID: { sessionID: 18, localID: 30 }, stateGroupContext: "18:40" }] }]
+      : [],
+  };
+  return {
+    roots: ["0:1"],
+    nodeById: {
+      "0:1": { id: "0:1", type: "FRAME", name: "Desktop", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 }, children: ["18:10"] },
+      "18:10": {
+        id: "18:10",
+        type: "INSTANCE",
+        name: "carousel",
+        mainComponentId: "18:20",
+        componentSetId: "18:40",
+        absoluteBoundingBox: { x: 100, y: 300, width: 420, height: 440 },
+        children: ["I18:10;18:21", "I18:10;18:22"],
+      },
+      "18:40": { id: "18:40", type: "COMPONENT_SET", name: "set", absoluteBoundingBox: { x: 1980, y: 280, width: 460, height: 960 }, children: ["18:20", "18:30"] },
+      "18:20": { id: "18:20", type: "COMPONENT", name: "v1", absoluteBoundingBox: { x: 2000, y: 300, width: 420, height: 440 }, children: ["18:21", "18:22"] },
+      "18:21": { id: "18:21", type: "RECTANGLE", name: "photo1", absoluteBoundingBox: { x: 2000, y: 300, width: 420, height: 285 }, fills: [{ type: "IMAGE", visible: true, imageRef: "aaa" }], children: [] },
+      "18:22": arrow,
+      "18:30": { id: "18:30", type: "COMPONENT", name: "v2", absoluteBoundingBox: { x: 2000, y: 800, width: 420, height: 440 }, children: ["18:31"] },
+      "18:31": { id: "18:31", type: "RECTANGLE", name: "photo2", absoluteBoundingBox: { x: 2000, y: 800, width: 420, height: 285 }, fills: [{ type: "IMAGE", visible: true, imageRef: "bbb" }], children: [] },
+    },
+  };
+}
+
+test("变体轮播:其它变体也渲染出来(默认隐藏),并平移到位", () => {
+  const data = variantFixture();
+  expandInstances(data);
+  const inst = data.nodeById["18:10"];
+
+  // 主变体(2 个)+ 另一变体(1 个)
+  assert.deepEqual(inst.children, ["18:10~18:21", "18:10~18:22", "18:10~18:30~18:31"]);
+
+  const main = data.nodeById["18:10~18:21"];
+  assert.equal(main.__swap.on, true, "主变体应可见");
+  assert.equal(main.__swap.variant, "18:20");
+  assert.equal(main.__swap.group, "18:10");
+
+  const other = data.nodeById["18:10~18:30~18:31"];
+  assert.equal(other.__swap.on, false, "其它变体应默认隐藏");
+  assert.equal(other.__swap.variant, "18:30");
+  assert.equal(other.fills[0].imageRef, "bbb", "另一变体的图片要保留");
+  // 平移:实例(100,300) − 变体(2000,800) = (−1900,−500)
+  assert.equal(other.absoluteBoundingBox.x, 100);
+  assert.equal(other.absoluteBoundingBox.y, 300);
+});
+
+test("没有 SWAP_STATE 箭头时不展开其它变体(不白渲染)", () => {
+  const data = variantFixture({ withSwap: false });
+  expandInstances(data);
+  assert.deepEqual(data.nodeById["18:10"].children, ["18:10~18:21", "18:10~18:22"], "只展开主变体即可");
+  assert.equal(data.nodeById["18:10~18:30~18:31"], undefined);
+});
+
+test("swapTargetOf 取出 SWAP_STATE 的目标变体", () => {
+  assert.equal(swapTargetOf({ interactions: [{ actions: [{ navigationType: "SWAP_STATE", transitionNodeID: { sessionID: 18, localID: 30 } }] }] }), "18:30");
+  assert.equal(swapTargetOf({ interactions: [{ actions: [{ navigationType: "NAVIGATE", connectionURL: "/x" }] }] }), null);
+  assert.equal(swapTargetOf({}), null);
+  assert.equal(swapTargetOf(null), null);
+});
+
+test("渲染出的元素带齐切换属性(data-swap-*)", () => {
+  // renderNode 的第 3 个参数是 **canvas 的 bbox**,不是 canvas 节点(build.mjs 里
+  // 传的就是 canvas.absoluteBoundingBox)。
+  const cb = { x: 0, y: 0, width: 1440, height: 900 };
+  const data = variantFixture();
+  expandInstances(data);
+  const nodes = data.nodeById;
+  const ctx = { assetDir: ".", parentOf: new Map(), edits: new Map(), nodeStyles: new Map(), handled: new Set() };
+  const render = (id) => {
+    const out = [];
+    renderNode(nodes[id], nodes, cb, out, ctx);
+    return out.join("\n");
+  };
+
+  const visible = render("18:10~18:21");
+  assert.match(visible, /data-swap-group="18:10"/);
+  assert.match(visible, /data-swap-variant="18:20"/);
+  assert.equal(/data-swap-off/.test(visible), false, "可见变体不能带 data-swap-off");
+
+  // 隐藏变体:用属性而不是内联 display:none(文本靠内联 display:flex 排版)
+  const hidden = render("18:10~18:30~18:31");
+  assert.match(hidden, /data-swap-off/);
+  assert.equal(/display:\s*none/.test(hidden), false, "不能用内联 display:none");
+
+  // 箭头带目标变体
+  const arrow = render("18:10~18:22");
+  assert.match(arrow, /data-swap-to="18:30"/);
+});
+
+test("swapRuntime 只切同组、并保留内联 display", () => {
+  assert.match(swapRuntime, /data-swap-group/);
+  assert.match(swapRuntime, /removeAttribute\('data-swap-off'\)/);
+  assert.match(swapRuntime, /setAttribute\('data-swap-off'/);
+  // 绝不能直接写 style.display —— 文本节点会因此丢掉 flex 排版
+  assert.equal(/style\.display/.test(swapRuntime), false);
+});
 
 test("renderNode 给 TEXT 也带 data-node-id(曾经漏掉,导致定位不到文字)", () => {
   const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 } };

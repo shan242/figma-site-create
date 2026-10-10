@@ -7,7 +7,7 @@
 // lib.mjs; this file decides fonts + page wiring.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { join, basename, resolve, sep } from "node:path";
-import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances } from "./lib.mjs";
+import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
 import { databindInjection, databindHead } from "./databind.mjs";
 
@@ -279,6 +279,9 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
     out.push(databindInjection(b, { canvasWidth: Math.round(cb.width) }));
   }
 
+  // 组件变体轮播:只有真的展开了多个变体才需要这段运行时。
+  if (all.some((n) => n.__swap)) out.push(`<script>${swapRuntime}</script>`);
+
   // A word cloud may sit below the design canvas bottom (the AI places it in
   // canvas coordinates with top > canvas height); grow the canvas to cover it
   // so the page background reaches the cloud instead of clipping it. Matched
@@ -367,6 +370,10 @@ body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
 .databind .db-input { flex: 1 1 auto; min-width: 0; padding: 6px 8px; font-size: 13px; border: 1px solid #cbd5e1; border-radius: 6px; font-family: inherit; }
 .databind .db-btn { flex: 0 0 auto; padding: 6px 12px; font-size: 13px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; font-family: inherit; }
 .databind .db-btn:hover { background: #1d4ed8; }
+/* 组件变体轮播(SWAP_STATE):非当前变体隐藏。用属性选择器而不是内联 display ——
+   文本节点靠内联 display:flex 排版,直接改 style.display 会把排版弄散。 */
+[data-swap-off] { display: none !important; }
+[data-swap-to] { cursor: pointer; }
 `;
   const extraCss = await selfHostedCss(selfHost);
   // AI global CSS (append_css) goes last so its rules take precedence over the

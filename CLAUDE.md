@@ -94,9 +94,21 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   - **构件本身不动**:组件定义区的原件坐标保持原样,不能跟着平移。
   `ai.mjs` 的 `pageTextOf` 用同一个函数,所以 AI 看到的合成 id 与构建产物完全
   一致 —— 它据此用 `edit_node` 写的覆盖,重建后能对上。
-  仍未实现:轮播的**点击换图**是 Figma 的 `SWAP_STATE` 变体交互
-  (`navigationType: "SWAP_STATE"` + `stateGroupContext` 指向组件集),
-  静态复刻只渲染默认变体,箭头点了不会换。
+- **组件变体轮播(SWAP_STATE)已实现**。Figma 的「点箭头换图」不是链接,而是
+  `navigationType: "SWAP_STATE"` + `stateGroupContext` 指向组件集。做法:
+  - `expandInstances` 把组件集里**其它变体**也克隆出来,各自按
+    `实例原点 − 该变体原点` 平移,合成 id 为 `<实例id>~<变体id>~<原始id>`,
+    并打上 `__swap = {group, variant, on}`(主变体 `on:true`,其余 `false`);
+  - 渲染时 `nodeAttr` 输出 `data-swap-group` / `data-swap-variant`,
+    隐藏的再加 `data-swap-off`;箭头输出 `data-swap-to="<目标变体id>"`;
+  - CSS `[data-swap-off] { display: none !important; }`,运行时
+    `swapRuntime` 按 `data-swap-group` 分组切 `data-swap-off` 属性。
+  ⚠️ **必须用属性切换,不能写 `style.display`** —— 文本节点靠内联
+  `display:flex` 排版,直接改内联样式会把排版弄散。测试里专门断言了这一点。
+  ⚠️ 只有默认变体子树里**真的存在 SWAP_STATE 箭头**时才展开其它变体,
+  否则只是白渲染一堆永远不显示的节点。
+  实测(lily2026new):两组共 54 个变体元素、42 个隐藏、12 个可见,
+  连点箭头可遍历全部 4 个变体,另一组不受影响。
 - **`data-node-id` 要覆盖到 TEXT**:所有会产出元素的类型都要带,漏一个就会让
   `bind_data` 的 `target` 定位不到那个节点。TEXT 的 `wrapOpen` 曾经漏掉,
   表现为"文字内容在、但按节点 id 查不到"。属性一律排在 `style` **之后**。

@@ -469,7 +469,25 @@ function applyScaleH(node, st, canvas) {
 // 每个渲染出的元素都带上 Figma 节点 id。这是 AI 的 bind_data 能"指向某个节点"
 // 的前提 —— 例如"点这个按钮就是投票"需要能定位到它。
 // 放在 style **之后**,既有 HTML 断言的前缀不受影响。
-const nodeAttr = (node) => (node?.id ? ` data-node-id="${node.id}"` : "");
+// 每个渲染出的元素都要带的定位/切换属性。
+//   data-node-id      : Figma 节点 id(bind_data 的 target / edit 覆盖靠它定位)
+//   data-swap-group   : 属于哪个实例的变体组
+//   data-swap-variant : 属于哪个变体
+//   data-swap-off     : 非当前变体,CSS 隐藏(用属性而不是内联 display,
+//                       因为文本节点靠内联 display:flex 布局,覆盖就散了)
+//   data-swap-to      : 点了要切到哪个变体(只出现在 SWAP_STATE 箭头上)
+const nodeAttr = (node) => {
+  if (!node?.id) return "";
+  let s = ` data-node-id="${node.id}"`;
+  const sw = node.__swap;
+  if (sw) {
+    s += ` data-swap-group="${sw.group}" data-swap-variant="${sw.variant}"`;
+    if (!sw.on) s += " data-swap-off";
+  }
+  const to = swapTargetOf(node);
+  if (to) s += ` data-swap-to="${to}"`;
+  return s;
+};
 
 export function renderNode(node, nodes, canvas, out, ctx) {
   const { assetDir, pathToFile, fontStack } = ctx;
@@ -770,6 +788,12 @@ export function collectAll(data) {
 // 于是 collectAll / renderNode / parentOf / linkHref 全都不用改。
 //
 // 合成 id 是确定性的,所以 AI 用 edit_node 针对它写的覆盖,重建之后依然命中。
+//
+// 顺带处理**组件变体轮播**(Figma 的 SWAP_STATE 交互):把组件集里其它变体也按
+// 各自的位置差平移过来渲染,默认隐藏,只让主变体可见;箭头节点带上
+// `data-swap-to="<目标变体id>"`,运行时据此切显隐(见 swapRuntime)。
+// 只有当默认变体的子树里真的存在 SWAP_STATE 箭头时才展开其它变体 ——
+// 否则只是白白多渲染一堆永远不会显示的节点。
 export function expandInstances(data) {
   const nodes = data?.nodeById;
   if (!nodes) return 0;
@@ -781,41 +805,124 @@ export function expandInstances(data) {
   const SHIFTABLE = ["absoluteBoundingBox", "absoluteRenderBounds", "isolatedAbsoluteRenderBounds"];
   let added = 0;
 
+  const clone = (origId, dx, dy, prefix, swap, depth) => {
+    const src = nodes[origId];
+    if (!src || depth > 12) return null;
+    const sid = `${prefix}${origId}`;
+    if (nodes[sid]) return sid; // 同一实例/变体内被引用两次
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id = sid;
+    for (const k of SHIFTABLE) {
+      if (copy[k]) copy[k] = { ...copy[k], x: copy[k].x + dx, y: copy[k].y + dy };
+    }
+    if (swap) copy.__swap = swap;
+    // 先登记再递归,自引用/环才不至于无限展开。
+    nodes[sid] = copy;
+    added++;
+    copy.children = (src.children || []).map((c) => clone(originalOf(c), dx, dy, prefix, swap, depth + 1)).filter(Boolean);
+    return sid;
+  };
+
   // 迭代 Object.values 的快照,新登记的合成节点不会被本轮二次处理。
   for (const inst of Object.values(nodes)) {
     if (inst?.type !== "INSTANCE") continue;
-    const kids = inst.children || [];
-    // 没有子节点、或子节点本来就存在(已展开过 / 数据正常)就跳过 —— 保证幂等。
-    if (!kids.length || !kids.some((c) => !nodes[c])) continue;
-    const comp = nodes[inst.mainComponentId] || nodes[inst.componentSetId];
     const ib = inst.absoluteBoundingBox;
+    if (!ib) continue;
+    const comp = nodes[inst.mainComponentId] || nodes[inst.componentSetId];
     const cb = comp?.absoluteBoundingBox;
-    if (!ib || !cb) continue;
-    const dx = ib.x - cb.x;
-    const dy = ib.y - cb.y;
-    const prefix = `${inst.id}~`;
+    if (!cb) continue;
 
-    const clone = (origId, depth) => {
-      const src = nodes[origId];
-      if (!src || depth > 12) return null;
-      const sid = `${prefix}${origId}`;
-      if (nodes[sid]) return sid; // 同一实例内被引用两次
-      const copy = JSON.parse(JSON.stringify(src));
-      copy.id = sid;
-      for (const k of SHIFTABLE) {
-        if (copy[k]) copy[k] = { ...copy[k], x: copy[k].x + dx, y: copy[k].y + dy };
+    // 1) 实例自己的 children(复合 id)→ 按「实例原点 − 主组件原点」还原。
+    const kids = inst.children || [];
+    if (kids.some((c) => !nodes[c])) {
+      const prefix = `${inst.id}~`;
+      const dx = ib.x - cb.x;
+      const dy = ib.y - cb.y;
+      const swap = { group: inst.id, variant: inst.mainComponentId, on: true };
+      inst.children = kids.map((c) => (nodes[c] ? c : clone(originalOf(c), dx, dy, prefix, swap, 0))).filter(Boolean);
+      // 本来就存在的子节点(数据正常的实例)也要打上分组标记,否则切换时管不到它们。
+      for (const c of inst.children) if (!nodes[c]?.__swap) markSwap(nodes, c, swap);
+    }
+
+    // 2) 变体轮播:其它变体也渲染出来(默认隐藏)。
+    const variants = (nodes[inst.componentSetId]?.children || []).map((c) => nodes[c]).filter((v) => v?.type === "COMPONENT");
+    if (variants.length < 2) continue;
+    if (!subtreeHasSwap(nodes, inst.children || [], inst.componentSetId)) continue;
+    for (const v of variants) {
+      if (v.id === inst.mainComponentId) continue;
+      const vb = v.absoluteBoundingBox;
+      if (!vb) continue;
+      const prefix = `${inst.id}~${v.id}~`;
+      const dx = ib.x - vb.x;
+      const dy = ib.y - vb.y;
+      const swap = { group: inst.id, variant: v.id, on: false };
+      for (const c of v.children || []) {
+        const sid = clone(originalOf(c), dx, dy, prefix, swap, 0);
+        if (sid) inst.children.push(sid);
       }
-      // 先登记再递归,自引用/环才不至于无限展开。
-      nodes[sid] = copy;
-      added++;
-      copy.children = (src.children || []).map((c) => clone(originalOf(c), depth + 1)).filter(Boolean);
-      return sid;
-    };
-
-    inst.children = kids.map((c) => (nodes[c] ? c : clone(originalOf(c), 0))).filter(Boolean);
+    }
   }
   return added;
 }
+
+// 给一棵已有子树补上分组标记(用于子节点本来就存在的实例)。
+function markSwap(nodes, id, swap) {
+  const n = nodes[id];
+  if (!n) return;
+  if (!n.__swap) n.__swap = swap;
+  for (const c of n.children || []) markSwap(nodes, c, swap);
+}
+
+// 子树里是否存在指向该组件集的 SWAP_STATE 交互(有才值得展开其它变体)。
+function subtreeHasSwap(nodes, ids, setId) {
+  const seen = new Set();
+  const walk = (id) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const n = nodes[id];
+    if (!n) return false;
+    for (const i of n.interactions || []) {
+      for (const a of i.actions || []) {
+        if (a?.navigationType !== "SWAP_STATE") continue;
+        if (!setId || !a.stateGroupContext || a.stateGroupContext === setId) return true;
+      }
+    }
+    return (n.children || []).some(walk);
+  };
+  return ids.some(walk);
+}
+
+// 节点上挂的 SWAP_STATE 目标变体 id(没有则 null)。
+export function swapTargetOf(node) {
+  for (const i of node?.interactions || []) {
+    for (const a of i.actions || []) {
+      if (a?.navigationType !== "SWAP_STATE" || !a.transitionNodeID) continue;
+      return `${a.transitionNodeID.sessionID}:${a.transitionNodeID.localID}`;
+    }
+  }
+  return null;
+}
+
+// 变体切换的浏览器运行时。用 data 属性切显隐而不是直接写 style.display ——
+// 文本节点靠内联 display:flex 布局,覆盖掉就散了。
+export const swapRuntime = `(function () {
+  function apply(group, variant) {
+    var list = document.querySelectorAll('[data-swap-group="' + group + '"]');
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].getAttribute('data-swap-variant') === variant) list[i].removeAttribute('data-swap-off');
+      else list[i].setAttribute('data-swap-off', '');
+    }
+  }
+  document.addEventListener('click', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('[data-swap-to]') : null;
+    if (!el) return;
+    var group = el.getAttribute('data-swap-group');
+    var to = el.getAttribute('data-swap-to');
+    if (!group || !to) return;
+    e.preventDefault();
+    apply(group, to);
+  });
+})();`;
 
 // The page's canvas frame (FRAME, falling back to WEBPAGE). Shared by the
 // build pipeline and the AI's apply_wordcloud (which clamps placement rects
