@@ -69,6 +69,50 @@ async function get(url, { asText = true } = {}) {
   return asText ? res.text() : Buffer.from(await res.arrayBuffer());
 }
 
+// 资源扩展名。站点的 url 字段**有时没有扩展名**(VIDEO_ASSET 就是这样),那时
+// `url.split(".").pop()` 会把整个 hash 当成扩展名,拼出一个必然 404 的 URL。
+// 所以先看 url,再退回 format / type。
+const KNOWN_EXT = new Set(["png", "jpg", "jpeg", "svg", "webp", "gif", "mp4", "webm", "woff2"]);
+export function extOfAsset(info) {
+  const raw = String(info?.url || "");
+  const dot = raw.lastIndexOf(".");
+  const ext = dot > 0 ? raw.slice(dot + 1).toLowerCase() : "";
+  if (KNOWN_EXT.has(ext)) return ext;
+  const fmt = String(info?.format || "").toUpperCase();
+  if (fmt === "SVG") return "svg";
+  if (fmt === "PNG") return "png";
+  if (fmt === "JPG" || fmt === "JPEG") return "jpg";
+  if (fmt === "WEBP") return "webp";
+  if (String(info?.type || "").toUpperCase().includes("VIDEO")) return "mp4";
+  return "png";
+}
+
+// 逐个尝试的候选扩展名 —— 视频也要试,站点里确实会出现 VIDEO_ASSET。
+const ALT_EXTS = ["png", "jpg", "svg", "webp", "gif", "mp4", "webm", "jpeg"];
+
+// 取一个资源,带重试 + 超时。
+// 实测(lily2026new):同一个 URL 会时而 200、时而 `fetch failed`(连接被重置),
+// 所以**连接级错误必须重试**;明确的 4xx 直接放弃,别浪费时间。
+async function fetchAsset(url, attempts = 3, timeoutMs = 60000) {
+  for (let t = 1; t <= attempts; t++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { redirect: "follow", signal: ctrl.signal });
+      if (res.status >= 400 && res.status < 500) return null; // 确实不在服务器上
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
+    } catch {
+      if (t === attempts) return null;
+      // 退避 + 抖动:避免并发任务同时重试又一起打回去
+      await sleep(400 * t + Math.floor(Math.random() * 300));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
 // --- Magic-byte sniffing ----------------------------------------------------
 
 function sniffExt(buf) {
@@ -184,71 +228,70 @@ export async function scrapeSite(outDir, urlArg) {
   if (!pages.length) fail("No pages could be fetched.");
 
   // 3. Collect + download all assets referenced by the pages.
-  const allHashes = new Map(); // hash -> preferred ext from assets map
-  const assetInfo = new Map(); // hash -> { url, size } from assets map
+  //
+  // 两张表回答不同的问题,别混用:
+  //   hinted : hash -> 站点 assets 表声明的扩展名/信息
+  //   needed : **节点真正引用**的 hash(node.hash 或 IMAGE 填充的 imageRef)
+  // assets 表会把站点里所有资源都列出来,包括没有任何节点用的;下载它们既浪费
+  // 带宽,又会让"失败计数"里混进永远不可能出现在页面上的资源。
+  const hinted = new Map();
+  const needed = new Set();
   for (const p of pages) {
     const data = JSON.parse(readFileSync(join(outDir, p.json)));
-    for (const [h, info] of Object.entries(data.assets || {})) {
-      allHashes.set(h, info.url?.split(".").pop() || "png");
-      assetInfo.set(h, info);
-    }
+    for (const [h, info] of Object.entries(data.assets || {})) hinted.set(h, { ext: extOfAsset(info), info });
     for (const n of Object.values(data.nodeById || {})) {
-      if (n.hash) allHashes.set(n.hash, null);
-      for (const f of n.fills || []) if (f.type === "IMAGE" && f.imageRef) allHashes.set(f.imageRef, null);
+      if (n.hash) needed.add(n.hash);
+      for (const f of n.fills || []) if (f.type === "IMAGE" && f.imageRef) needed.add(f.imageRef);
     }
   }
   mkdirSync(join(outDir, "assets"), { recursive: true });
-  const entries = [...allHashes].map(([hash, ext]) => ({ hash, ext }));
-  let downloaded = 0, failedAssets = 0;
-  const results = await runPool(entries, async ({ hash, ext }) => {
-    const guess = ext || "png";
-    const primary = `${origin}/_assets/v11/${hash}.${guess}`;
-    let buf;
-    // Retry the primary extension before assuming the asset is missing. A
-    // transient 5xx/timeout on a large file (the 6MB page.html base map) must
-    // not be treated as "not found" — the old code fell straight into the
-    // alt-extension probe and silently dropped the asset, leaving the built
-    // page with a white background and no map.
-    for (let t = 0; t < 3 && !buf; t++) {
-      try {
-        buf = await get(primary, { asText: false });
-      } catch (e) {
-        if (e?.status >= 400 && e?.status < 500) break; // definitive 404 — skip retries
-        if (t < 2) await sleep(400 * (t + 1));
-      }
+  // 旧代码用 `allHashes.set(n.hash, null)` 覆盖了 assets 表里已经知道的扩展名,
+  // 于是**每个被引用的资源都先按 .png 去猜**,svg/video 全靠 alt 探测兜。
+  const entries = [...new Set([...needed, ...hinted.keys()])].map((hash) => ({
+    hash,
+    ext: hinted.get(hash)?.ext || "png",
+    referenced: needed.has(hash),
+  }));
+  let downloaded = 0, unusedMissing = 0;
+  const failedAssets = [];
+  const results = await runPool(entries, async ({ hash, ext, referenced }) => {
+    // 实测:同一个 URL 会时而成功、时而 `fetch failed`(连接被重置)。所以
+    // **主扩展和 alt 探测都要重试** —— 旧代码只在主扩展上重试,alt 探测是一次性的,
+    // 一次连接重置就把资源永久判死,而磁盘上可能连旧文件都没有。
+    // 明确的 4xx 才立即放弃(那是真的不在服务器上)。
+    for (const e of [ext, ...ALT_EXTS.filter((x) => x !== ext)]) {
+      const buf = await fetchAsset(`${origin}/_assets/v11/${hash}.${e}`);
+      if (!buf) continue;
+      const real = sniffExt(buf) || e;
+      writeFileSync(join(outDir, "assets", `${hash}.${real}`), buf);
+      return { hash, real, referenced };
     }
-    if (!buf) {
-      // Some assets only exist under a different extension.
-      for (const alt of ["png", "jpg", "svg", "webp", "gif"]) {
-        if (alt === guess) continue;
-        try {
-          buf = await get(`${origin}/_assets/v11/${hash}.${alt}`, { asText: false });
-          break;
-        } catch {
-          /* try next */
-        }
-      }
-    }
-    if (!buf) return { hash, error: "not found" };
-    const real = sniffExt(buf) || guess;
-    writeFileSync(join(outDir, "assets", `${hash}.${real}`), buf);
-    return { hash, real };
+    return { hash, error: "download failed", referenced };
   });
-  for (const r of results) {
-    if (r.error) { failedAssets++; console.warn(`  ⚠ asset ${r.hash}: ${r.error}`); }
-    else downloaded++;
-  }
-  // Integrity check: every referenced hash must have landed on disk. A missed
-  // download (transient failure, wrong ext guess) would otherwise surface only
-  // later as a broken image in the built pages.
+  // 磁盘上可能已经有上一次抓取留下的文件:本次下载失败但文件在,页面照样正常。
+  // 把它和"真的缺了"分开报,否则重跑一次抓取就会刷出一堆假告警。
   const onDisk = new Set();
   for (const f of readdirSync(join(outDir, "assets"))) onDisk.add(f.split(".")[0]);
-  const stillMissing = [...allHashes.keys()].filter((h) => !onDisk.has(h));
-  if (stillMissing.length) {
-    failedAssets += stillMissing.length;
-    console.warn(`  ⚠ ${stillMissing.length} asset(s) missing from disk: ${stillMissing.join(", ")}`);
+  let reused = 0;
+  for (const r of results) {
+    if (!r.error) {
+      downloaded++;
+    } else if (!r.referenced) {
+      // 站点 assets 表里有、但没有页面引用 —— 不下也不影响页面
+      unusedMissing++;
+    } else if (onDisk.has(r.hash)) {
+      reused++;
+    } else {
+      failedAssets.push(r.hash);
+    }
   }
-  console.log(`  ✓ assets: ${downloaded} downloaded${failedAssets ? `, ${failedAssets} failed` : ""}`);
+  for (const h of failedAssets) console.warn(`  ⚠ 资源 ${h} 下载失败(页面在用;重跑一次抓取通常即可)`);
+  const tail = [
+    failedAssets.length ? `${failedAssets.length} 失败` : "",
+    reused ? `${reused} 沿用已有文件` : "",
+    unusedMissing ? `${unusedMissing} 未使用(无页面引用)` : "",
+  ].filter(Boolean);
+  console.log(`  ✓ assets: ${downloaded} downloaded${tail.length ? `, ${tail.join(", ")}` : ""}`);
 
   // 4. Manifest for the build step.
   const manifest = { liveBase: origin, siteHash, siteTitle, pages, generatedAt: new Date().toISOString() };

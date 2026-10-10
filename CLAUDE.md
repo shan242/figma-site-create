@@ -364,10 +364,28 @@ contains rich-text spans — that's a capture artifact, not a rendering bug.
   with a clear message. Publish in Figma first.
 - **No `guidToUrl`** → `scrape.mjs` falls back to BFS over nav `interactions`.
 - **Missing assets** → tried under every extension; some hashes genuinely 404.
-  `scrape.mjs` now **retries the primary extension on transient 5xx/timeout
-  errors before probing alt extensions** (a dropped 6MB map would otherwise leave
-  the built page white), and **verifies every referenced hash landed on disk**,
-  warning loudly about stragglers. If an asset is still missing, re-scrape.
+  `scrape.mjs` **retries transient errors on every candidate extension** (not just
+  the first) and **verifies every referenced hash landed on disk**. Three traps
+  fixed after a real "asset … not found" report:
+  - the site's `url` field **sometimes has no extension at all** (`VIDEO_ASSET`),
+    and `url.split(".").pop()` then returns the whole hash, producing a guaranteed
+    404 — `extOfAsset()` now falls back to `format`/`type` and only accepts known
+    extensions;
+  - the collection loop used to `set(node.hash, null)`, **clobbering the extension
+    the assets table already knew**, so every referenced asset was guessed as `.png`
+    first and svg/video survived only via the alt probe;
+  - the alt probe had **no retry**, so one connection reset killed the asset for
+    good even though the same URL returns 200 moments later.
+  Reporting separates three situations, because conflating them sends people
+  chasing a bug that isn't there: a referenced asset that truly failed; one that
+  failed but **was already on disk from a previous scrape** (reused — the page is
+  fine); and an asset **no page references** (the assets table lists everything
+  the site ships, used or not).
+- **Scrape failures look new but usually aren't**: transient CDN resets have always
+  happened. Before the retry + integrity check landed (`7cf376c`), a failed asset
+  was dropped **silently**, so the only symptom was a blank image much later. If a
+  scrape reports failures now, re-run before assuming a regression — the same URL
+  failing and then succeeding is the observed pattern.
 - **Rare node types** (vectors, groups with effects) → skipped by `renderNode`; the
   replica renders what the proven path handles. Extend `lib.mjs`, not `build.mjs`.
 - **New font families** → add to `GOOGLE_FONTS` only if Google Fonts serves them;
