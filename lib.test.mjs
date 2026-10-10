@@ -6,7 +6,72 @@
 // 一个子节点都取不到。这里的用例把这个还原逻辑钉死。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime } from "./lib.mjs";
+import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss } from "./lib.mjs";
+
+// --- 图像/渐变填充的透明度 ---------------------------------------------------
+// CSS 没有 background-opacity,所以图像填充的透明度只能落在元素 opacity 上。
+// 漏掉它会让一张 6% 的背景图以全不透明渲染,把整节内容压没(实测 lily2026new)。
+
+const url = (h) => `assets/${h}.jpg`;
+
+test("fillToCss:纯色透明度烘进 rgba", () => {
+  assert.deepEqual(fillToCss({ type: "SOLID", visible: true, opacity: 1, color: { r: 1, g: 0, b: 0, a: 1 } }), { "background-color": "rgb(255,0,0)" });
+  assert.deepEqual(fillToCss({ type: "SOLID", visible: true, opacity: 0.1, color: { r: 1, g: 1, b: 1, a: 1 } }), { "background-color": "rgba(255,255,255,0.1)" });
+});
+
+test("fillToCss:图像填充的透明度必须带出来(用 opacity,不是丢掉)", () => {
+  const css = fillToCss({ type: "IMAGE", visible: true, opacity: 0.06, imageRef: "abc" }, url);
+  assert.equal(css["background-image"], "url(assets/abc.jpg)");
+  assert.equal(css["background-size"], "cover");
+  assert.equal(css.opacity, 0.06, "0.06 必须保留");
+
+  // 不透明度为 1 时不写多余属性
+  const full = fillToCss({ type: "IMAGE", visible: true, opacity: 1, imageRef: "abc" }, url);
+  assert.equal("opacity" in full, false);
+  // 没写 opacity 字段时也不应误加
+  assert.equal("opacity" in fillToCss({ type: "IMAGE", visible: true, imageRef: "abc" }, url), false);
+});
+
+test("fillToCss:渐变填充的透明度同样带出来", () => {
+  const grad = { type: "GRADIENT_LINEAR", visible: true, opacity: 0.25, gradientHandlePositions: [{ x: 0.5, y: 1 }, { x: 0.5, y: 0 }, { x: 0, y: 0 }], gradientStops: [{ position: 0, color: { r: 0, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } }] };
+  assert.equal(fillToCss(grad, url).opacity, 0.25);
+});
+
+test("fillToCss:不可见 / 全透明 / 未知类型", () => {
+  assert.equal(fillToCss({ type: "IMAGE", visible: false, opacity: 1, imageRef: "a" }, url), null);
+  assert.equal(fillToCss({ type: "IMAGE", visible: true, opacity: 0, imageRef: "a" }, url), null, "opacity=0 视为没有填充");
+  assert.equal(fillToCss(null, url), null);
+});
+
+// 渲染一个矩形,取出它的 style 属性,看 opacity 是多少
+function renderOpacity(node, nodeOpacity) {
+  const cb = { x: 0, y: 0, width: 1440, height: 900 };
+  const n = { ...node, id: "1:9" };
+  if (nodeOpacity !== undefined) n.opacity = nodeOpacity;
+  const nodes = { "1:9": n };
+  const out = [];
+  renderNode(n, nodes, cb, out, { assetDir: ".", parentOf: new Map(), edits: new Map(), nodeStyles: new Map(), handled: new Set() });
+  const style = /style="([^"]*)"/.exec(out.join("\n"))?.[1] || "";
+  const m = /opacity:\s*([\d.]+)/.exec(style);
+  return { style, opacity: m ? Number(m[1]) : 1 };
+}
+
+test("节点 opacity 与填充 opacity 相乘,而不是互相覆盖", () => {
+  const base = { type: "RECTANGLE", name: "bg", absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 } };
+
+  const a = renderOpacity({ ...base, fills: [{ type: "IMAGE", visible: true, opacity: 0.06, imageRef: "abc" }] });
+  assert.equal(a.opacity, 0.06, "只有填充透明度时用它");
+
+  const b = renderOpacity({ ...base, fills: [{ type: "IMAGE", visible: true, opacity: 0.5, imageRef: "abc" }] }, 0.5);
+  assert.equal(b.opacity, 0.25, "两者都有时应相乘(0.5 × 0.5)");
+
+  const c = renderOpacity({ ...base, fills: [{ type: "SOLID", visible: true, color: { r: 1, g: 1, b: 1, a: 1 } }] }, 0.3);
+  assert.equal(c.opacity, 0.3, "纯色填充不会覆盖节点 opacity");
+  assert.match(c.style, /background-color:\s*rgb\(255,255,255\)/, "纯色不带填充透明度");
+
+  const d = renderOpacity({ ...base, fills: [{ type: "IMAGE", visible: true, opacity: 1, imageRef: "abc" }] });
+  assert.equal(/opacity/.test(d.style), false, "全不透明时不该写 opacity");
+});
 
 // 组件变体轮播(SWAP_STATE)用的 fixture:
 //   组件集 18:40 里有 2 个变体(18:20 主 / 18:30),

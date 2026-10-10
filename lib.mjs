@@ -33,17 +33,28 @@ export const gradientAngle = (h) => {
 
 export const fillToCss = (fill, assetUrl) => {
   if (!fill || !fill.visible || fill.opacity === 0) return null;
+  // Figma 的填充可以整体带一个透明度。SOLID 能直接烘进 rgba(),但图像和渐变
+  // 不行 —— CSS 没有 background-opacity,只能靠元素 opacity 表达。这里把值交给
+  // 调用方,由它和节点自身的 opacity **相乘**(见 nodeStyle)。
+  // 实测踩坑:lily2026new 那段大背景图是 opacity 0.06,漏掉后整张图以全不透明
+  // 渲染,把整节内容压得看不见。取值和 rgba() 一样保留 3 位小数,免得 HTML 里
+  // 出现 0.0599999986588955 这种浮点噪声。
+  const alpha = fill.opacity !== undefined && fill.opacity < 1 ? +fill.opacity.toFixed(3) : undefined;
   if (fill.type === "SOLID") {
-    const bg = fmtColor(fill.color, fill.opacity !== undefined && fill.opacity < 1 ? fill.opacity : undefined);
+    const bg = fmtColor(fill.color, alpha);
     return bg ? { "background-color": bg } : null;
   }
   if (fill.type === "IMAGE" && fill.imageRef) {
-    return { "background-image": `url(${assetUrl(fill.imageRef)})`, "background-size": "cover", "background-position": "center" };
+    const css = { "background-image": `url(${assetUrl(fill.imageRef)})`, "background-size": "cover", "background-position": "center" };
+    if (alpha !== undefined) css.opacity = alpha;
+    return css;
   }
   if (fill.type === "GRADIENT_LINEAR" && fill.gradientStops?.length) {
     const angle = gradientAngle(fill.gradientHandlePositions) ?? 90;
     const stops = fill.gradientStops.map((s) => `${fmtColor(s.color)} ${Math.round(s.position * 100)}%`).join(", ");
-    return { "background-image": `linear-gradient(${angle}deg, ${stops})` };
+    const css = { "background-image": `linear-gradient(${angle}deg, ${stops})` };
+    if (alpha !== undefined) css.opacity = alpha;
+    return css;
   }
   return null;
 };
@@ -168,7 +179,16 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl, centered) {
     const isAsset = node.type === "IMAGE" || node.type === "SVG";
     if (!isAsset) {
       const fill = (node.fills || []).find((f) => f.visible && f.opacity !== 0);
-      Object.assign(st, fillToCss(fill, assetUrl) ?? {});
+      const fillCss = fillToCss(fill, assetUrl) ?? {};
+      // 图像/渐变填充的透明度是作为 opacity 返回的,必须和节点自身的 opacity
+      // **相乘** —— 直接 Object.assign 会把节点 opacity 覆盖掉。
+      // (代价:元素上若还有边框,边框会跟着一起变淡;带描边的半透明图像极罕见。)
+      const fillAlpha = fillCss.opacity;
+      delete fillCss.opacity;
+      Object.assign(st, fillCss);
+      const alpha = opacity * (fillAlpha ?? 1);
+      if (alpha < 1) st.opacity = alpha;
+      else delete st.opacity;
       if (node.cornerRadius) st["border-radius"] = `${node.cornerRadius}px`;
       if (node.strokes?.length) {
         const strk = node.strokes[0];

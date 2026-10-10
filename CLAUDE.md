@@ -162,6 +162,15 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   ship as PNGs with the dashed ring drawn in; the page-6 curves and page-28 dots are
   SVGs whose stroke is baked in). The live site paints no CSS on them — adding a
   fill/border put a solid square behind circles, curves, and dots.
+- **填充的透明度**:Figma 的 fill 可以整体带 `opacity`。**SOLID 能直接烘进
+  `rgba()`**,但**图像和渐变不行 —— CSS 没有 `background-opacity`**,只能落在元素
+  `opacity` 上。所以 `fillToCss` 把图像/渐变的透明度作为 `opacity` 返回,由
+  `nodeStyle` 与节点自身的 `opacity` **相乘**(直接 `Object.assign` 会把节点
+  opacity 覆盖掉)。
+  实测踩坑:lily2026new「Memories from the late-1900s」那段的整幅背景图是
+  `opacity: 0.06`,漏掉后**以全不透明渲染**,把整节内容压得几乎看不见 ——
+  而它上面那层 0.1 的纯色是好的,所以看起来像"颜色不对"而不是"透明度丢了"。
+  代价:元素上若还有边框,边框会跟着变淡;带描边的半透明图像极罕见。
 - **SVG assets render at Figma's `isolatedAbsoluteRenderBounds`, not the design box**:
   the exporter bakes effects (drop-shadow gutters) into the SVG **or** crops it to the
   drawing (the page-5 triangle polygon ships as a 46×36 asset inside a 64×53 design

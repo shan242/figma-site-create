@@ -18,7 +18,11 @@ export const LICENSE_SERVER_URL = "https://figma.hexyan.site";
 
 function run(cmd, args) {
   try {
-    return execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, windowsHide: true }).trim();
+    // 15s, not 5s: a COLD PowerShell start on Windows regularly takes 5–7s
+    // (measured 6.1s), and blowing the timeout silently drops us to the
+    // hostname fallback below — a different, weaker code. The app caches the
+    // result in its config on first run, so this cost is paid once per install.
+    return execFileSync(cmd, args, { encoding: "utf8", timeout: 15000, windowsHide: true }).trim();
   } catch {
     return "";
   }
@@ -35,7 +39,15 @@ function readFile(path) {
 // Stable per-machine identifier, derived from hardware so it survives reboots.
 // Falls back to a hash of host/user when no hardware ID is available (cloned
 // images, containers) — stable per machine, just less unique.
+//
+// Memoized: the Windows lookup spawns PowerShell and costs ~1.1s (6s cold), and
+// without memoization two calls in one process could disagree — the first
+// succeeding, the second timing out and dropping to the fallback. That is a
+// genuinely unstable license identity, not just a slow test. The value is
+// unchanged, so machines already registered keep their code.
+let cachedCode = null;
 export function machineCode() {
+  if (cachedCode) return cachedCode;
   let raw = "";
   const platform = os.platform();
   if (platform === "win32") {
@@ -50,7 +62,8 @@ export function machineCode() {
   if (!raw || /^0+$/.test(raw)) {
     raw = `${os.hostname()}|${os.userInfo().username}|${platform}`;
   }
-  return createHash("sha256").update(raw).digest("hex").slice(0, 16).toUpperCase();
+  cachedCode = createHash("sha256").update(raw).digest("hex").slice(0, 16).toUpperCase();
+  return cachedCode;
 }
 
 // Ask the license server whether this machine may run. The server records the
