@@ -79,6 +79,27 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   grows taller; text inside a widened box re-wraps (font-size is unchanged, so
   box height stays the same). At the design width the percentages resolve to the
   design px exactly, so SCALE builds are unchanged on a 1440 viewport.
+- **INSTANCE 的子树必须显式展开**(`expandInstances`)——这是最容易漏掉的一块。
+  发布数据里 INSTANCE 的 `children` 是**复合 id**:`"I18:1039;18:990"`,而
+  `nodeById` 里**没有**这些键(实测整页 0 个键以 `I` 开头、0 个含 `;`)。
+  直接照 `children` 走,`collectNodes` 到实例就断,**实例内容整块消失**——
+  lily2026new 的画廊轮播就是这样:卡片底色渲染出来了,里面的图片、文字、
+  左右箭头全空白。
+  复合 id 的后半段就是主组件里的原始节点,所以按 **`实例原点 − 主组件原点`**
+  整棵子树平移即可还原(实测 12 个子节点全部精确落在各自实例框内)。
+  还原出的节点登记为合成 id `<实例id>~<原始id>` 并挂回实例的 `children`,
+  于是 `collectAll` / `renderNode` / `parentOf` / `linkHref` 全都不用改。
+  两个必须守住的点:
+  - **幂等**:子节点已存在的实例要跳过,否则每次构建都会再复制一遍;
+  - **构件本身不动**:组件定义区的原件坐标保持原样,不能跟着平移。
+  `ai.mjs` 的 `pageTextOf` 用同一个函数,所以 AI 看到的合成 id 与构建产物完全
+  一致 —— 它据此用 `edit_node` 写的覆盖,重建后能对上。
+  仍未实现:轮播的**点击换图**是 Figma 的 `SWAP_STATE` 变体交互
+  (`navigationType: "SWAP_STATE"` + `stateGroupContext` 指向组件集),
+  静态复刻只渲染默认变体,箭头点了不会换。
+- **`data-node-id` 要覆盖到 TEXT**:所有会产出元素的类型都要带,漏一个就会让
+  `bind_data` 的 `target` 定位不到那个节点。TEXT 的 `wrapOpen` 曾经漏掉,
+  表现为"文字内容在、但按节点 id 查不到"。属性一律排在 `style` **之后**。
 - **Text**: `font-family` uses **single quotes** (`'Inter', system-ui, sans-serif`).
   The whole style attr is double-quoted, so a double quote inside `font-family`
   breaks the attribute and **silently drops every inline style** on that element.

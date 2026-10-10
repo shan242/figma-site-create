@@ -7,7 +7,7 @@
 // lib.mjs; this file decides fonts + page wiring.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { join, basename, resolve, sep } from "node:path";
-import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl } from "./lib.mjs";
+import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
 import { databindInjection, databindHead } from "./databind.mjs";
 
@@ -229,6 +229,9 @@ const fontStack = (family) =>
 
 function buildPage(page, pathToFile, googleLink, hasCjk) {
   const d = loadData(page.json);
+  // INSTANCE 的子树在发布数据里是复合 id,nodeById 中没有对应项 ——
+  // 不展开的话实例内容整块不渲染(画廊轮播只剩卡片底色)。幂等。
+  expandInstances(d);
   const nodes = d.nodeById;
   const all = collectAll(d);
 

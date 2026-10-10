@@ -17,7 +17,7 @@
 import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync, statSync } from "node:fs";
 import { resolve, dirname, sep, join, basename } from "node:path";
 import { buildSite } from "./build.mjs";
-import { findCanvas, hexToColor } from "./lib.mjs";
+import { findCanvas, hexToColor, expandInstances } from "./lib.mjs";
 import { extractKeywordsLocal } from "./wordcloud.mjs";
 
 // --- 图片理解 ------------------------------------------------------------------
@@ -595,6 +595,10 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
 
   const pageTextOf = (slug) => {
     const data = JSON.parse(readFileSync(resolve(root, "data", `${slug}.json`), "utf8"));
+    // INSTANCE 的子树在发布数据里是复合 id,不展开的话 AI 既看不到实例里的文字,
+    // 也拿不到实例里的图片(list_images 会漏掉整块轮播)。与构建用的是同一个函数,
+    // 所以合成 id 完全一致 —— AI 据此写的覆盖在重建时能对上。
+    expandInstances(data);
     const parts = [];
     for (const n of Object.values(data.nodeById || {})) {
       if (n.type === "TEXT" && n.characters) parts.push(n.characters);

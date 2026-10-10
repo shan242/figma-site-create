@@ -670,8 +670,8 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     // not from which page we are on.
     const isActive = node.style?.textDecoration === "UNDERLINE";
     const wrapOpen = href
-      ? `  <a href="${href}" class="nav-link" style="${cssText(st)}">`
-      : `  <div${isActive ? ' class="nav-active"' : ""} style="${cssText(st)}">`;
+      ? `  <a href="${href}" class="nav-link" style="${cssText(st)}"${nodeAttr(node)}>`
+      : `  <div${isActive ? ' class="nav-active"' : ""} style="${cssText(st)}"${nodeAttr(node)}>`;
     // No leading whitespace on the closing tag: single-line text is emitted
     // directly between open and close, and with white-space:pre-wrap those two
     // indentation spaces became trailing spaces in the text, shifting centered
@@ -756,6 +756,65 @@ export function collectAll(data) {
   const all = [];
   for (const r of data.roots) collectNodes(r, data.nodeById, all);
   return all;
+}
+
+// 已发布的 Figma Sites 数据里,INSTANCE 的 children 是**复合 id**:
+//   "I18:1039;18:990"  =  I<实例id>;<组件内的原始id>
+// 而 nodeById 里**没有**这些键 —— 直接照 children 走,一个子节点都取不到,
+// 整个实例的内容就消失了。lily2026new 的画廊轮播正是如此:卡片底色渲染出来了,
+// 里面的图片、文字、左右箭头全部空白。
+//
+// 复合 id 的后半段就是主组件里的原始节点,所以按「实例原点 − 主组件原点」整棵
+// 子树平移过去就能还原(实测 12 个子节点全部精确落在各自实例框内)。
+// 还原出的节点登记为合成 id `<实例id>~<原始id>` 并挂回实例的 children,
+// 于是 collectAll / renderNode / parentOf / linkHref 全都不用改。
+//
+// 合成 id 是确定性的,所以 AI 用 edit_node 针对它写的覆盖,重建之后依然命中。
+export function expandInstances(data) {
+  const nodes = data?.nodeById;
+  if (!nodes) return 0;
+  const originalOf = (id) => {
+    const s = String(id);
+    const i = s.indexOf(";");
+    return i >= 0 ? s.slice(i + 1) : s;
+  };
+  const SHIFTABLE = ["absoluteBoundingBox", "absoluteRenderBounds", "isolatedAbsoluteRenderBounds"];
+  let added = 0;
+
+  // 迭代 Object.values 的快照,新登记的合成节点不会被本轮二次处理。
+  for (const inst of Object.values(nodes)) {
+    if (inst?.type !== "INSTANCE") continue;
+    const kids = inst.children || [];
+    // 没有子节点、或子节点本来就存在(已展开过 / 数据正常)就跳过 —— 保证幂等。
+    if (!kids.length || !kids.some((c) => !nodes[c])) continue;
+    const comp = nodes[inst.mainComponentId] || nodes[inst.componentSetId];
+    const ib = inst.absoluteBoundingBox;
+    const cb = comp?.absoluteBoundingBox;
+    if (!ib || !cb) continue;
+    const dx = ib.x - cb.x;
+    const dy = ib.y - cb.y;
+    const prefix = `${inst.id}~`;
+
+    const clone = (origId, depth) => {
+      const src = nodes[origId];
+      if (!src || depth > 12) return null;
+      const sid = `${prefix}${origId}`;
+      if (nodes[sid]) return sid; // 同一实例内被引用两次
+      const copy = JSON.parse(JSON.stringify(src));
+      copy.id = sid;
+      for (const k of SHIFTABLE) {
+        if (copy[k]) copy[k] = { ...copy[k], x: copy[k].x + dx, y: copy[k].y + dy };
+      }
+      // 先登记再递归,自引用/环才不至于无限展开。
+      nodes[sid] = copy;
+      added++;
+      copy.children = (src.children || []).map((c) => clone(originalOf(c), depth + 1)).filter(Boolean);
+      return sid;
+    };
+
+    inst.children = kids.map((c) => (nodes[c] ? c : clone(originalOf(c), 0))).filter(Boolean);
+  }
+  return added;
 }
 
 // The page's canvas frame (FRAME, falling back to WEBPAGE). Shared by the
