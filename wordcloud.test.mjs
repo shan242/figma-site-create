@@ -56,6 +56,30 @@ test("empty input yields empty layout", () => {
   assert.deepEqual(items, []);
 });
 
+test("纯字符串数组也能排布,不会静默算出空布局", () => {
+  // 契约是 [{text, weight}],但只传 ["词","词"] 时旧逻辑会把每个词都过滤掉,
+  // 结果是页面上一个空框 —— 看起来像词云功能坏了。至少要能排出来。
+  const { items } = layoutWordCloud(["alpha", "beta", "gamma", "delta"], { width: 600, height: 300 });
+  assert.ok(items.length >= 3, `应排出大部分词,实际 ${items.length}`);
+  for (const i of items) {
+    assert.equal(typeof i.text, "string");
+    assert.ok(i.size > 0, "字号要有效");
+    assert.ok(Number.isFinite(i.x) && Number.isFinite(i.y));
+  }
+  // 按顺序递减:第一个词最大
+  const byText = Object.fromEntries(items.map((i) => [i.text, i.size]));
+  assert.ok(byText.alpha > byText.delta, "靠前的词应更大");
+
+  // 混用两种形状也要能用:显式权重的排在靠前的字符串前面
+  const mixed = layoutWordCloud([{ text: "beta", weight: 100 }, "alpha"], { width: 400, height: 200 });
+  assert.equal(mixed.items.length, 2);
+  assert.equal(mixed.items[0].text, "beta", "显式权重 100 应排在最前");
+});
+
+test("全空/全标点的字符串数组仍然得到空布局", () => {
+  assert.deepEqual(layoutWordCloud(["", "   ", "!!!"], { width: 300, height: 200 }).items, []);
+});
+
 test("CJK measure wider than latin", () => {
   assert.ok(measureText("中文词云测试", 20) > measureText("abcdefgh", 20));
 });

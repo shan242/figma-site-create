@@ -46,7 +46,12 @@ export function layoutWordCloud(words, opts = {}) {
   const fontFamily = opts.fontFamily || "'Inter', system-ui, sans-serif";
 
   // Normalize + filter, largest weight first.
+  // 契约是 [{text, weight}],但纯字符串数组 ["词","词"] 是很自然的误用 —— 旧逻辑
+  // 会因为它没有 .text 而把**所有词过滤掉**,静默算出空布局:页面出来是个空框,
+  // 看起来完全像"词云功能坏了",还查不出原因。这里给字符串补一个按顺序递减的
+  // 默认权重(调用方通常按重要程度排序),让它退化成一张正常的词云而不是空框。
   const ranked = (words || [])
+    .map((w, i) => (typeof w === "string" ? { text: w, weight: Math.max(20, 100 - i * 5) } : w))
     .filter((w) => w && typeof w.text === "string" && w.text.trim() && Number.isFinite(w.weight) && w.weight > 0 && !PUNCT_ONLY.test(w.text.trim()))
     .map((w) => ({ text: w.text.trim(), weight: w.weight }))
     .sort((a, b) => b.weight - a.weight)
