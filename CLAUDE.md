@@ -69,6 +69,13 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   with no constraints of its own (e.g. a hero heading) still shifts with the
   viewport. Using plain px for those drifted them left of the centered frame on
   viewports wider than the design width. SCALE nodes keep their own path.
+- **`constraints.horizontal === "SCALE"` 是「随父级一起缩放」,不是「无条件按画布宽度缩放」**。
+  判定必须看**整条父链**(`inScaledContext`):父级是画布本身,或父级也是处在可缩放
+  上下文里的 SCALE,才缩放;父级不缩放(CENTER 容器自己保持设计尺寸)则整棵子树都不缩放。
+  实测(creme-zipper index):一个 SCALE 矩形被 CENTER 约束的 COMPONENT 包着,
+  线上渲染 **384px**(设计尺寸),而只看自身约束的旧逻辑按 1403/1280 放大成 **421px** ——
+  页面上所有图片都宽了 **9.6%**,看起来就是"图片被拉伸"。
+  用线上 DOM 逐页比对可确认:修好后 5 个页面 35 张图**全部**与线上尺寸一致。
 - **`constraints.horizontal === "SCALE"` nodes reflow with the viewport**: the
   live site positions such nodes as a **percentage of the design width**, so they
   stretch as the canvas fills a wider viewport (the alias-grid site is all-SCALE
@@ -179,16 +186,16 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   SVGs whose stroke is baked in). The live site paints no CSS on them — adding a
   fill/border put a solid square behind circles, curves, and dots.
 - **图像填充要按 `imageTransform` 摆放,不能一律 cover**。`fill.imageTransform` 是
-  `[[a,0,tx],[0,d,ty]]`,把**归一化图像坐标**映射到**归一化填充框坐标**,所以图像
-  只占框内 `[tx,tx+a] × [ty,ty+d]`:
+  `[[a,0,tx],[0,d,ty]]`,把**归一化填充框坐标**映射到**归一化图像坐标**
+  (`imgNorm = T · boxNorm`)—— **方向极易搞反**:
   ```css
-  background-size: a*100% d*100%;
-  background-position: tx/(1-a) *100%  ty/(1-d) *100%;   /* 百分比是相对 (框−图) */
-  background-repeat: no-repeat;                          /* 默认 repeat 会平铺! */
+  background-size: (100/a)% (100/d)%;                 /* 图比框大就是放大后裁切 */
+  background-position: tx/(1-a) *100%  ty/(1-d) *100%; /* 百分比是相对 (框−图) */
+  background-repeat: no-repeat;                        /* 默认 repeat 会平铺! */
   ```
-  实测踩坑(2026101201):这个站点 **52 处 `scaleMode: "STRETCH"`、49 处带裁剪矩阵**,
-  设计里图片纵向只占 46%/78%/86%,一律用 `cover` 会把它**放大裁剪到铺满整框** ——
-  看起来就是"图片被拉伸变形"。
+  用线上 DOM 定过方向:一张 `d=0.3056` 的图线上渲染成 **1705px** 高(框只有 521px),
+  即 `100/0.3056 = 327.2%` —— 若按 `a/d` 直接乘,同一张图会变成 159px 高。
+  实测(creme-zipper):52 处 `scaleMode: "STRETCH"`、49 处带裁剪矩阵。
   `scaleMode` 只作没有矩阵时的兜底:`FILL→cover`、`FIT→contain`、`STRETCH→100% 100%`。
   带旋转/斜切(b/c≠0)的矩阵不套公式,退回 `cover`。
 - **填充的透明度**:Figma 的 fill 可以整体带 `opacity`。**SOLID 能直接烘进

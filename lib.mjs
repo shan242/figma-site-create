@@ -33,17 +33,17 @@ export const gradientAngle = (h) => {
 
 // IMAGE 填充的呈现方式。
 //
-// Figma 的 fill.imageTransform 是 [[a,0,tx],[0,d,ty]]:把**归一化图像坐标**映射到
-// **归一化填充框坐标**。所以图像只占框内 [tx,tx+a] × [ty,ty+d] 那一块 ——
-//   background-size: a*100% d*100%
-//   background-position 的百分比语义是相对 (框 − 图) 的 → X = tx/(1−a)
+// Figma 的 fill.imageTransform 是 [[a,0,tx],[0,d,ty]],把**归一化填充框坐标**映射到
+// **归一化图像坐标**:imgNorm = T · boxNorm。方向很容易搞反 —— 用线上 DOM 验证过:
+// 一张 d=0.3056 的图,线上渲染成 1705px 高(框只有 521px),即 100/0.3056 = 327.2%,
+// 证实是「框 → 图」而不是「图 → 框」。
 //
-// 忽略它、一律用 cover 的后果(实测 2026101201):设计里纵向只占 46%、86% 的图
-// 被**放大裁剪到铺满整框**,看起来就是图片被拉伸变形。52 处 STRETCH 里有 49 处
-// 带裁剪矩阵,全部受影响。
+// 于是把图像铺进框里:
+//   background-size: 100/a % × 100/d %    (图比框大时就是放大后裁切)
+//   background-position 的百分比语义是相对 (框 − 图) 的:
+//       X = tx/(1−a),Y = ty/(1−d)        (a=1 时该轴没有余量,取 0)
 //
-// scaleMode 只作为没有 transform 时的兜底:FILL→cover(裁切)、FIT→contain(留白)、
-// STRETCH→100% 100%(真的拉伸)。
+// 之前 a、d 写反,把"放大裁切"当成了"缩成一小条再用留白居中" —— 图片比例全不对。
 const imageFillCss = (fill) => {
   const t = fill.imageTransform;
   if (Array.isArray(t) && t.length === 2 && t[0]?.length === 3 && t[1]?.length === 3) {
@@ -52,10 +52,11 @@ const imageFillCss = (fill) => {
     // 纯缩放 + 平移才用这套;带旋转/斜切的退回 cover(图像填充极少出现)
     if (Math.abs(b) < 1e-6 && Math.abs(c) < 1e-6 && a > 0 && d > 0) {
       const pct = (v) => `${+(v * 100).toFixed(4)}%`;
-      // 图像比框大时(scale>1)没有可对齐的余量,位置就是 0
-      const pos = (off, scale) => (scale < 1 ? pct(off / (1 - scale)) : "0%");
+      // 把框铺满需要 1/a 倍的图
+      const scale = (v) => pct(1 / v);
+      const pos = (off, s) => (Math.abs(s - 1) < 1e-9 ? "0%" : pct(off / (1 - s)));
       return {
-        "background-size": `${pct(a)} ${pct(d)}`,
+        "background-size": `${scale(a)} ${scale(d)}`,
         "background-position": `${pos(tx, a)} ${pos(ty, d)}`,
         // 关键:默认是 repeat,尺寸小于 100% 时会平铺成一堆小图
         "background-repeat": "no-repeat",
@@ -505,14 +506,43 @@ function isNodeRotated(node) {
   return Math.abs(a - 1) > eps || Math.abs(b) > eps || Math.abs(c) > eps || Math.abs(d - 1) > eps;
 }
 
+// SCALE 约束的含义是「**随父级一起**缩放」,不是「无条件按画布宽度缩放」。
+// 所以判定要看整条父链:
+//   - 父级是画布本身 → 可以缩放(画布是 fluid 的,它确实变宽了);
+//   - 父级也是(处在可缩放上下文里的)SCALE → 继续往上;
+//   - 父级不缩放(比如 CENTER 的容器,它自己保持设计尺寸)→ 这棵子树都不缩放。
+// 实测(creme-zipper index):一个 SCALE 矩形被 CENTER 约束的 COMPONENT 包着,
+// 线上渲染 384px(设计尺寸),而旧逻辑按 1403/1280 放大成 421px —— 所有图片
+// 都宽了 9.6%,看起来就是"图片被拉伸"。
+function inScaledContext(node, ctx) {
+  if (!ctx) return true; // 没有上下文信息时保持旧行为,不制造静默回归
+  const cache = (ctx.scaledCache ||= new Map());
+  if (cache.has(node.id)) return cache.get(node.id);
+  let out = false;
+  let cur = node;
+  const seen = new Set();
+  for (let i = 0; i < 100; i++) {
+    const p = ctx.parentOf?.get(cur.id);
+    if (!p) break; // 孤立的(不可达)—— 本来就不会渲染
+    if (!ctx.parentOf.get(p.id)) { out = true; break; } // 父级就是画布(它没有上级)
+    if (seen.has(p.id)) break;
+    seen.add(p.id);
+    if (p.constraints?.horizontal !== "SCALE") break;
+    cur = p;
+  }
+  cache.set(node.id, out);
+  return out;
+}
+
 // Reflow a node whose Figma horizontal constraint is SCALE: the published site
 // positions it as a percentage of the design width, so it stretches with the
 // fluid canvas (width:100%; min-width:designW). Vertical stays at design px —
 // the live container keeps its design height, so a SCALE/SCALE node only widens.
 // Must run after every px adjustment (SVG natural-size offsets) — it reads the
 // final left/width and re-expresses them as %.
-function applyScaleH(node, st, canvas) {
+function applyScaleH(node, st, canvas, ctx) {
   if (node.constraints?.horizontal !== "SCALE") return st;
+  if (!inScaledContext(node, ctx)) return st;
   const designW = canvas.width;
   if (typeof st.width === "string" && /^-?[\d.]+px$/.test(st.width)) {
     st.width = `${((parseFloat(st.width) / designW) * 100).toFixed(4)}%`;
@@ -596,7 +626,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st.height = `${thick}px`;
       st.top = `${Math.round(bb.y - canvas.y - thick / 2)}px`;
     }
-    applyScaleH(node, st, canvas);
+    applyScaleH(node, st, canvas, ctx);
     const line = `  <div class="line" style="${cssText(st)}"${nodeAttr(node)}></div>`;
     out.push(href ? `  <a href="${href}"${nodeAttr(node)}>${line}</a>` : line);
     return;
@@ -623,7 +653,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
         // tiny corner and dropped the navigation.
         delete st["background-color"];
         delete st["background-image"];
-        applyScaleH(node, st, canvas);
+        applyScaleH(node, st, canvas, ctx);
         const fill = `<img src="${assetUrl(node.hash)}" alt="" style="width: 100%; height: 100%; display: block" />`;
         out.push(`  <a href="${href}" style="${cssText(st)}"${nodeAttr(node)}>${fill}</a>`);
         return;
@@ -688,7 +718,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       // polygon (the page-5 triangle looked like a square).
       delete st["background-color"];
       delete st["background-image"];
-      applyScaleH(node, st, canvas);
+      applyScaleH(node, st, canvas, ctx);
       const img = `<img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}"${nodeAttr(node)} />`;
       out.push(href ? `  <a href="${href}"${nodeAttr(node)}>${img}</a>` : img);
     }
@@ -718,7 +748,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     } else if (scroll) {
       st.overflow = "auto";
     }
-    applyScaleH(node, st, canvas);
+    applyScaleH(node, st, canvas, ctx);
     const isLink = !!href;
     out.push(isLink ? `  <a href="${href}" style="${cssText(st)}"${nodeAttr(node)}>` : `  <div style="${cssText(st)}"${nodeAttr(node)}>`);
     if (scroll) {
@@ -738,7 +768,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     const eff = applyTextEdit(node, ctx.edits?.get(node.id));
     const st = nodeStyle(eff, canvas, fontStack, assetUrl, centered);
     if (overlay) Object.assign(st, overlay);
-    applyScaleH(node, st, canvas);
+    applyScaleH(node, st, canvas, ctx);
     // The "active" nav item (current page) carries textDecoration UNDERLINE
     // plus Extra Bold in the design; items with a NAVIGATE interaction (on the
     // node or its wrapping group) are links. Both come from the Figma data,
@@ -796,7 +826,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st["background-size"] = "cover";
       st["background-position"] = "center";
     }
-    applyScaleH(node, st, canvas);
+    applyScaleH(node, st, canvas, ctx);
     // The live site renders each interactive node (rect button, hotspot
     // marker, …) as an <a>; an interactive group's children link to its target.
     if (href) {

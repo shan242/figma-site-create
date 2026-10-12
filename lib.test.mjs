@@ -103,30 +103,44 @@ test("fillToCss:图像填充的透明度必须带出来(用 opacity,不是丢掉
 });
 
 // --- 图像填充的缩放/裁剪(imageTransform / scaleMode) --------------------------
-// imageTransform 是 [[a,0,tx],[0,d,ty]]:把归一化图像坐标映射到归一化填充框坐标。
-// 忽略它一律用 cover,会把设计里"纵向只占 46%"的图放大裁剪到铺满整框 ——
-// 看起来就是图片被拉伸变形(实测 2026101201:52 处 STRETCH、49 处带裁剪矩阵)。
+// imageTransform 把**归一化填充框坐标**映射到**归一化图像坐标**(imgNorm = T·boxNorm)。
+// 方向极易搞反 —— 用线上 DOM 验证过:一张 d=0.3056 的图,线上渲染成 1705px 高
+// (框只有 521px),即 100/0.3056 = 327.2%。所以 background-size 是 **100/a**,不是 a。
+// 之前写反了,把"放大裁切"当成"缩成一小条再用留白居中",图片比例就完全不对。
 
 test("fillToCss:imageTransform 决定 background-size 与 position", () => {
-  // 图像纵向只占框的中间一半,水平铺满
+  // d=0.5:图在框内纵向放大 2 倍
   const css = fillToCss(
     { type: "IMAGE", visible: true, imageRef: "abc", scaleMode: "STRETCH", imageTransform: [[1, 0, 0], [0, 0.5, 0.25]] },
     url,
   );
-  assert.equal(css["background-size"], "100% 50%", "纵向只占 50%");
+  assert.equal(css["background-size"], "100% 200%", "d=0.5 → 放大 2 倍(100/d),不是缩到 50%");
   assert.equal(css["background-position"], "0% 50%", "0.25/(1-0.5) = 50%");
-  assert.equal(css["background-repeat"], "no-repeat", "尺寸小于 100% 必须禁止平铺");
+  assert.equal(css["background-repeat"], "no-repeat", "放大后不能平铺");
 });
 
-test("fillToCss:横向也缩放的矩阵算得出位置", () => {
-  // a=0.8 tx=0.1 → 0.1/(1-0.8)=50%;d=1 → 纵向无余量,位置 0
-  const css = fillToCss(
-    { type: "IMAGE", visible: true, imageRef: "abc", scaleMode: "STRETCH", imageTransform: [[0.8, 0, 0.1], [0, 1, 0]] },
-    url,
-  );
-  assert.equal(css["background-size"], "80% 100%");
-  assert.equal(css["background-position"], "50% 0%");
-  assert.equal(css["background-repeat"], "no-repeat");
+test("fillToCss:线上实测的三个真实矩阵都要能对上", () => {
+  // 这三组来自 creme-zipper recommendations 页,已与线上渲染尺寸逐一对齐。
+  // a/d 是矩阵里的原始值(注意不是最终百分比 —— 最终 = 100/a)。
+  const cases = [
+    // [a, tx, d, ty]  框w 框h  期望渲染尺寸(线上实测)
+    [1, 0, 0.3056, 0.0224, 1280, 521, 1280, 1705],
+    [0.9221, 0.0389, 0.8916, 0.0592, 1140, 1900, 1236, 2131],
+    [0.942907, 0.028953, 0.897657, 0.058989, 1155, 1895, 1225, 2111],
+  ];
+  for (const [a, tx, d, ty, bw, bh, wantW, wantH] of cases) {
+    const css = fillToCss(
+      { type: "IMAGE", visible: true, imageRef: "x", scaleMode: "STRETCH", imageTransform: [[a, 0, tx], [0, d, ty]] },
+      url,
+    );
+    const [sx, sy] = css["background-size"].split(" ").map((v) => parseFloat(v) / 100);
+    const gotW = Math.round(bw * sx);
+    const gotH = Math.round(bh * sy);
+    assert.ok(
+      Math.abs(gotW - wantW) <= 2 && Math.abs(gotH - wantH) <= 2,
+      `a=${a} d=${d}: 期望 ${wantW}x${wantH},实际 ${gotW}x${gotH} (size=${css["background-size"]})`,
+    );
+  }
 });
 
 test("fillToCss:没有 imageTransform 时按 scaleMode 兜底", () => {
@@ -138,6 +152,17 @@ test("fillToCss:没有 imageTransform 时按 scaleMode 兜底", () => {
   assert.equal("background-repeat" in mk("FILL"), false, "cover 不需要 no-repeat");
   assert.equal(mk("FIT")["background-repeat"], "no-repeat");
   assert.equal(mk("STRETCH")["background-repeat"], "no-repeat");
+});
+
+test("fillToCss:a=1 的轴没有余量,位置取 0 且不除零", () => {
+  // 矩阵第二行是 [0, d, ty] —— 写成 [1, d, ty] 会被当成有斜切而退回 cover
+  const css = fillToCss(
+    { type: "IMAGE", visible: true, imageRef: "a", scaleMode: "STRETCH", imageTransform: [[1, 0, 0.3], [0, 1, 0.3]] },
+    url,
+  );
+  assert.equal(css["background-size"], "100% 100%");
+  assert.equal(css["background-position"], "0% 0%", "1-a=0,不能算出 Infinity/NaN");
+  assert.equal(/NaN|Infinity/.test(css["background-position"]), false);
 });
 
 test("fillToCss:带旋转/斜切的矩阵不硬套,退回 scaleMode", () => {
@@ -300,8 +325,53 @@ test("swapRuntime 只切同组、并保留内联 display", () => {
   assert.equal(/style\.display/.test(swapRuntime), false);
 });
 
-test("renderNode 给 TEXT 也带 data-node-id(曾经漏掉,导致定位不到文字)", () => {
-  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 } };
+// --- SCALE 约束的上下文 -------------------------------------------------------
+// SCALE 的含义是「**随父级一起**缩放」,不是「无条件按画布宽度缩放」。
+// 实测(creme-zipper index):一个 SCALE 矩形被 CENTER 约束的 COMPONENT 包着,
+// 线上渲染 384px(设计尺寸),旧逻辑却按 1403/1280 放大成 421px —— 所有图片宽了
+// 9.6%,看起来就是"图片被拉伸"。判定必须看整条父链。
+
+function scaleFixture(childParent) {
+  // 画布 0:1 → CENTER 容器 1:1(不缩放)→ 或直接挂 SCALE 矩形
+  const nodes = {
+    "0:1": { id: "0:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 1280, height: 800 }, children: ["1:1", "1:5", "1:3"] },
+    "1:1": { id: "1:1", type: "FRAME", name: "centerBox", constraints: { horizontal: "CENTER" }, absoluteBoundingBox: { x: 0, y: 0, width: 600, height: 400 }, children: ["1:2"] },
+    "1:2": { id: "1:2", type: "RECTANGLE", name: "insideCenter", constraints: { horizontal: "SCALE" }, absoluteBoundingBox: { x: 10, y: 10, width: 384, height: 512 }, children: [] },
+    "1:5": { id: "1:5", type: "RECTANGLE", name: "onCanvas", constraints: { horizontal: "SCALE" }, absoluteBoundingBox: { x: 20, y: 600, width: 384, height: 512 }, children: [] },
+    "1:3": { id: "1:3", type: "FRAME", name: "scaledMid", constraints: { horizontal: "SCALE" }, absoluteBoundingBox: { x: 0, y: 700, width: 400, height: 100 }, children: ["1:4"] },
+    "1:4": { id: "1:4", type: "RECTANGLE", name: "insideScaled", constraints: { horizontal: "SCALE" }, absoluteBoundingBox: { x: 0, y: 700, width: 200, height: 50 }, children: [] },
+  };
+  const parentOf = new Map();
+  for (const n of Object.values(nodes)) for (const c of n.children || []) parentOf.set(c, n);
+  return { nodes, parentOf, canvas: nodes["0:1"].absoluteBoundingBox };
+}
+
+function renderWith(fx, id) {
+  const out = [];
+  renderNode(fx.nodes[id], fx.nodes, fx.canvas, out, { assetDir: ".", parentOf: fx.parentOf, edits: new Map(), nodeStyles: new Map(), handled: new Set() });
+  return out.join("\n");
+}
+
+test("SCALE:直接挂在画布上 → 按设计宽度百分比", () => {
+  const html = renderWith(scaleFixture(), "1:5");
+  assert.match(html, /width: 30\.0*%/, "384/1280 = 30%");
+  assert.match(html, /left: 1\.5625%/, "20/1280 = 1.5625%");
+});
+
+test("SCALE:父级是 CENTER 容器(自己不缩放)→ 保持设计 px", () => {
+  const html = renderWith(scaleFixture(), "1:2");
+  assert.match(html, /width: 384px/, "父级不缩放,子级也不该缩放");
+  assert.match(html, /left: 10px/);
+  assert.equal(/width: 30\.0*%/.test(html), false, "不能按画布宽度放大");
+});
+
+test("SCALE:父级也是(可缩放的)SCALE → 继续缩放", () => {
+  const fx = scaleFixture();
+  const html = renderWith(fx, "1:4");
+  assert.match(html, /width: 15\.6250*%/, "200/1280");
+});
+
+test("renderNode 给 TEXT 也带 data-node-id(曾经漏掉,导致定位不到文字)", () => {  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 } };
   const nodes = {
     "1:1": {
       id: "1:1",
