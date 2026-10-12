@@ -615,10 +615,18 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // Click target for this node: its own NAVIGATE interaction, or the nearest
   // ancestor GROUP's (buttons are groups whose interaction lives on the group).
   const href = linkHref(node, pathToFile, ctx.parentOf);
-  // Inherit canvas-centre tracking from a CENTER-constrained ancestor frame
-  // (see hasCenteredAncestor). SCALE nodes keep their own percentage path.
-  const centered =
-    node.constraints?.horizontal === "SCALE" ? false : hasCenteredAncestor(node, ctx.parentOf);
+  // 跟随画布中心的两种来源:
+  //   1. 祖先链里有 CENTER 约束的框 —— 整棵子树随视口中心移动(见 hasCenteredAncestor);
+  //   2. SCALE 约束 —— 但它**只有真的处在可缩放上下文里**才走百分比那条路
+  //      (applyScaleH / inScaledContext)。父级不缩放时它同样只能跟随中心。
+  //
+  // 踩过的坑:组件的**克隆变体**里的矩形是 SCALE,而它们的父级是 CENTER 约束的
+  // INSTANCE(不缩放)。旧代码只看"是不是 SCALE"就把 centered 强制成 false,而
+  // inScaledContext 又判它不在缩放上下文里 —— **两条路都不走**,最后落在写死的
+  // 设计 px 上。1440 宽时 calc 与 px 恰好重合看不出问题,一到宽屏,同一行里标题
+  // 跟着中心走了、卡片没有,间距从 29px 变成 269px(实测 1920 下线上 562 vs 本地 322)。
+  const scales = node.constraints?.horizontal === "SCALE" && inScaledContext(node, ctx);
+  const centered = scales ? false : hasCenteredAncestor(node, ctx.parentOf);
 
   if (tag === "SVG" && node.isLine) {
     const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
@@ -939,8 +947,11 @@ export function cssText(obj) {
 // 工具,把「插视频」变成一条覆盖层记录,由构建来落笔。
 export function videoElement(node, canvas, ctx, spec) {
   const assetUrl = makeAssetUrl(ctx.assetDir);
-  // 与 renderNode 同样的定位规则(CENTER 约束或居中祖先 → calc(50% ± off))
-  const centered = node.constraints?.horizontal === "SCALE" ? false : hasCenteredAncestor(node, ctx.parentOf);
+  // 与 renderNode 同样的定位规则(见那里的注释:SCALE 只有在真的可缩放时才走百分比)
+  const centered =
+    node.constraints?.horizontal === "SCALE" && inScaledContext(node, ctx)
+      ? false
+      : hasCenteredAncestor(node, ctx.parentOf);
   const st = nodeStyle(node, canvas, ctx.fontStack, assetUrl, centered);
   const overlay = ctx.nodeStyles?.get(node.id);
   if (overlay) Object.assign(st, overlay);

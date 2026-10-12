@@ -358,11 +358,15 @@ test("SCALE:直接挂在画布上 → 按设计宽度百分比", () => {
   assert.match(html, /left: 1\.5625%/, "20/1280 = 1.5625%");
 });
 
-test("SCALE:父级是 CENTER 容器(自己不缩放)→ 保持设计 px", () => {
+test("SCALE:父级不缩放时宽度保持设计 px,但 left 要跟随画布中心", () => {
   const html = renderWith(scaleFixture(), "1:2");
-  assert.match(html, /width: 384px/, "父级不缩放,子级也不该缩放");
-  assert.match(html, /left: 10px/);
-  assert.equal(/width: 30\.0*%/.test(html), false, "不能按画布宽度放大");
+  // 宽度:父级不缩放 ⇒ 不转百分比(实测 creme-zipper 的 384 被放大成 421 就是这里错了)
+  assert.match(html, /width: 384px/, "父级不缩放,宽度不该按画布放大");
+  assert.equal(/width: 30\.0*%/.test(html), false, "不能按画布宽度写百分比");
+  // left:祖先里有 CENTER(1:1)⇒ 跟随中心。旧代码只看"自身是不是 SCALE"就强制不居中,
+  // 而 inScaledContext 又判它不在缩放上下文里,两条路都不走 → 落在写死 px 上,
+  // 宽屏下同一行的标题跟着中心走、卡片不动(实测 1920 下间距 29px → 269px)。
+  assert.match(html, /left: calc\(50% - 630px\)/, "应跟随中心(10 - 1280/2 = -630)而不是写死 px");
 });
 
 test("SCALE:父级也是(可缩放的)SCALE → 继续缩放", () => {

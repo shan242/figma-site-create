@@ -76,6 +76,14 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   线上渲染 **384px**(设计尺寸),而只看自身约束的旧逻辑按 1403/1280 放大成 **421px** ——
   页面上所有图片都宽了 **9.6%**,看起来就是"图片被拉伸"。
   用线上 DOM 逐页比对可确认:修好后 5 个页面 35 张图**全部**与线上尺寸一致。
+  ⚠️ **SCALE 还有另一半:它不缩放时仍然要「跟随画布中心」。**
+  `centered` 的判据必须是 `SCALE && inScaledContext(node, ctx)` 才为 false,否则回落到
+  `hasCenteredAncestor`。旧代码只看"自身是不是 SCALE"就强制不居中,而
+  `inScaledContext` 又判父级(组件实例是 CENTER)不缩放 —— **两条路都不走**,
+  最后落在写死的设计 px 上。**组件克隆出来的变体**里的矩形正是这种情况。
+  这个 bug 在 1440 下**完全看不出来**(calc 与 px 在设计宽度处恒等),一到宽屏就暴露:
+  实测 1920 下同一行里标题跟着中心走了、卡片没动,**间距从 29px 变成 269px**。
+  → 凡是"位置对不上"的问题,**必须在多个视口宽度下验证**,不能只看 1440。
 - **`constraints.horizontal === "SCALE"` nodes reflow with the viewport**: the
   live site positions such nodes as a **percentage of the design width**, so they
   stretch as the canvas fills a wider viewport (the alias-grid site is all-SCALE

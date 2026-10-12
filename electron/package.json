@@ -5,6 +5,7 @@
   "main": "main.js",
   "license": "MIT",
   "scripts": {
+    "prestart": "npm run build:worker",
     "start": "electron .",
     "dist": "electron-builder --win",
     "build:worker": "esbuild gui-worker.mjs --bundle --format=cjs --platform=node --target=node20 --outfile=worker.cjs"
