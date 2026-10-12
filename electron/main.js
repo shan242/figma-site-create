@@ -11,6 +11,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, net } = require("electron");
 const path = require("path");
 const { writeFileSync, readFileSync, renameSync, existsSync } = require("fs");
+const { applyConfigPatch } = require("./config-merge.cjs");
 const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch } = require("./worker.cjs");
 
 let win = null;
@@ -73,17 +74,15 @@ function loadConfig() {
 
 function saveConfig(cfg) {
   const prev = loadConfig();
-  const out = { ...prev, ...cfg };
-  // Empty apiKey in the payload means "keep the existing one" — only replace
-  // when the user typed a new key.
-  if (!cfg.apiKey && prev.apiKey) out.apiKey = prev.apiKey;
+  // 合并规则抽到 config-merge.cjs:那里做深合并,并保证"提交空值 = 保持已存的值"。
+  // 不这么做的话,打开发布设置点一次保存就会把数据后端配置清空
+  // (get 接口只回 hasToken 不回 token,表单里 token 框本来就一直是空的)。
+  const out = applyConfigPatch(prev, cfg);
   if (out.apiKey && safeStorage.isEncryptionAvailable()) {
     out.apiKey = safeStorage.encryptString(out.apiKey).toString("base64");
   }
   // Same keep-old-when-empty rule for the publish API key, applied before the
   // unconditional encrypt below (which also re-encrypts keys loaded plaintext).
-  const newPub = cfg.publish;
-  if (newPub && !newPub.apiKey && prev.publish?.apiKey) out.publish.apiKey = prev.publish.apiKey;
   if (out.publish?.apiKey && safeStorage.isEncryptionAvailable()) {
     out.publish.apiKey = safeStorage.encryptString(out.publish.apiKey).toString("base64");
   }

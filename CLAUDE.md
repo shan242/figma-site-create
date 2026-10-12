@@ -406,6 +406,23 @@ AI: bind_data(...)  →  databinds.json  →  build.mjs  →  databind.mjs 注�
 - 界面上显示"上下文 N 轮",并提供**清空上下文**按钮 —— 让用户能确认
   "上一条说的"确实还在,而不是每轮都从零开始。
 
+## 配置持久化(config-merge.cjs)
+
+**保存配置时必须"空值 = 保持已存的值"**,否则会把用户配好的东西清空。
+
+踩过的坑:`publish-config:get` **只回 `hasToken`,不回 token**(避免把密钥送回渲染进程),
+所以发布设置表单里的 token 框**永远是空的**;而保存时旧代码把空值原样写回,
+`baseUrl` 更用 `|| undefined` —— `JSON.stringify` 会**直接把这个键删掉**。
+结果是:用户配好了数据后端,之后随便打开发布设置点一次保存,配置就被清空,
+看到的现象是"我明明配了,却没生效"。
+
+- 合并规则抽在 `electron/config-merge.cjs`(`applyConfigPatch`,纯函数,有单测)。
+- `publish` 必须**深合并**:浅合并会让补丁里没出现的字段(如 `https.sslId`)凭空消失。
+- `dataApi.baseUrl` / `dataApi.adminToken` / `publish.baseUrl` / `publish.domain` /
+  两个 `apiKey` 全部走"空 = 保持";用户重新输入的值永远优先。
+- `dataApi.adminToken` 是**明文**存储的(只有 `apiKey` 走 safeStorage 加密),
+  所以可以直接改配置文件;但 `apiKey` 是 app-bound 加密的,外部改不了也不该改。
+
 ## Packaging & CI
 
 `.github/workflows/build.yml` builds the Electron GUI (`electron/`) on three
