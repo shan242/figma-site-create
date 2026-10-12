@@ -172,6 +172,25 @@ test("collectDeployFiles excludes build metadata and keeps served files", () => 
   for (const f of files) assert.ok(f.localPath && f.relPath);
 });
 
+test("人工替换过的资源文件会按磁盘上的最新内容上传(发布不做增量跳过)", () => {
+  // 用户常见操作:抓取完成后直接替换 assets/ 里的图片,然后点发布。
+  // 这里钉住"发布永远读磁盘当前内容",防止以后有人加"跳过未变更文件"的优化。
+  const dir = makeOutDir();
+  const img = join(dir, "assets", "a.png");
+  const before = readFileSync(img, "utf8");
+  writeFileSync(img, "REPLACED-BY-HAND");
+
+  const files = collectDeployFiles(dir);
+  const entry = files.find((f) => f.relPath === "assets/a.png");
+  assert.ok(entry, "替换后的资源必须仍在待上传列表里");
+  assert.equal(readFileSync(entry.localPath, "utf8"), "REPLACED-BY-HAND", "读到的是替换后的内容,不是旧内容");
+  assert.notEqual(readFileSync(entry.localPath, "utf8"), before);
+
+  // 人工新增的文件同样会被收集(放进 assets/ 就会被发布出去)
+  writeFileSync(join(dir, "assets", "brand-new.png"), "NEW");
+  assert.ok(collectDeployFiles(dir).some((f) => f.relPath === "assets/brand-new.png"), "新增资源也要上传");
+});
+
 test("uploadFile posts multipart to the target dir with overwrite", async () => {
   const { calls } = stubFetch();
   const dir = makeOutDir();
