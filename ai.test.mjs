@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime } from "./ai.mjs";
@@ -241,19 +241,17 @@ function videoFixture() {
   return dir;
 }
 
-test("insert_video:找不到视频时报错并列出目录里的媒体文件", async () => {
+test("insert_video:目录里一个视频都没有时明确让用户先放进去", async () => {
   const dir = videoFixture();
+  rmSync(join(dir, "assets", "real-clip.mp4")); // 只剩 cover.jpg,不是媒体
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/nope.mp4" });
-  assert.ok(r.error, "必须报错");
-  // 没有「列目录」工具,不告诉 AI 文件叫什么它就无从下手
-  assert.match(String(r.hint || ""), /real-clip\.mp4/, "提示里要列出实际存在的媒体文件");
-  // 只有一个候选时直接在 error 里点名 —— 否则模型会反过来问用户"准确文件名是什么",
-  // 用户答不上来就卡死(实际发生过:中文名被错编码)
-  assert.match(r.error, /real-clip\.mp4/, "唯一的候选要写进错误本身,不能只藏在 hint 里");
+  assert.ok(r.error, "没有可用视频时必须报错");
+  assert.match(String(r.hint || ""), /没有找到任何视频文件/, "要告诉用户先把视频放进去");
+  assert.equal(existsSync(join(dir, "videos.json")), false, "不该写入任何记录");
 });
 
-test("insert_video:中文名被错误编码时能认出同前缀的那个文件", async () => {
+test("insert_video:中文名对不上时自动改用真实文件,不回头问用户", async () => {
   const dir = videoFixture();
   // 复刻真实事故:磁盘上是乱码名,用户按原名字调用。
   // "lily网站视频_副本.mp4" → "lily缃戠珯瑙嗛_鍓湰.mp4":ASCII 前缀和扩展名保留,
@@ -262,21 +260,23 @@ test("insert_video:中文名被错误编码时能认出同前缀的那个文件"
   renameSync(join(dir, "assets", "real-clip.mp4"), join(dir, "assets", bad));
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/lily网站视频_副本.mp4" });
-  assert.ok(r.error, "名字对不上时必须报错,不能瞎猜着插入");
-  assert.match(r.error, /lily缃戠珯瑙嗛_鍓湰\.mp4/, "要把真实文件名写进错误里");
-  assert.match(r.error, /ASCII 前缀和扩展名都一致/, "并说明为什么认定是它");
-  assert.match(r.error, /不要回头问用户/, "明确要求模型自己用真实名字重试");
+  // 关键:**不再报错**。文件名是输入的问题,不该让程序卡死(实测来回两轮都插不进去)
+  assert.equal(r.error, undefined, `不该报错,实际: ${r.error}`);
+  assert.equal(r.src, `assets/${bad}`, "要用磁盘上真实的文件名");
+  assert.match(String(r.note || ""), /错误编码/, "要说明发生了替换");
+  // 覆盖层里记的也必须是真实名字,否则构建出来是 404
+  const saved = JSON.parse(readFileSync(join(dir, "videos.json"), "utf8"));
+  assert.equal(saved.items[0].src, `assets/${bad}`);
 });
 
-test("insert_video:目录里有多个不相关视频时不要乱猜", async () => {
+test("insert_video:候选不止一个且前缀对不上时,仍然报错让人来判断", async () => {
   const dir = videoFixture();
   writeFileSync(join(dir, "assets", "another-long-name.mp4"), Buffer.from([0, 0, 0, 0x20]));
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/nope.mp4" });
-  assert.ok(r.error);
-  assert.equal(/一致的文件是/.test(r.error), false, "前缀对不上就不该猜");
-  assert.equal(/唯一的视频文件/.test(r.error), false, "候选不止一个时也不该猜");
-  assert.match(String(r.hint || ""), /another-long-name\.mp4/, "但仍要列出全部候选让模型自己判断");
+  assert.ok(r.error, "前缀对不上就不能乱猜 —— 插错视频比多问一句更糟");
+  assert.match(String(r.hint || ""), /another-long-name\.mp4/, "但要列出全部候选让模型自己判断");
+  assert.equal(existsSync(join(dir, "videos.json")), false, "不该写入任何记录");
 });
 
 test("insert_video:拒绝组件定义区的幽灵节点", async () => {

@@ -1016,6 +1016,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
 
       // 外部直链直接用;本地文件必须真的存在 —— 否则页面上是个静默 404 的空白播放器
       let useSrc = String(src).trim();
+      let srcSwapped = null;
       if (!/^https?:\/\//i.test(useSrc)) {
         let p;
         try {
@@ -1025,11 +1026,6 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         }
         if (!existsSync(p)) {
           const media = listMediaFiles();
-          // 猜一下用户指的是哪一个。中文名被 GBK/UTF-8 互相错读之后,**ASCII 部分和
-          // 扩展名会原样保留**,只有汉字变成另一串汉字 ——
-          // 实测 "lily网站视频_副本.mp4" 在磁盘上成了 "lily缃戠珯瑙嗛_鍓湰.mp4":
-          // "lily" 和 ".mp4" 都在,长度却从 15 变成了 17(汉字数量变了)。
-          // 所以判据是「同 ASCII 前缀 + 同扩展名」,不是长度。
           const want = useSrc.split("/").pop();
           const ext = want.slice(want.lastIndexOf(".")).toLowerCase();
           const ascii = (s) => (s.match(/^[\x20-\x7e]*/) || [""])[0].toLowerCase();
@@ -1038,17 +1034,23 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
             const b = m.split("/").pop();
             return b !== want && wp.length >= 3 && b.toLowerCase().endsWith(ext) && ascii(b) === wp;
           });
-          const guessed = byPrefix || (media.length === 1 ? media[0] : null);
-          const why = byPrefix ? "ASCII 前缀和扩展名都一致的文件" : "唯一的视频文件";
-          return {
-            error:
-              `找不到视频文件: ${useSrc}` +
-              (guessed
-                ? `。输出目录里${why}是 ${guessed} —— 中文名被错误编码过就会变成这样。` +
-                  `如果你要的就是它,直接用 ${guessed} 重试,不要回头问用户"准确文件名是什么"`
-                : ""),
-            ...(media.length ? { hint: `输出目录里的媒体文件: ${media.slice(0, 12).join(", ")}` } : { hint: "输出目录里没有找到任何视频文件,请先把视频放进去" }),
-          };
+          const fallback = byPrefix || (media.length === 1 ? media[0] : null);
+          if (fallback) {
+            // **直接用它,不要回头问用户**。中文名被 GBK/UTF-8 错读时,ASCII 前缀和
+            // 扩展名会原样保留(lily网站视频_副本.mp4 → lily缃戠珯瑙嗛_鍓湰.mp4),
+            // 而"用户以为的文件名"是唯一他不可能答得上来的问题 —— 实测这样来回两轮
+            // 都卡住,视频一直插不进去。文件名是输入的问题,不该让程序卡死。
+            // 替换会在返回值里说明,AI 会转述给用户,想换也能再改。
+            srcSwapped = { from: useSrc, to: fallback };
+            useSrc = fallback;
+          } else {
+            return {
+              error: `找不到视频文件: ${useSrc}`,
+              ...(media.length ? { hint: `输出目录里的媒体文件: ${media.slice(0, 12).join(", ")}。如果用户要的就是其中之一,直接用那个名字重试` } : { hint: "输出目录里没有找到任何视频文件,请先把视频放进去" }),
+            };
+          }
+        } else {
+          useSrc = useSrc.replace(/\\/g, "/").replace(/^\.\//, "");
         }
         useSrc = useSrc.replace(/\\/g, "/").replace(/^\.\//, "");
       }
@@ -1093,7 +1095,12 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         src: useSrc,
         box: `${Math.round(bb.width ?? 0)}x${Math.round(bb.height ?? 0)}`,
         autoplay: spec.autoplay,
-        note: spec.autoplay && !muted ? "已自动加 muted:浏览器会拦截带声音的自动播放" : undefined,
+        note: [
+          srcSwapped ? `你说的是 ${srcSwapped.from},它不存在;已改用实际存在的 ${srcSwapped.to}(中文文件名被错误编码过就会这样),要换请告诉用户` : null,
+          spec.autoplay && !muted ? "已自动加 muted:浏览器会拦截带声音的自动播放" : null,
+        ]
+          .filter(Boolean)
+          .join("；") || undefined,
       };
     },
 
