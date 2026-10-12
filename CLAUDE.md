@@ -129,6 +129,25 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
     是个静默 404 的空白播放器;
   - `autoplay` 会自动加 `muted`(浏览器一律拦截带声音的自动播放),并在返回值里说明;
   - 元素上**不能**残留原节点的填充(`background-*`/`border`),否则会画在视频后面。
+- **设计自带的视频填充(`fill.type === "VIDEO"`)要渲染成 `<video>`,而且抓取时要单独下载**。
+  发布数据里长这样(实测 germanschoolhistories 的 `2:1915`):
+  ```json
+  { "type": "VIDEO", "scaleMode": "FILL", "imageRef": <封面>,
+    "videoRef": <视频>, "autoplay": true, "mediaLoop": true,
+    "muted": true, "showControls": false }
+  ```
+  两个坑,合起来就是「首页视频那块整片不一样」:
+  - **视频和图片是两条 URL 路径**:图片 `/_assets/v11/<hash>`,视频
+    **`/_videos/v1/<hash>`**。`scrape.mjs` 原来只顺着 `node.hash` 与 IMAGE 填充的
+    `imageRef` 收集,视频**永远不会被下载**,`assets/` 里一个视频文件都没有。
+  - **`lib.mjs` 不认 VIDEO 填充**,节点被当成"没有填充的矩形"渲染成一个空框。
+    线上那里是 `760x427` 的 `<video>`(autoplay/loop/playsinline/object-fit:cover),
+    我们是空框 —— 整页像素差分 **52.7%**。
+  现在 `videoSpecFromFill()` 把填充翻译成 `videoElement()` 的 spec(复用同一套定位与
+  属性逻辑),`scrape.mjs` 从 `/_videos/v1/` 下载并落地成 `assets/<videoRef>.mp4`
+  (带扩展名,浏览器才能判定 MIME;assets 表里给的 url 是**没有扩展名**的)。
+  **验收方式**:整页逐屏像素差分(`Page.captureScreenshot` + canvas 比对),
+  修好后 **全页 0 个带超过 6% 差异**。
 - **`insert_video` 遇到对不上的文件名要自己解决,不能反过来问用户**。实际事故:
   用户把视频放进 `assets/`,但**文件名是乱码** —— 磁盘上叫
   `lily缃戠珯瑙嗛_鍓湰.mp4`,而用户按 `lily网站视频_副本.mp4` 调用(别人给的 zip
@@ -191,20 +210,23 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   `…Leap ForwardSpotlight…`,中间没有空格),行数也算错。
   必须**手动扫一遍并记录每段的真实起始下标** —— `characterStyleOverrides` 是按
   原始字符串索引的,先归一化换行符会把下标弄错(`\r\n` 也要算一个分隔符)。
-- **`textAutoResize: "NONE"` 用 `min-height`,不要写死 `height`**。
-  设计里的框经常比内容矮(实测 lily 首页 **13 处**轮播标题:框 36px、内容需要
-  45px),线上是让外层**长高**把内容兜住(同一个标题线上渲染成 54px)。写死 height
-  会让第二行溢出压到下一行 —— 用户看到的就是"内容展示不全"。
-  `min-height` 保证不会比设计小、内容多时能长高,`justify-content` 的垂直居中
-  在有富余时仍然生效。
-- **`line-height` 分三种情况,别用一条规则套**(全都是线上实测逼出来的):
+- **`textAutoResize: "NONE"` 用固定 `height`,靠 flex 居中让溢出对称 —— 不要改成
+  `min-height`/`height:auto`**。设计里的框经常比内容矮(实测 lily 首页 13 处轮播标题:
+  框 36px、内容 54px)。线上的表现是:文字**上下对称溢出**这个框(从 7927 开始,
+  而不是框顶 7936),外层再长高把溢出兜住。`height:36px` + `justify-content:center`
+  正好复现这一点;换成 `height:auto;min-height:36px` 会把文字顶到框顶、整段下移 9px,
+  像素差分能直接看到。
+- **`line-height`:只有 `lineHeightUnit === "PIXELS"` 才写死像素值,`INTRINSIC_%` 用 `normal`。**
+  `lineHeightUnit` 是"当初怎么指定的",**不是"结果是什么"**:
   | 情况 | 处理 | 依据 |
   |---|---|---|
-  | 基准段(没有 override) | **不写** `line-height`,继承容器的 `lineHeightPx` | lily `2:167`:lineHeightPx=40、字号 36、U+2028 分 3 行 → 线上 3×40=120px;写 `normal` 会变成 3×44=132px,整块错位 12px |
-  | override 带 `lineHeightPx` | 用它 | 轮播正文 20px/28px |
-  | override 没带 `lineHeightPx` | **`normal`** | creme-zipper 的 16px「Source:」行线上 19px(= normal@16);继承节点的 33.725px 会变成 34px |
-  **`lineHeightUnit` 与结果无关**:它只说明 Figma 里是"按像素指定"还是"按字体固有
-  高度的百分比"算出来的,`lineHeightPx` 在两种情况下都是最终像素值。
+  | `lineHeightUnit: "PIXELS"` | `line-height: <lineHeightPx>px` | 三行大标题 lineHeightPx=40、字号 36 → 线上 3×40=120px |
+  | `lineHeightUnit: "INTRINSIC_%"` | **`normal`** | 该页 311 个这种节点,`lineHeightPx/fontSize` = 1.18/1.203/1.253/1.349/1.448,每个字体一个常数,正是各字体的固有行高比 |
+  | override 带 `lineHeightPx` | 用它 | 轮播正文 20px / 28px |
+  | override 没带 `lineHeightPx` | `normal` | creme-zipper 的 16px「Source:」行线上 19px |
+  写死 `INTRINSIC_%` 的小数会**整段错位**:14px 正文线上每行 18px(306px / 17 行),
+  按 17.542px 只有 298px —— 行数一样、换行一样,但每一行都偏,像素差分满屏都是。
+  **基准段的 `<p>` 不要写 `line-height`**(继承容器),否则会把容器的行高盖掉。
 - **Multi-paragraph text**: split on `\n` into stacked `<p style="display:block;
   white-space:pre-wrap; line-height:normal; margin:0">` blocks with no gap; blank
   lines become `<p>&#8203;</p>` (zero-width space preserves the line).

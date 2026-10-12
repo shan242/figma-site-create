@@ -6,7 +6,7 @@
 // 一个子节点都取不到。这里的用例把这个还原逻辑钉死。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement, textRuns } from "./lib.mjs";
+import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement, textRuns, videoSpecFromFill } from "./lib.mjs";
 
 // --- 插入视频(videoElement) --------------------------------------------------
 // 把某个节点整体换成 <video>,位置尺寸沿用该节点。之前工具集里没有「插入媒体」,
@@ -431,13 +431,117 @@ test("textRuns:行高分三种情况(基准继承 / override 像素 / override �
   assert.equal(textRuns(n).runs[0].family, null, "基准段不带字族");
 });
 
-test("textRuns:lineHeightPx 与原单位无关(INTRINSIC_% 也要用)", () => {
-  const n = richTextNode();
-  n.styleOverrideTable[479].lineHeightUnit = "INTRINSIC_%";
-  const { runs } = textRuns(n);
-  // lineHeightUnit 只说明 Figma 里怎么指定的,lineHeightPx 在两种单位下都是最终像素值
-  assert.equal(runs[1].lineHeight, 28, "INTRINSIC_% 也要照用 lineHeightPx");
-  assert.equal(runs[1].family, "Actor");
+function renderText(overrides) {
+  const node = {
+    id: "1:1",
+    type: "TEXT",
+    name: "t",
+    characters: "hello world",
+    absoluteBoundingBox: { x: 0, y: 0, width: 330, height: 36 },
+    style: { fontFamily: "Inter", fontSize: 14 },
+    fills: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0, g: 0, b: 0 } }],
+    ...overrides,
+    style: { fontFamily: "Inter", fontSize: 14, ...(overrides.style || {}) },
+  };
+  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 } };
+  const out = [];
+  renderNode(node, { "1:1": node }, canvas, out, {
+    assetDir: ".",
+    parentOf: new Map(),
+    edits: new Map(),
+    nodeStyles: new Map(),
+    handled: new Set(),
+    fontStack: (f) => `'${f}', sans-serif`,
+  });
+  return out.join("\n");
+}
+
+// --- 设计自带的视频填充(VIDEO)-----------------------------------------------
+// 发布数据里 fill.type === "VIDEO" 带 videoRef,线上渲染成 <video>。
+// 以前完全没处理,节点变成空框(实测 germanschoolhistories 的 2:1915:
+// 线上 760x427 的 <video>,本地什么都没有,整页像素差分 52.7%)。
+
+test("videoSpecFromFill:把 VIDEO 填充翻译成 videoElement 的 spec", () => {
+  const spec = videoSpecFromFill(
+    { id: "2:1915" },
+    { type: "VIDEO", scaleMode: "FILL", videoRef: "30d9d3a016fc1ef8444dbf3bb9c714895e728298", autoplay: true, mediaLoop: true, muted: true, showControls: false },
+  );
+  assert.equal(spec.src, "assets/30d9d3a016fc1ef8444dbf3bb9c714895e728298.mp4", "视频走 /_videos/v1/,落地带 .mp4 扩展名");
+  assert.equal(spec.autoplay, true);
+  assert.equal(spec.loop, true);
+  assert.equal(spec.muted, true);
+  assert.equal(spec.controls, false);
+  assert.equal(spec.fit, "cover", "scaleMode FILL → cover");
+});
+
+test("videoSpecFromFill:没有 videoRef 就返回 null(别生成一个空白播放器)", () => {
+  assert.equal(videoSpecFromFill({ id: "x" }, { type: "VIDEO" }), null);
+  assert.equal(videoSpecFromFill({ id: "x" }, undefined), null);
+});
+
+test("renderNode:带 VIDEO 填充的节点整体换成 <video>,不是空框", () => {
+  const node = {
+    id: "2:1915",
+    type: "RECTANGLE",
+    name: "video",
+    absoluteBoundingBox: { x: 340, y: 2550, width: 760, height: 427 },
+    fills: [
+      { type: "VIDEO", visible: true, scaleMode: "FILL", videoRef: "30d9d3a016fc1ef8444dbf3bb9c714895e728298", autoplay: true, mediaLoop: true, muted: true, showControls: false },
+    ],
+  };
+  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 } };
+  const out = [];
+  renderNode(node, { "2:1915": node }, canvas, out, {
+    assetDir: "assets",
+    parentOf: new Map(),
+    edits: new Map(),
+    nodeStyles: new Map(),
+    handled: new Set(),
+    fontStack: (f) => `'${f}', sans-serif`,
+  });
+  const html = out.join("\n");
+  assert.match(html, /<video/, "必须是 video 元素");
+  assert.match(html, /autoplay/, "autoplay 来自 fill");
+  assert.match(html, /loop/);
+  assert.match(html, /muted/, "autoplay 必须配 muted,否则浏览器拦截");
+  assert.equal(/controls/.test(html), false, "showControls=false 时不要控件");
+  assert.match(html, /object-fit: cover/);
+  assert.match(html, /width: 760px/);
+  assert.match(html, /data-node-id="2:1915"/);
+});
+
+test("nodeStyle:NONE 用固定高度(内容居中溢出),不是 min-height", () => {
+  // 实测:轮播标题设计框 36px、内容 54px。线上是 flex 居中让内容**上下对称溢出**
+  // (文字从 7927 起,而不是框顶 7936);改成 height:auto/min-height 会把文字顶到
+  // 框顶,整段下移 9px —— 像素差分能直接看到。
+  const html = renderText({
+    absoluteBoundingBox: { x: 0, y: 0, width: 330, height: 36 },
+    style: { fontFamily: "Inter", fontSize: 14, textAutoResize: "NONE", textAlignVertical: "CENTER" },
+  });
+  assert.match(html, /height: 36px/, "NONE 要用设计高度写死");
+  assert.equal(/min-height/.test(html), false, "不要 min-height(会让文字顶到框顶)");
+  assert.match(html, /justify-content: center/, "要靠 flex 居中让溢出对称");
+});
+
+test("nodeStyle:只有 PIXELS 才写死行高,INTRINSIC_% 用 normal", () => {
+  // lineHeightUnit 是"怎么指定的",不是"结果是什么":
+  //   PIXELS     → lineHeightPx 就是最终行高(实测那个三行标题 40px)
+  //   INTRINSIC_%→ 字体固有行高的百分比,percent=100 时**等于 normal**
+  // 实测该页 311 个 INTRINSIC_% 节点的 lineHeightPx/fontSize = 1.18/1.203/1.253/
+  // 1.349/1.448,每个字体一个常数,正是各字体的自然行高比 —— 写死那个小数会算错
+  // (14px 正文:线上每行 18px → 306px;按 17.542px 只有 298px,17 行全部错位)。
+  const px = renderText({
+    absoluteBoundingBox: { x: 0, y: 0, width: 330, height: 40 },
+    style: { fontFamily: "Inter", fontSize: 36, lineHeightPx: 40, lineHeightUnit: "PIXELS", textAutoResize: "HEIGHT" },
+  });
+  assert.match(px, /line-height: 40px/, "PIXELS 要照用 lineHeightPx");
+
+  const intrinsic = renderText({
+    absoluteBoundingBox: { x: 0, y: 0, width: 330, height: 36 },
+    style: { fontFamily: "Inter", fontSize: 14, lineHeightPx: 17.542, lineHeightUnit: "INTRINSIC_%", lineHeightPercent: 100, textAutoResize: "HEIGHT" },
+  });
+  assert.match(intrinsic, /line-height: normal/, "INTRINSIC_% 要用 normal");
+  assert.equal(/17\.542px/.test(intrinsic), false, "不能把固有行高当像素值写死");
 });
 
 test("renderNode:富文本段落的字体/字号/行高必须落在 <p> 上", () => {

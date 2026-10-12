@@ -21,7 +21,7 @@
 //     covering every page, so a single fetch yields full page discovery.
 //   - Assets are served at /_assets/v11/<hash>.<ext>; some .png-named files
 //     are actually JPEG bytes, so extensions are sniffed from magic bytes.
-import { mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { httpFetch } from "./netfetch.mjs";
 import { join } from "node:path";
 import { generateDesignReport } from "./design-report.mjs";
@@ -240,12 +240,19 @@ export async function scrapeSite(outDir, urlArg) {
   // 带宽,又会让"失败计数"里混进永远不可能出现在页面上的资源。
   const hinted = new Map();
   const needed = new Set();
+  // VIDEO 填充的视频在**另一条 URL 路径**上(/_videos/v1/<videoRef>),不在
+  // /_assets/v11/ —— 只顺着 imageRef 走的话视频永远不会被下载,页面上只剩一个空框
+  // (实测 germanschoolhistories 的 2:1915:线上 760x427 的 <video>,本地什么都没有)。
+  const neededVideos = new Set();
   for (const p of pages) {
     const data = JSON.parse(readFileSync(join(outDir, p.json)));
     for (const [h, info] of Object.entries(data.assets || {})) hinted.set(h, { ext: extOfAsset(info), info });
     for (const n of Object.values(data.nodeById || {})) {
       if (n.hash) needed.add(n.hash);
-      for (const f of n.fills || []) if (f.type === "IMAGE" && f.imageRef) needed.add(f.imageRef);
+      for (const f of n.fills || []) {
+        if (f.type === "IMAGE" && f.imageRef) needed.add(f.imageRef);
+        if (f.type === "VIDEO" && f.videoRef) neededVideos.add(f.videoRef);
+      }
     }
   }
   mkdirSync(join(outDir, "assets"), { recursive: true });
@@ -296,6 +303,21 @@ export async function scrapeSite(outDir, urlArg) {
     unusedMissing ? `${unusedMissing} 未使用(无页面引用)` : "",
   ].filter(Boolean);
   console.log(`  ✓ assets: ${downloaded} downloaded${tail.length ? `, ${tail.join(", ")}` : ""}`);
+
+  // 视频:走 /_videos/v1/<ref>,落地成 assets/<ref>.mp4(带扩展名,浏览器才能从
+  // 名字/内容判定 MIME;原来的 assets 表 url 是**没有扩展名**的)。
+  let videoOk = 0;
+  const failedVideos = [];
+  for (const ref of neededVideos) {
+    const dest = join(outDir, "assets", `${ref}.mp4`);
+    if (existsSync(dest)) { videoOk++; continue; }
+    const buf = await fetchAsset(`${origin}/_videos/v1/${ref}`);
+    if (buf) { writeFileSync(dest, buf); videoOk++; } else failedVideos.push(ref);
+  }
+  if (neededVideos.size) {
+    console.log(`  ✓ videos: ${videoOk}/${neededVideos.size} downloaded${failedVideos.length ? `, ${failedVideos.length} 失败` : ""}`);
+    for (const r of failedVideos) console.warn(`  ⚠ 视频 ${r} 下载失败(页面在用;重跑一次抓取通常即可)`);
+  }
 
   // 4. Manifest for the build step.
   const manifest = { liveBase: origin, siteHash, siteTitle, pages, generatedAt: new Date().toISOString() };

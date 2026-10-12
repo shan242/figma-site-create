@@ -170,14 +170,12 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl, centered) {
     // textAutoResize NONE = fixed box: the live site gives it the bbox height
     // and vertically centers the text inside via justify-content. height:auto
     // collapsed the box and dropped the centering of the stat numbers.
-    // textAutoResize NONE = 固定框:设计里给的就是这个高度,文字垂直居中。
-    // **但用 min-height 而不是 height** —— 设计里的框经常比内容矮(实测 lily 首页
-    // 13 处轮播标题:框 36px、内容需要 45px),线上是让外层**长高**把内容兜住
-    // (同一个标题线上渲染成 54px)。写死 height 会让第二行溢出到下一行上,
-    // 用户看到的就是"内容展示不全"。min-height 保证不会比设计小、内容多时能长高,
-    // justify-content 的垂直居中在有富余时仍然生效。
-    st.height = "auto";
-    if (s.textAutoResize === "NONE" && h) st["min-height"] = `${h}px`;
+    // textAutoResize NONE = 固定框:设计给的就是这个高度,内容**垂直居中**在里面
+    // (样式里带 justify-content: center,由 textAlignVertical 决定)。
+    // 内容比框高时 flex 居中会让它**上下对称溢出**(实测轮播标题:框 36px、内容 54px,
+    // 线上文字因此从 7927 开始而不是框顶 7936),这正是线上的表现 ——
+    // 改成 height:auto / min-height 会把内容顶到框顶,整段文字下移 9px。
+    st.height = s.textAutoResize === "NONE" && h ? `${h}px` : "auto";
     // Inter text also falls back to Noto Sans SC/JP so CJK glyphs (e.g. 消炎药)
     // render in the same font the published site uses rather than a system font.
     // Single quotes: the whole style attribute is double-quoted, so double
@@ -189,13 +187,13 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl, centered) {
     const weight = s.fontWeight != null ? s.fontWeight : s.fontStyle ? fontStyleToWeight(s.fontStyle) : 400;
     st["font-weight"] = weight;
     if (s.italic) st["font-style"] = "italic";
-    // 行高:**只要给了 lineHeightPx 就用它**,不看单位。
-    // lineHeightUnit 只说明 Figma 里是"按像素指定"还是"按字体固有高度的百分比">
-    // 算出来的,而 `lineHeightPx` 在两种情况下都是**最终的行高像素值**。
-    // 实测 lily 首页 `2:167`:lineHeightUnit=INTRINSIC_%、lineHeightPx=40、字号 36,
-    // 三段文字线上正好 120px(3×40),而我们用 normal(≈44)渲染成 132px —— 高了 12px,
-    // 整块文字因此与下方内容错位。
-    st["line-height"] = s.lineHeightPx ? `${s.lineHeightPx}px` : "normal";
+    // 行高:**只有 lineHeightUnit === "PIXELS" 才是真的固定像素行高。**
+    // `INTRINSIC_%` 是"字体固有行高的百分之多少",percent=100 时就**等于 `normal`** ——
+    // 实测该页 311 个这种节点,lineHeightPx/fontSize 的比例是 1.18/1.203/1.253/
+    // 1.349/1.448,每个字体一个常数,正是各字体的自然行高比。
+    // 写死那个小数会算错:同样是 14px 的正文,线上每行 18px(306px/17 行),
+    // 按 17.542px 渲染只有 298px —— 17 行全部错位,像素差分一眼可见。
+    st["line-height"] = s.lineHeightUnit === "PIXELS" && s.lineHeightPx ? `${s.lineHeightPx}px` : "normal";
     if (s.letterSpacing !== 0 && s.fontSize) {
       if (s.letterSpacingUnit === "PIXELS") st["letter-spacing"] = `${s.letterSpacing}px`;
       else st["letter-spacing"] = `${(s.fontSize * s.letterSpacing) / 100}px`;
@@ -262,13 +260,11 @@ export function textRuns(node) {
   const chars = node.characters || "";
   const overrides = node.characterStyleOverrides || [];
   const table = node.styleOverrideTable || {};
-  // 一条 run 的样式。行高分三种情况,这是被线上实测逼出来的:
-  //   - **基准段**(没有 override):lineHeight = null → 不写 line-height,继承节点自己的
-  //     lineHeightPx。实测 lily `2:167`(lineHeightPx=40、字号 36、U+2028 分 3 行):
-  //     线上 3×40=120px,写成 normal 会变成 3×44=132px。
-  //   - **override 且带 lineHeightPx**:用它。实测 lily 轮播正文 20px/28px。
-  //   - **override 但没带 lineHeightPx**:用 "normal"。实测 creme-zipper 的 16px
-  //     「Source:」行:线上 19px(= normal@16),若继承节点的 33.725px 会变成 34px。
+  // 一条 run 的样式。行高的三种情况(见 nodeStyle 与 decls 的注释):
+  //   - **基准段**(没有 override):lineHeight = null → 不写 line-height,
+  //     继承容器上的节点行高(PIXELS 节点是像素值,INTRINSIC_% 节点是 normal)。
+  //   - **override 且带 lineHeightPx**:用它(实测轮播正文 20px/28px)。
+  //   - **override 但没带 lineHeightPx**:用 "normal"。
   const shape = (o) => {
     if (!o) return { weight: null, size: null, family: null, lineHeight: null, italic: false };
     return {
@@ -894,6 +890,17 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     return;
   }
 
+  // 设计自带的视频填充:整块换成 <video>(和 insert_video 用同一套定位/属性逻辑)。
+  // 放在 RECTANGLE/IMAGE 之前,否则会先被当成普通填充渲染成一个空框。
+  const videoFill = (node.fills || []).find((f) => f.type === "VIDEO" && f.visible !== false);
+  if (videoFill) {
+    const spec = videoSpecFromFill(node, videoFill, ctx?.assetDir);
+    if (spec) {
+      out.push(videoElement(node, canvas, ctx || {}, spec));
+      return;
+    }
+  }
+
   if (tag === "RECTANGLE" || tag === "IMAGE") {
     const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
     if (overlay) Object.assign(st, overlay);
@@ -962,6 +969,34 @@ export function videoElement(node, canvas, ctx, spec) {
 
 export function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");}
+
+// 设计里自带的视频填充(fill.type === "VIDEO")。
+//
+// 发布数据长这样(实测 germanschoolhistories 的 2:1915):
+//   { type: "VIDEO", scaleMode: "FILL", imageRef: <封面>, videoRef: <视频>,
+//     autoplay: true, mediaLoop: true, muted: true, showControls: false }
+// 而 assets 表里对应一条 {"type":"VIDEO_ASSET", url:<videoRef>}。
+// **视频和图片是两条不同的 URL 路径**:图片在 /_assets/v11/<hash>,视频在
+// /_videos/v1/<hash> —— 所以抓取时不能只顺着 imageRef 走,否则视频永远不会被下载,
+// 页面上就剩一个空框(实测线上 760x427 的 <video>,本地什么都没有,像素差 52.7%)。
+export function videoSpecFromFill(node, fill, assetDir) {
+  const ref = fill?.videoRef;
+  if (!ref) return null;
+  // 落地文件名带扩展名(浏览器按扩展名/内容决定 MIME),这里统一用 .mp4
+  const src = `assets/${ref}.mp4`;
+  void assetDir;
+  return {
+    id: `fill-${String(ref).slice(0, 12)}`,
+    nodeId: node.id,
+    src,
+    poster: null, // 线上没设 poster(靠 autoplay),封面图另存为普通图片资源即可
+    fit: fill.scaleMode === "FIT" ? "contain" : fill.scaleMode === "STRETCH" ? "fill" : "cover",
+    controls: !!fill.showControls,
+    autoplay: !!fill.autoplay,
+    loop: !!fill.mediaLoop,
+    muted: fill.muted !== false,
+  };
+}
 
 export function collectNodes(id, nodes, acc) {
   const n = nodes[id];
