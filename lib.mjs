@@ -711,7 +711,10 @@ export function renderNode(node, nodes, canvas, out, ctx) {
         st.top = `${topPx}px`;
         st.width = `${w}px`;
         st.height = `${h}px`;
-        if (node.constraints?.horizontal === "CENTER") {
+        // 用 centered 而不是「自身约束是不是 CENTER」:箭头这类 SVG 自己的约束
+        // 往往是 LEFT,但它在 CENTER 约束的组件实例里 —— 线上是跟着中心走的
+        // (实测轮播箭头 1920 下线上 x=582/948,只按自身约束会写死成 342/708,差 (1920-1440)/2)。
+        if (centered) {
           const off = leftPx - Math.round(canvas.width) / 2;
           st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off * 1000) / 1000)}px)`;
         } else {
@@ -731,7 +734,8 @@ export function renderNode(node, nodes, canvas, out, ctx) {
         st.top = `${rTop}px`;
         st.width = `${Math.round(rb.width * 1000) / 1000}px`;
         st.height = `${Math.round(rb.height * 1000) / 1000}px`;
-        if (node.constraints?.horizontal === "CENTER") {
+        // 同上:只看自身约束会把跟随中心的 SVG 写死
+        if (centered) {
           const off = rLeft - Math.round(canvas.width) / 2;
           st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off * 1000) / 1000)}px)`;
         } else {

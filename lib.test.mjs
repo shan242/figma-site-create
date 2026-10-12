@@ -331,6 +331,42 @@ test("swapRuntime 只切同组、并保留内联 display", () => {
 // 线上渲染 384px(设计尺寸),旧逻辑却按 1403/1280 放大成 421px —— 所有图片宽了
 // 9.6%,看起来就是"图片被拉伸"。判定必须看整条父链。
 
+test("SVG:箭头在 CENTER 组件里要跟随中心,不能只看自身约束", () => {
+  // 实测:轮播左右箭头的 SVG 自身约束是 LEFT,但它在 CENTER 约束的组件实例里,
+  // 线上跟着画布中心走 —— 1920 下线上 x=582/948,只按自身约束会写死成 342/708,
+  // 正好差 (1920-1440)/2。SVG 路径原来两处都写成 `constraints.horizontal === "CENTER"`,
+  // 应该用已经算好的 centered(它涵盖祖先链,也涵盖 SCALE 不缩放时的回落)。
+  const nodes = {
+    "0:1": { id: "0:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 }, children: ["1:1"] },
+    "1:1": { id: "1:1", type: "INSTANCE", name: "carousel", constraints: { horizontal: "CENTER" }, absoluteBoundingBox: { x: 320, y: 0, width: 420, height: 440 }, children: ["1:2"] },
+    "1:2": {
+      id: "1:2",
+      type: "SVG",
+      name: "arrow",
+      constraints: { horizontal: "LEFT" },
+      absoluteBoundingBox: { x: 342, y: 100, width: 12, height: 0 },
+      // 渲染边界比设计框大(箭头有烘进去的留白)→ 会走 rb 那条分支
+      isolatedAbsoluteRenderBounds: { x: 341.5, y: 99, width: 12.5, height: 7.36 },
+      hash: "deadbeef",
+      children: [],
+    },
+  };
+  const parentOf = new Map();
+  for (const n of Object.values(nodes)) for (const c of n.children || []) parentOf.set(c, n);
+  const out = [];
+  renderNode(nodes["1:2"], nodes, nodes["0:1"].absoluteBoundingBox, out, {
+    assetDir: ".",
+    parentOf,
+    edits: new Map(),
+    nodeStyles: new Map(),
+    handled: new Set(),
+    fontStack: (f) => `'${f}', sans-serif`,
+  });
+  const html = out.join("\n");
+  assert.match(html, /left: calc\(50% - 378\.5px\)/, "341.5 - 1440/2 = -378.5");
+  assert.equal(/left: 341\.5px/.test(html), false, "不能写死设计 px(宽屏下会偏 (W-1440)/2)");
+});
+
 function scaleFixture(childParent) {
   // 画布 0:1 → CENTER 容器 1:1(不缩放)→ 或直接挂 SCALE 矩形
   const nodes = {
