@@ -215,7 +215,9 @@ function parseBlock(block) {
     return [];
   }
   const choice = json.choices && json.choices[0];
-  if (!choice) return []; // keep-alive chunk
+  // 没有 choice 的块是 keep-alive:连接活着,但没有内容。也要给一个 tick ——
+  // 长思考期间模型可能只发心跳,消费端靠它判断"还没超时"。
+  if (!choice) return [{ type: "tick" }];
   const events = [];
   const delta = choice.delta || {};
   if (Array.isArray(delta.tool_calls)) {
@@ -225,7 +227,18 @@ function parseBlock(block) {
     }
   }
   if (typeof delta.content === "string" && delta.content) events.push({ type: "content", text: delta.content });
+  // 推理模型的"思考"流(reasoning_content)。之前完全没解析它 —— 两个后果:
+  //   1) 思考过程被丢掉,界面上什么都不显示,看起来像卡死;
+  //   2) 一个只吐 reasoning_content 的 chunk 解析出**零个事件**,于是消费端的
+  //      空闲计时器**不会被重置**。模型认真思考超过 120 秒就被当成超时杀掉 ——
+  //      这正是"每次任务没完成就报超时"的来源。
+  if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+    events.push({ type: "reasoning", text: delta.reasoning_content });
+  }
+  // 只要这一块有内容就是"连接还活着",哪怕没有任何可显示的东西(keep-alive、
+  // 只有 usage 的收尾块……)。消费端据此重置空闲计时器。
   if (choice.finish_reason) events.push({ type: "finish", finishReason: choice.finish_reason });
+  if (!events.length) events.push({ type: "tick" });
   return events;
 }
 
@@ -304,18 +317,36 @@ export function createDeepSeekModel(config) {
     if (toolSchemas?.length) body.tools = toolSchemas;
 
     const ctrl = new AbortController();
-    const timeoutMs = config.timeoutMs || 120000;
-    // Inactivity timeout: reset on every received chunk. A stream that is
-    // actively producing tokens never trips it, but a stalled connection (or a
-    // model that stops sending) aborts after timeoutMs. The old fixed timer
-    // killed long-running streams at 90s even while data was flowing.
-    let timeout = setTimeout(() => ctrl.abort(), timeoutMs);
-    const bump = () => {
+    // 两个预算分开,因为它们是完全不同的事:
+    //   firstByte —— 从发出请求到模型吐出**第一个** token。这一段包含排队、读完整
+    //                个上下文、以及推理模型"思考"的时间,长 prompt(系统提示词 +
+    //                工具结果)下轻松超过两分钟。之前它和"流卡住"共用同一个 120 秒,
+    //                于是正常的长思考被当成超时杀掉 —— 用户看到的就是
+    //                "请求已取消或超时"。
+    //   idle      —— 流已经开始之后,两个 chunk 之间的最大间隔。这个才该短。
+    const firstByteMs = config.firstByteTimeoutMs || 300000; // 5 分钟
+    const idleMs = config.idleTimeoutMs || config.timeoutMs || 120000;
+    let timeout;
+    let abortReason = null; // "timeout-first" | "timeout-idle" | "user"
+    let started = false;
+    const arm = (ms, reason) => {
       clearTimeout(timeout);
-      timeout = setTimeout(() => ctrl.abort(), timeoutMs);
+      timeout = setTimeout(() => {
+        abortReason = reason;
+        ctrl.abort();
+      }, ms);
     };
-    const onAbort = () => ctrl.abort();
+    arm(firstByteMs, "timeout-first");
+    const bump = () => {
+      if (!started) started = true;
+      arm(idleMs, "timeout-idle");
+    };
+    const onAbort = () => {
+      abortReason = "user";
+      ctrl.abort();
+    };
     signal?.addEventListener("abort", onAbort);
+    const startedAt = Date.now();
     try {
       const res = await fetchWithRetry(
         `${baseUrl}/chat/completions`,
@@ -348,6 +379,9 @@ export function createDeepSeekModel(config) {
         if (evt.type === "content") {
           content += evt.text;
           onEvent?.({ type: "delta", text: evt.text });
+        } else if (evt.type === "reasoning") {
+          // 思考阶段也要让用户看见"它在动",否则长思考看起来就是卡死
+          onEvent?.({ type: "reasoning", text: evt.text });
         } else if (evt.type === "toolCall") {
           const t = toolBuf.get(evt.index) || { id: null, name: null, args: "" };
           if (evt.id) t.id = evt.id;
@@ -369,7 +403,19 @@ export function createDeepSeekModel(config) {
       });
       return { content, toolCalls };
     } catch (e) {
-      if (e.name === "AbortError") throw new Error("请求已取消或超时");
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      // 把"用户点了取消"和"等超时了"分开报。原来两种都只说一句
+      // "请求已取消或超时",用户既不知道发生了什么,也不知道该改什么。
+      if (e.name === "AbortError") {
+        if (abortReason === "user") throw new Error("已取消");
+        if (abortReason === "timeout-first") {
+          throw new Error(
+            `等待模型响应超过 ${Math.round(firstByteMs / 1000)} 秒仍未开始输出(已等待 ${secs} 秒)。` +
+              `上下文较长时首次响应会变慢 —— 可在设置里调大「首字节超时」,或把页面拆小一点再试`,
+          );
+        }
+        throw new Error(`模型输出中断超过 ${Math.round(idleMs / 1000)} 秒(已等待 ${secs} 秒),已停止`);
+      }
       throw e;
     } finally {
       clearTimeout(timeout);

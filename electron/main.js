@@ -266,6 +266,42 @@ ipcMain.handle("ai-config:set", (event, cfg) => {
   return { ok: true };
 });
 
+// 对话上下文:按输出目录各自保存最近几轮 user/assistant 文本。
+//
+// 之前这里只传 `[{role:"user", content: message}]` —— **完全没有历史**,
+// 所以每一轮都是失忆的:用户说"再大一点"、"换成蓝色",模型根本不知道在说什么。
+// 工具调用与结果不进历史(它们是中间过程,重放既费 token 又可能过期);只留
+// 用户和助手的文字,足够让"上一条指的是什么"成立。
+const chatHistories = new Map(); // outDir -> [{role, content}]
+const HISTORY_MAX_MESSAGES = 16; // 8 轮问答
+const HISTORY_MAX_CHARS = 24000;
+
+function getHistory(outDir) {
+  return chatHistories.get(outDir) || [];
+}
+
+function pushHistory(outDir, role, content) {
+  const text = String(content ?? "").trim();
+  if (!text) return;
+  const list = getHistory(outDir).slice();
+  list.push({ role, content: text });
+  // 先按条数截断,再按总长度从头砍 —— 至少保留最近一轮
+  while (list.length > HISTORY_MAX_MESSAGES) list.shift();
+  let total = list.reduce((n, m) => n + m.content.length, 0);
+  while (total > HISTORY_MAX_CHARS && list.length > 1) total -= list.shift().content.length;
+  chatHistories.set(outDir, list);
+}
+
+ipcMain.handle("chat:history", (event, { outDir }) => {
+  const list = getHistory(outDir);
+  return { ok: true, turns: Math.floor(list.length / 2), chars: list.reduce((n, m) => n + m.content.length, 0) };
+});
+
+ipcMain.handle("chat:clear-history", (event, { outDir }) => {
+  chatHistories.delete(outDir);
+  return { ok: true };
+});
+
 ipcMain.handle("chat:send", async (event, { message, outDir }) => {
   if (chatRunning) throw new Error("对话正在进行中,请稍候");
   if (!message || !message.trim()) throw new Error("消息不能为空");
@@ -308,13 +344,19 @@ ipcMain.handle("chat:send", async (event, { message, outDir }) => {
       // runtime and the page would silently lose its live behaviour.
       buildFn: (dir) => buildSite(dir, { dataApi: dataApiBase() }),
     });
+    // 带上这个目录之前的对话,模型才知道"再大一点"是在说什么。
+    const prior = getHistory(outDir);
     const result = await runAgent({
-      messages: [{ role: "user", content: message }],
+      messages: [...prior.map((m) => ({ role: m.role, content: m.content })), { role: "user", content: message }],
       model,
       tools,
       onEvent: send,
       config: { signal: abort.signal },
     });
+    // 这一轮结束后写回上下文(失败的轮次也记,否则用户重说一遍时模型不知道刚才失败过)
+    pushHistory(outDir, "user", message);
+    if (result?.text) pushHistory(outDir, "assistant", result.text);
+    send({ type: "history", turns: Math.floor(getHistory(outDir).length / 2) });
     // A successful edit only lands in the generated HTML after a rebuild. If
     // the agent changed files but never asked to rebuild, do it once here so
     // the change is immediately visible; skip when the agent already built.

@@ -12,6 +12,44 @@ const chatEl = document.getElementById("chat");
 const chatInput = document.getElementById("chat-input");
 const btnSend = document.getElementById("btn-send");
 const btnCancel = document.getElementById("btn-cancel");
+const btnClearCtx = document.getElementById("btn-clear-ctx");
+const chatContextEl = document.getElementById("chat-context");
+
+// --- 对话上下文 --------------------------------------------------------------
+// 上下文由主进程按输出目录保存;这里只显示"带了几轮"并允许清空。
+// 显示它的意义:用户能确认"上一条说的"确实还在,而不是每次都从零开始。
+
+let contextTurns = 0;
+
+function setContextCount(turns) {
+  contextTurns = Number(turns) || 0;
+  if (!chatContextEl) return;
+  chatContextEl.textContent = contextTurns ? `上下文 ${contextTurns} 轮` : "";
+  chatContextEl.title = contextTurns
+    ? `本次对话会带上最近 ${contextTurns} 轮历史,模型才知道“再大一点”指的是什么`
+    : "暂无上下文;下一轮开始会自动带上";
+}
+
+// 思考指示器:只保留最新一行,不把思考过程倒进聊天区
+let thinkingEl = null;
+function showThinking(text) {
+  if (!thinkingEl) {
+    thinkingEl = chatBubble("tool");
+    thinkingEl.classList.add("thinking");
+  }
+  if (!text) return;
+  thinkingEl.dataset.chars = String((Number(thinkingEl.dataset.chars) || 0) + text.length);
+  thinkingEl.textContent = `💭 思考中…(${thinkingEl.dataset.chars} 字)`;
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function clearThinking() {
+  if (thinkingEl) {
+    thinkingEl.remove();
+    thinkingEl = null;
+  }
+}
+
 
 // --- 左侧:抓取 / 生成 / 日志 ------------------------------------------------
 
@@ -173,12 +211,14 @@ function handleChatEvent(evt) {
       assistantEl = null;
       break;
     case "delta": {
+      clearThinking();
       if (!assistantEl) assistantEl = chatBubble("assistant");
       assistantEl.textContent += evt.text;
       chatEl.scrollTop = chatEl.scrollHeight;
       break;
     }
     case "tool_start":
+      clearThinking();
       assistantEl = null;
       lastToolEl = chatBubble("tool");
       lastToolEl.textContent = `🔧 调用 ${evt.tool}${evt.args ? " " + shortArgs(evt.args) : ""}`;
@@ -198,6 +238,15 @@ function handleChatEvent(evt) {
       chatEl.scrollTop = chatEl.scrollHeight;
       break;
     }
+    case "reasoning":
+      // 推理模型的"思考"流。之前完全没显示,长思考在界面上看起来就是卡死 ——
+      // 用户以为程序挂了就去点取消,任务当然完不成。这里只显示"在思考"和字数,
+      // 不把思考过程倒进聊天区(又长又吵)。
+      showThinking(evt.text);
+      break;
+    case "history":
+      setContextCount(evt.turns);
+      break;
     case "log":
       // run_build 的构建输出回到左侧日志面板
       appendLog(evt.text);
@@ -206,6 +255,7 @@ function handleChatEvent(evt) {
       showConfirm(evt.id, evt.kind, evt.payload);
       break;
     case "done":
+      clearThinking();
       if (evt.text) {
         if (!assistantEl) assistantEl = chatBubble("assistant");
         assistantEl.textContent = evt.text;
@@ -214,6 +264,7 @@ function handleChatEvent(evt) {
       addMeta("", `完成(共 ${evt.turnCount} 轮)`);
       break;
     case "error":
+      clearThinking();
       assistantEl = chatBubble("assistant err");
       assistantEl.textContent = "⚠ " + evt.message;
       assistantEl = null;
@@ -251,6 +302,32 @@ chatInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !chatRunning) sendChat();
 });
 btnCancel.addEventListener("click", () => window.api.cancelChat());
+
+// 清空上下文:模型会忘记之前的对话,聊天区也清掉,避免"看着还在聊、其实已失忆"
+if (btnClearCtx) {
+  btnClearCtx.addEventListener("click", async () => {
+    if (chatRunning) return;
+    const outDir = outInput.value.trim();
+    await window.api.clearChatHistory(outDir);
+    setContextCount(0);
+    chatEl.innerHTML = "";
+    addMeta("", "已清空对话上下文。");
+  });
+}
+
+// 切换输出目录时刷新上下文提示(不同站点的上下文是分开的)
+async function refreshContext() {
+  const outDir = outInput.value.trim();
+  if (!outDir) return setContextCount(0);
+  try {
+    const r = await window.api.chatHistory(outDir);
+    setContextCount(r?.turns || 0);
+  } catch {
+    setContextCount(0);
+  }
+}
+outInput.addEventListener("change", refreshContext);
+refreshContext();
 
 addMeta("", "输入消息开始与 AI 对话。发送前请先完成「1. 抓取站点」与「2. 生成站点」。");
 

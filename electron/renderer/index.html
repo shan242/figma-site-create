@@ -53,6 +53,8 @@
     <section class="col chat">
       <div class="chat-head">
         <h2>AI 对话</h2>
+        <span id="chat-context" class="chat-context" title="本次对话会带上这些历史,模型才知道“再大一点”指的是什么"></span>
+        <button id="btn-clear-ctx" title="清空对话上下文(模型将忘记之前的对话)">清空上下文</button>
         <button id="btn-cancel" disabled>取消</button>
       </div>
       <div id="chat" aria-live="polite"></div>

@@ -208,6 +208,25 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   flex: 1;
 }
 
+/* 上下文提示:让用户确认"上一条说的"确实还在,而不是每轮都从零开始 */
+.chat-context {
+  font-size: 11px;
+  color: #64748b;
+  background: #f1f5f9;
+  border-radius: 10px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.chat-context:empty {
+  display: none;
+}
+
+/* 思考指示器:长思考时让用户看见"它在动",否则看起来像卡死 */
+.chat-msg.thinking {
+  color: #64748b;
+  font-style: italic;
+}
+
 #chat {
   flex: 1;
   min-height: 0;

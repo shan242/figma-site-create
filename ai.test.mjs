@@ -41,10 +41,34 @@ test("parseSSE accumulates tool call args across chunks", async () => {
   assert.ok(events.some((e) => e.type === "finish" && e.finishReason === "tool_calls"));
 });
 
-test("parseSSE ignores keep-alive chunks", async () => {
+test("parseSSE:keep-alive 块给出 tick(连接活着),但不产生内容", async () => {
   const events = [];
   for await (const e of parseSSE([`data: {"choices":[]}\n\n`, `data: {"choices":[{"delta":{"content":"x"}}]}\n\n`])) events.push(e);
-  assert.deepEqual(events, [{ type: "content", text: "x" }]);
+  assert.deepEqual(events, [{ type: "tick" }, { type: "content", text: "x" }]);
+});
+
+test("parseSSE:reasoning_content 不能被丢掉(否则长思考=假死)", async () => {
+  const events = [];
+  const chunks = [
+    `data: {"choices":[{"delta":{"reasoning_content":"让我想想"}}]}\n\n`,
+    `data: {"choices":[{"delta":{"reasoning_content":"……"}}]}\n\n`,
+    `data: {"choices":[{"delta":{"content":"答案"}}]}\n\n`,
+    `data: [DONE]\n\n`,
+  ];
+  for await (const e of parseSSE(chunks)) events.push(e);
+  // 关键:只吐 reasoning 的块必须产生事件,消费端才会重置空闲计时器。
+  // 之前这些块解析出零个事件,模型思考超过 120 秒就被当成超时杀掉。
+  assert.deepEqual(events, [
+    { type: "reasoning", text: "让我想想" },
+    { type: "reasoning", text: "……" },
+    { type: "content", text: "答案" },
+  ]);
+});
+
+test("parseSSE:只有 usage 的收尾块也算活着", async () => {
+  const events = [];
+  for await (const e of parseSSE([`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":1}}\n\n`])) events.push(e);
+  assert.deepEqual(events, [{ type: "finish", finishReason: "stop" }]);
 });
 
 test("parseSSE tolerates chunk boundaries mid-line", async () => {
@@ -1120,5 +1144,132 @@ test("createDeepSeekModel returns a callable that hits the configured base URL",
     assert.equal(seen[0].opts.body.includes("deepseek-v4-flash"), true);
   } finally {
     globalThis.fetch = orig;
+  }
+});
+
+// --- 超时:首字节与空闲分开 ---------------------------------------------------
+// 起因:用户反馈"每次任务没完成就报取消或者超时"。两个根因:
+//   1) 一个 120 秒计时器同时管着"等模型开口"和"流卡住" —— 长 prompt(系统提示词 +
+//      工具结果)下首次响应本来就慢,正常的长思考被当成超时杀掉;
+//   2) 只吐 reasoning_content 的块解析出零个事件,空闲计时器不会被重置。
+// 另外"已取消"和"超时"原来共用一句文案,用户分不清发生了什么。
+
+// 假流必须模拟「被 abort 时 body 报错结束」:真实的 fetch 被 abort 后 body 会
+// 报错,for await 随之抛出;假流若不这样,读取会永远挂着,测试直接卡死。
+function stubStream(setup) {
+  const orig = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    let ctrl;
+    const stream = new ReadableStream({ start(c) { ctrl = c; setup(c); } });
+    if (opts?.signal) {
+      // 真实 fetch 被 abort 时 body 抛的是 AbortError(name === "AbortError"),
+      // 不是普通 Error —— 假流必须一致,否则测到的是另一种分支。
+      const onAbort = () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        try { ctrl.error(err); } catch {}
+      };
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort);
+    }
+    return { ok: true, body: stream, text: async () => "" };
+  };
+  return () => { globalThis.fetch = orig; };
+}
+
+const sse = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
+const enc = new TextEncoder();
+
+test("超时:流开始后长时间无输出 → 报'输出中断',而不是笼统的'取消或超时'", async () => {
+  // 先正常给一个 chunk,然后挂住不动
+  const restore = stubStream((c) => c.enqueue(enc.encode(sse({ choices: [{ delta: { content: "a" } }] }))));
+  try {
+    const model = createDeepSeekModel({ baseUrl: "https://x", model: "m", apiKey: "k", firstByteTimeoutMs: 5000, idleTimeoutMs: 120 });
+    await assert.rejects(
+      () => model([{ role: "user", content: "hi" }], [], null, null),
+      (e) => {
+        assert.match(e.message, /输出中断/, `实际: ${e.message}`);
+        assert.equal(/已取消或超时/.test(e.message), false, "不该再是笼统文案");
+        return true;
+      },
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("超时:首字节预算比空闲预算宽松(长 prompt 首次响应慢是正常的)", async () => {
+  // 首字节等 200ms,空闲只有 120ms:首字节预算 5000ms 下应当成功
+  const restore = stubStream((c) => {
+    setTimeout(() => {
+      c.enqueue(enc.encode(sse({ choices: [{ delta: { content: "ok" } }] })));
+      c.enqueue(enc.encode(sse({ choices: [{ delta: {}, finish_reason: "stop" }] })));
+      c.close();
+    }, 200);
+  });
+  try {
+    const model = createDeepSeekModel({ baseUrl: "https://x", model: "m", apiKey: "k", firstByteTimeoutMs: 5000, idleTimeoutMs: 120 });
+    const res = await model([{ role: "user", content: "hi" }], [], null, null);
+    assert.equal(res.content, "ok", "首字节慢不该被空闲预算杀掉");
+  } finally {
+    restore();
+  }
+});
+
+test("超时:首字节预算用尽时报'等待模型响应',并带上已等待时间", async () => {
+  const restore = stubStream(() => { /* 什么都不发,一直挂着 */ });
+  try {
+    const model = createDeepSeekModel({ baseUrl: "https://x", model: "m", apiKey: "k", firstByteTimeoutMs: 150, idleTimeoutMs: 5000 });
+    await assert.rejects(
+      () => model([{ role: "user", content: "hi" }], [], null, null),
+      (e) => {
+        assert.match(e.message, /等待模型响应/, `实际: ${e.message}`);
+        assert.match(e.message, /已等待 \d+ 秒/, "要告诉用户等了多久");
+        return true;
+      },
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("超时:用户主动取消 → 明确报'已取消',不是超时", async () => {
+  const restore = stubStream(() => { /* 挂着 */ });
+  try {
+    const ac = new AbortController();
+    const model = createDeepSeekModel({ baseUrl: "https://x", model: "m", apiKey: "k", firstByteTimeoutMs: 10000, idleTimeoutMs: 10000 });
+    setTimeout(() => ac.abort(), 80);
+    await assert.rejects(
+      () => model([{ role: "user", content: "hi" }], [], ac.signal, null),
+      (e) => {
+        assert.equal(e.message, "已取消", `实际: ${e.message}`);
+        return true;
+      },
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("超时:reasoning 事件会重置空闲计时器(长思考不再被误杀)", async () => {
+  // 每 60ms 来一个 reasoning 块,持续 300ms;空闲预算只有 150ms。
+  // 若 reasoning 不重置计时器,这里必然超时 —— 这正是用户遇到的"任务没完成就报超时"。
+  const restore = stubStream(async (c) => {
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 60));
+      c.enqueue(enc.encode(sse({ choices: [{ delta: { reasoning_content: "think" } }] })));
+    }
+    c.enqueue(enc.encode(sse({ choices: [{ delta: { content: "done" } }] })));
+    c.enqueue(enc.encode(sse({ choices: [{ delta: {}, finish_reason: "stop" }] })));
+    c.close();
+  });
+  try {
+    const seen = [];
+    const model = createDeepSeekModel({ baseUrl: "https://x", model: "m", apiKey: "k", firstByteTimeoutMs: 5000, idleTimeoutMs: 150 });
+    const res = await model([{ role: "user", content: "hi" }], [], null, (e) => seen.push(e));
+    assert.equal(res.content, "done");
+    assert.ok(seen.some((e) => e.type === "reasoning"), "思考事件要转发给界面");
+  } finally {
+    restore();
   }
 });

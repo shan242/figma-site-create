@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld("api", {
   onChat: (cb) => ipcRenderer.on("chat:event", (_e, evt) => cb(evt)),
   resolveConfirm: (id, approved) => ipcRenderer.invoke("chat:resolve", { id, approved }),
   cancelChat: () => ipcRenderer.invoke("chat:cancel"),
+  // 对话上下文(按输出目录保存最近几轮)
+  chatHistory: (outDir) => ipcRenderer.invoke("chat:history", { outDir }),
+  clearChatHistory: (outDir) => ipcRenderer.invoke("chat:clear-history", { outDir }),
 
   getAiConfig: () => ipcRenderer.invoke("ai-config:get"),
   setAiConfig: (cfg) => ipcRenderer.invoke("ai-config:set", cfg),
