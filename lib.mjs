@@ -31,6 +31,43 @@ export const gradientAngle = (h) => {
   return (Math.atan2(-dy, dx) * 180) / Math.PI;
 };
 
+// IMAGE 填充的呈现方式。
+//
+// Figma 的 fill.imageTransform 是 [[a,0,tx],[0,d,ty]]:把**归一化图像坐标**映射到
+// **归一化填充框坐标**。所以图像只占框内 [tx,tx+a] × [ty,ty+d] 那一块 ——
+//   background-size: a*100% d*100%
+//   background-position 的百分比语义是相对 (框 − 图) 的 → X = tx/(1−a)
+//
+// 忽略它、一律用 cover 的后果(实测 2026101201):设计里纵向只占 46%、86% 的图
+// 被**放大裁剪到铺满整框**,看起来就是图片被拉伸变形。52 处 STRETCH 里有 49 处
+// 带裁剪矩阵,全部受影响。
+//
+// scaleMode 只作为没有 transform 时的兜底:FILL→cover(裁切)、FIT→contain(留白)、
+// STRETCH→100% 100%(真的拉伸)。
+const imageFillCss = (fill) => {
+  const t = fill.imageTransform;
+  if (Array.isArray(t) && t.length === 2 && t[0]?.length === 3 && t[1]?.length === 3) {
+    const [a, b, tx] = t[0];
+    const [c, d, ty] = t[1];
+    // 纯缩放 + 平移才用这套;带旋转/斜切的退回 cover(图像填充极少出现)
+    if (Math.abs(b) < 1e-6 && Math.abs(c) < 1e-6 && a > 0 && d > 0) {
+      const pct = (v) => `${+(v * 100).toFixed(4)}%`;
+      // 图像比框大时(scale>1)没有可对齐的余量,位置就是 0
+      const pos = (off, scale) => (scale < 1 ? pct(off / (1 - scale)) : "0%");
+      return {
+        "background-size": `${pct(a)} ${pct(d)}`,
+        "background-position": `${pos(tx, a)} ${pos(ty, d)}`,
+        // 关键:默认是 repeat,尺寸小于 100% 时会平铺成一堆小图
+        "background-repeat": "no-repeat",
+      };
+    }
+  }
+  const mode = String(fill.scaleMode || "FILL").toUpperCase();
+  if (mode === "FIT") return { "background-size": "contain", "background-position": "center", "background-repeat": "no-repeat" };
+  if (mode === "STRETCH") return { "background-size": "100% 100%", "background-position": "center", "background-repeat": "no-repeat" };
+  return { "background-size": "cover", "background-position": "center" };
+};
+
 export const fillToCss = (fill, assetUrl) => {
   if (!fill || !fill.visible || fill.opacity === 0) return null;
   // Figma 的填充可以整体带一个透明度。SOLID 能直接烘进 rgba(),但图像和渐变
@@ -45,7 +82,7 @@ export const fillToCss = (fill, assetUrl) => {
     return bg ? { "background-color": bg } : null;
   }
   if (fill.type === "IMAGE" && fill.imageRef) {
-    const css = { "background-image": `url(${assetUrl(fill.imageRef)})`, "background-size": "cover", "background-position": "center" };
+    const css = { "background-image": `url(${assetUrl(fill.imageRef)})`, ...imageFillCss(fill) };
     if (alpha !== undefined) css.opacity = alpha;
     return css;
   }

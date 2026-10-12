@@ -162,6 +162,19 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   ship as PNGs with the dashed ring drawn in; the page-6 curves and page-28 dots are
   SVGs whose stroke is baked in). The live site paints no CSS on them — adding a
   fill/border put a solid square behind circles, curves, and dots.
+- **图像填充要按 `imageTransform` 摆放,不能一律 cover**。`fill.imageTransform` 是
+  `[[a,0,tx],[0,d,ty]]`,把**归一化图像坐标**映射到**归一化填充框坐标**,所以图像
+  只占框内 `[tx,tx+a] × [ty,ty+d]`:
+  ```css
+  background-size: a*100% d*100%;
+  background-position: tx/(1-a) *100%  ty/(1-d) *100%;   /* 百分比是相对 (框−图) */
+  background-repeat: no-repeat;                          /* 默认 repeat 会平铺! */
+  ```
+  实测踩坑(2026101201):这个站点 **52 处 `scaleMode: "STRETCH"`、49 处带裁剪矩阵**,
+  设计里图片纵向只占 46%/78%/86%,一律用 `cover` 会把它**放大裁剪到铺满整框** ——
+  看起来就是"图片被拉伸变形"。
+  `scaleMode` 只作没有矩阵时的兜底:`FILL→cover`、`FIT→contain`、`STRETCH→100% 100%`。
+  带旋转/斜切(b/c≠0)的矩阵不套公式,退回 `cover`。
 - **填充的透明度**:Figma 的 fill 可以整体带 `opacity`。**SOLID 能直接烘进
   `rgba()`**,但**图像和渐变不行 —— CSS 没有 `background-opacity`**,只能落在元素
   `opacity` 上。所以 `fillToCss` 把图像/渐变的透明度作为 `opacity` 返回,由

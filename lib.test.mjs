@@ -32,6 +32,52 @@ test("fillToCss:图像填充的透明度必须带出来(用 opacity,不是丢掉
   assert.equal("opacity" in fillToCss({ type: "IMAGE", visible: true, imageRef: "abc" }, url), false);
 });
 
+// --- 图像填充的缩放/裁剪(imageTransform / scaleMode) --------------------------
+// imageTransform 是 [[a,0,tx],[0,d,ty]]:把归一化图像坐标映射到归一化填充框坐标。
+// 忽略它一律用 cover,会把设计里"纵向只占 46%"的图放大裁剪到铺满整框 ——
+// 看起来就是图片被拉伸变形(实测 2026101201:52 处 STRETCH、49 处带裁剪矩阵)。
+
+test("fillToCss:imageTransform 决定 background-size 与 position", () => {
+  // 图像纵向只占框的中间一半,水平铺满
+  const css = fillToCss(
+    { type: "IMAGE", visible: true, imageRef: "abc", scaleMode: "STRETCH", imageTransform: [[1, 0, 0], [0, 0.5, 0.25]] },
+    url,
+  );
+  assert.equal(css["background-size"], "100% 50%", "纵向只占 50%");
+  assert.equal(css["background-position"], "0% 50%", "0.25/(1-0.5) = 50%");
+  assert.equal(css["background-repeat"], "no-repeat", "尺寸小于 100% 必须禁止平铺");
+});
+
+test("fillToCss:横向也缩放的矩阵算得出位置", () => {
+  // a=0.8 tx=0.1 → 0.1/(1-0.8)=50%;d=1 → 纵向无余量,位置 0
+  const css = fillToCss(
+    { type: "IMAGE", visible: true, imageRef: "abc", scaleMode: "STRETCH", imageTransform: [[0.8, 0, 0.1], [0, 1, 0]] },
+    url,
+  );
+  assert.equal(css["background-size"], "80% 100%");
+  assert.equal(css["background-position"], "50% 0%");
+  assert.equal(css["background-repeat"], "no-repeat");
+});
+
+test("fillToCss:没有 imageTransform 时按 scaleMode 兜底", () => {
+  const mk = (scaleMode) => fillToCss({ type: "IMAGE", visible: true, imageRef: "a", scaleMode }, url);
+  assert.equal(mk("FILL")["background-size"], "cover", "FILL = 铺满裁切");
+  assert.equal(mk("FIT")["background-size"], "contain", "FIT = 完整显示留白");
+  assert.equal(mk("STRETCH")["background-size"], "100% 100%", "STRETCH = 真的拉伸");
+  assert.equal(mk(undefined)["background-size"], "cover", "缺省按 FILL");
+  assert.equal("background-repeat" in mk("FILL"), false, "cover 不需要 no-repeat");
+  assert.equal(mk("FIT")["background-repeat"], "no-repeat");
+  assert.equal(mk("STRETCH")["background-repeat"], "no-repeat");
+});
+
+test("fillToCss:带旋转/斜切的矩阵不硬套,退回 scaleMode", () => {
+  const css = fillToCss(
+    { type: "IMAGE", visible: true, imageRef: "a", scaleMode: "FILL", imageTransform: [[0.7, 0.7, 0], [-0.7, 0.7, 0]] },
+    url,
+  );
+  assert.equal(css["background-size"], "cover", "有旋转就不能用纯缩放公式");
+});
+
 test("fillToCss:渐变填充的透明度同样带出来", () => {
   const grad = { type: "GRADIENT_LINEAR", visible: true, opacity: 0.25, gradientHandlePositions: [{ x: 0.5, y: 1 }, { x: 0.5, y: 0 }, { x: 0, y: 0 }], gradientStops: [{ position: 0, color: { r: 0, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } }] };
   assert.equal(fillToCss(grad, url).opacity, 0.25);
