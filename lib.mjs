@@ -170,7 +170,14 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl, centered) {
     // textAutoResize NONE = fixed box: the live site gives it the bbox height
     // and vertically centers the text inside via justify-content. height:auto
     // collapsed the box and dropped the centering of the stat numbers.
-    st.height = s.textAutoResize === "NONE" ? `${h}px` : "auto";
+    // textAutoResize NONE = 固定框:设计里给的就是这个高度,文字垂直居中。
+    // **但用 min-height 而不是 height** —— 设计里的框经常比内容矮(实测 lily 首页
+    // 13 处轮播标题:框 36px、内容需要 45px),线上是让外层**长高**把内容兜住
+    // (同一个标题线上渲染成 54px)。写死 height 会让第二行溢出到下一行上,
+    // 用户看到的就是"内容展示不全"。min-height 保证不会比设计小、内容多时能长高,
+    // justify-content 的垂直居中在有富余时仍然生效。
+    st.height = "auto";
+    if (s.textAutoResize === "NONE" && h) st["min-height"] = `${h}px`;
     // Inter text also falls back to Noto Sans SC/JP so CJK glyphs (e.g. 消炎药)
     // render in the same font the published site uses rather than a system font.
     // Single quotes: the whole style attribute is double-quoted, so double
@@ -182,10 +189,13 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl, centered) {
     const weight = s.fontWeight != null ? s.fontWeight : s.fontStyle ? fontStyleToWeight(s.fontStyle) : 400;
     st["font-weight"] = weight;
     if (s.italic) st["font-style"] = "italic";
-    // A FIXED pixel line-height is honored (the live site renders
-    // `line-height: <lineHeightPx>px`). Intrinsic/percentage heights fall back
-    // to the font's natural line-height.
-    st["line-height"] = s.lineHeightUnit === "PIXELS" && s.lineHeightPx ? `${s.lineHeightPx}px` : "normal";
+    // 行高:**只要给了 lineHeightPx 就用它**,不看单位。
+    // lineHeightUnit 只说明 Figma 里是"按像素指定"还是"按字体固有高度的百分比">
+    // 算出来的,而 `lineHeightPx` 在两种情况下都是**最终的行高像素值**。
+    // 实测 lily 首页 `2:167`:lineHeightUnit=INTRINSIC_%、lineHeightPx=40、字号 36,
+    // 三段文字线上正好 120px(3×40),而我们用 normal(≈44)渲染成 132px —— 高了 12px,
+    // 整块文字因此与下方内容错位。
+    st["line-height"] = s.lineHeightPx ? `${s.lineHeightPx}px` : "normal";
     if (s.letterSpacing !== 0 && s.fontSize) {
       if (s.letterSpacingUnit === "PIXELS") st["letter-spacing"] = `${s.letterSpacing}px`;
       else st["letter-spacing"] = `${(s.fontSize * s.letterSpacing) / 100}px`;
@@ -252,15 +262,20 @@ export function textRuns(node) {
   const chars = node.characters || "";
   const overrides = node.characterStyleOverrides || [];
   const table = node.styleOverrideTable || {};
-  // 一条 run 的完整样式。只有 lineHeightUnit === "PIXELS" 才是真的固定行高;
-  // INTRINSIC_% 交给字体自身的 normal(线上的行为也是如此)。
+  // 一条 run 的样式。行高分三种情况,这是被线上实测逼出来的:
+  //   - **基准段**(没有 override):lineHeight = null → 不写 line-height,继承节点自己的
+  //     lineHeightPx。实测 lily `2:167`(lineHeightPx=40、字号 36、U+2028 分 3 行):
+  //     线上 3×40=120px,写成 normal 会变成 3×44=132px。
+  //   - **override 且带 lineHeightPx**:用它。实测 lily 轮播正文 20px/28px。
+  //   - **override 但没带 lineHeightPx**:用 "normal"。实测 creme-zipper 的 16px
+  //     「Source:」行:线上 19px(= normal@16),若继承节点的 33.725px 会变成 34px。
   const shape = (o) => {
     if (!o) return { weight: null, size: null, family: null, lineHeight: null, italic: false };
     return {
       weight: fontStyleToWeight(o.fontStyle),
       size: o.fontSize || null,
       family: o.fontFamily || null,
-      lineHeight: o.lineHeightUnit === "PIXELS" && o.lineHeightPx ? o.lineHeightPx : null,
+      lineHeight: o.lineHeightPx || "normal",
       italic: !!o.italic,
     };
   };
@@ -805,11 +820,28 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     // 单行且没有任何富文本覆盖时才走这条捷径:否则必须拆成 <p>,因为
     // 字体/行高要落在块级元素上才能正确影响行盒高度。
     const plain = runs.every((r) => !r.weight && !r.size && !r.family && !r.lineHeight && !r.italic);
-    if (!chars.includes("\n") && plain) {
+    // 段落分隔符:**U+2028 / U+2029 也算**,不能只认 \n。
+    // Figma 用 U+2028(LINE SEPARATOR)表示段内软换行,而它**不在** `split("\n")` 里 ——
+    // 实测 lily 首页出现 31 次,线上按换行渲染成两块,我们却拼成一整段(线上的
+    // textContent 拼出来是 "…Leap ForwardSpotlight…",中间没有空格),文字因此
+    // 挤在一起、行数也算错。这里手动扫一遍,**同时记录每段的真实起始下标** ——
+    // characterStyleOverrides 是按原始字符串索引的,归一化换行符会把下标弄错。
+    const segments = [];
+    {
+      let start = 0;
+      for (let i = 0; i < chars.length; i++) {
+        const c = chars[i];
+        if (c !== "\n" && c !== "\r" && c !== "\u2028" && c !== "\u2029") continue;
+        segments.push({ start, end: i });
+        if (c === "\r" && chars[i + 1] === "\n") i++; // \r\n 算一个分隔符
+        start = i + 1;
+      }
+      segments.push({ start, end: chars.length });
+    }
+    if (segments.length === 1 && plain) {
       out.push(`${wrapOpen}${escapeHtml(chars)}${wrapClose}`);
       return;
     }
-    const lines = chars.split("\n");
     // 一条 run 的 CSS 声明。`line-height` 必须落在 <p> 上 —— 行盒高度由块级元素的
     // strut 决定,只写在 <span> 上的话,基准字体的行高仍会把行撑高,富文本的
     // 28px 行高就白设了(这正是文本溢出容器的原因)。
@@ -820,16 +852,19 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       if (r?.size) out.push(`font-size: ${r.size}px`);
       if (r?.weight) out.push(`font-weight: ${r.weight}`);
       if (r?.italic) out.push("font-style: italic");
-      const lh = !opts.normalLineHeight && r?.lineHeight ? `${r.lineHeight}px` : "normal";
-      out.push(`line-height: ${lh}`);
+      // 行高:number → px;"normal" → normal;null → **不写**,继承父容器的 lineHeightPx。
+      // 以前缺省写死 normal,把节点自己的行高覆盖掉了;而一律继承又会把 override
+      // 段落的行高带错 —— 三种情况见 textRuns 里的注释。
+      if (opts.normalLineHeight) out.push("line-height: normal");
+      else if (typeof r?.lineHeight === "number") out.push(`line-height: ${r.lineHeight}px`);
+      else if (r?.lineHeight === "normal") out.push("line-height: normal");
       return out.join("; ");
     };
     // 落在某个字符位置上的 run(空行也要用,见下)
     const runAt = (pos) => runs.find((r) => pos >= r.start && pos < r.end) || null;
-    let offset = 0;
-    const paras = lines.map((line) => {
-      const lineStart = offset;
-      offset += line.length + 1;
+    const paras = segments.map((seg) => {
+      const line = chars.slice(seg.start, seg.end);
+      const lineStart = seg.start;
       if (line.trim().length === 0) {
         // 空行**只继承所在 run 的字号**,字族仍用节点的基准字体,行高用 normal。
         // 实测线上:"About Kulangsu" 之后是 33px(normal@25 Abril Fatface),

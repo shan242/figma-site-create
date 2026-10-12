@@ -411,19 +411,33 @@ test("textRuns 带上 override 的 fontFamily 与 lineHeightPx(以前只取 weig
   assert.deepEqual(
     runs.map((r) => ({ family: r.family, size: r.size, lineHeight: r.lineHeight })),
     [
-      { family: null, size: null, lineHeight: null }, // 基准段
-      { family: "Actor", size: 20, lineHeight: 28 }, // PIXELS → 取像素行高
-      { family: "Actor", size: 16, lineHeight: null }, // 没有 lineHeightPx → normal
+      { family: null, size: null, lineHeight: null }, // 基准段:交给 <p> 继承节点行高
+      { family: "Actor", size: 20, lineHeight: 28 }, // override 带 lineHeightPx → 用它
+      { family: "Actor", size: 16, lineHeight: "normal" }, // override 没带 → normal
     ],
   );
 });
 
-test("textRuns:只有 lineHeightUnit=PIXELS 才当固定行高", () => {
+test("textRuns:行高分三种情况(基准继承 / override 像素 / override 缺省 normal)", () => {
+  const n = richTextNode();
+  // override 带了 lineHeightPx → 用它
+  assert.equal(textRuns(n).runs[1].lineHeight, 28);
+  // override 没带 lineHeightPx → "normal"(实测 creme-zipper 的 16px「Source:」行
+  // 线上是 19px = normal@16;若继承节点的 33.725px 会变成 34px)
+  assert.equal(textRuns(n).runs[2].lineHeight, "normal");
+  // 基准段 → null,交给 <p> 去继承节点自己的 lineHeightPx
+  // (实测 lily `2:167`:lineHeightPx=40、字号 36、U+2028 分 3 行,线上 3×40=120)
+  assert.equal(textRuns(n).runs[0].lineHeight, null);
+  assert.equal(textRuns(n).runs[0].family, null, "基准段不带字族");
+});
+
+test("textRuns:lineHeightPx 与原单位无关(INTRINSIC_% 也要用)", () => {
   const n = richTextNode();
   n.styleOverrideTable[479].lineHeightUnit = "INTRINSIC_%";
   const { runs } = textRuns(n);
-  assert.equal(runs[1].lineHeight, null, "百分比行高交给字体自身的 normal");
-  assert.equal(runs[1].family, "Actor", "但字族仍要保留");
+  // lineHeightUnit 只说明 Figma 里怎么指定的,lineHeightPx 在两种单位下都是最终像素值
+  assert.equal(runs[1].lineHeight, 28, "INTRINSIC_% 也要照用 lineHeightPx");
+  assert.equal(runs[1].family, "Actor");
 });
 
 test("renderNode:富文本段落的字体/字号/行高必须落在 <p> 上", () => {
@@ -445,8 +459,11 @@ test("renderNode:富文本段落的字体/字号/行高必须落在 <p> 上", ()
   assert.match(bodyP, /font-family: 'Actor'/, "字族要落到 <p>");
   assert.match(bodyP, /font-size: 20px/);
   assert.match(bodyP, /line-height: 28px/, "28px 行高必须落在 <p> 上");
-  // 基准段保持节点自身的字体与 normal 行高
-  assert.match(html, /<p style="display: block; white-space: pre-wrap; line-height: normal; margin: 0">About Kulangsu<\/p>/);
+  // 基准段不带 line-height —— 让它继承容器上的节点行高(写死 normal 会让
+  // 节点自己声明的行高失效,lily 首页那段三行标题因此高了 12px)
+  const headP = html.split("\n").find((l) => l.includes("About Kulangsu"));
+  assert.ok(headP, "基准段要渲染出来");
+  assert.equal(/line-height/.test(headP), false, "基准段不该写 line-height,应继承容器");
 });
 
 test("renderNode:空行只继承 run 的字号,字族与行高都回退", () => {

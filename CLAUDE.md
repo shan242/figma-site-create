@@ -178,14 +178,33 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   - **行高必须写在 `<p>` 上**,不能只写在 `<span>` 上:行盒高度由块级元素的 strut
     决定,基准字体的行高仍会把行撑高,run 的 28px 就白设了。线上也是把
     `font-family/font-size/line-height` 放在 `<p>` 上。
-  - 只有 `lineHeightUnit === "PIXELS"` 才是真的固定行高;`INTRINSIC_%` 交给
-    `normal`(线上同样如此)。
   - **空行有单独的规则**:只继承所在 run 的**字号**,字族仍用节点基准,行高 `normal`。
     实测:正文之后的空行线上是 27px(= normal@20 **Abril Fatface**),
     既不是 Actor 的 24px,也不是 run 的 28px。
-  修好后逐段与线上完全一致(33/33/196/27/84/27/19 = 419px,与容器严丝合缝),
+  修好后逐段与线上完全一致(33/33/196/27/84/27/19 + 基准段各 0.7px = 420px,
+  容器 420px,溢出 0),
   全站扫描的文字溢出数量与线上持平(7 vs 6,本地更少)。
   **验证这类问题必须逐段对比线上 DOM**:只看"有没有溢出"会漏掉"溢出多少"。
+- **段落分隔符不只 `\n`,还有 `U+2028` / `U+2029`**。Figma 用 `U+2028`(LINE
+  SEPARATOR)表示段内软换行 —— 实测 lily 首页出现 **31 次**,而它**不在**
+  `split("\n")` 里,于是整段被拼成一块(线上 `textContent` 拼出来是
+  `…Leap ForwardSpotlight…`,中间没有空格),行数也算错。
+  必须**手动扫一遍并记录每段的真实起始下标** —— `characterStyleOverrides` 是按
+  原始字符串索引的,先归一化换行符会把下标弄错(`\r\n` 也要算一个分隔符)。
+- **`textAutoResize: "NONE"` 用 `min-height`,不要写死 `height`**。
+  设计里的框经常比内容矮(实测 lily 首页 **13 处**轮播标题:框 36px、内容需要
+  45px),线上是让外层**长高**把内容兜住(同一个标题线上渲染成 54px)。写死 height
+  会让第二行溢出压到下一行 —— 用户看到的就是"内容展示不全"。
+  `min-height` 保证不会比设计小、内容多时能长高,`justify-content` 的垂直居中
+  在有富余时仍然生效。
+- **`line-height` 分三种情况,别用一条规则套**(全都是线上实测逼出来的):
+  | 情况 | 处理 | 依据 |
+  |---|---|---|
+  | 基准段(没有 override) | **不写** `line-height`,继承容器的 `lineHeightPx` | lily `2:167`:lineHeightPx=40、字号 36、U+2028 分 3 行 → 线上 3×40=120px;写 `normal` 会变成 3×44=132px,整块错位 12px |
+  | override 带 `lineHeightPx` | 用它 | 轮播正文 20px/28px |
+  | override 没带 `lineHeightPx` | **`normal`** | creme-zipper 的 16px「Source:」行线上 19px(= normal@16);继承节点的 33.725px 会变成 34px |
+  **`lineHeightUnit` 与结果无关**:它只说明 Figma 里是"按像素指定"还是"按字体固有
+  高度的百分比"算出来的,`lineHeightPx` 在两种情况下都是最终像素值。
 - **Multi-paragraph text**: split on `\n` into stacked `<p style="display:block;
   white-space:pre-wrap; line-height:normal; margin:0">` blocks with no gap; blank
   lines become `<p>&#8203;</p>` (zero-width space preserves the line).
