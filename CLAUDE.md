@@ -109,9 +109,25 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   否则只是白渲染一堆永远不显示的节点。
   实测(lily2026new):两组共 54 个变体元素、42 个隐藏、12 个可见,
   连点箭头可遍历全部 4 个变体,另一组不受影响。
-- **`data-node-id` 要覆盖到 TEXT**:所有会产出元素的类型都要带,漏一个就会让
-  `bind_data` 的 `target` 定位不到那个节点。TEXT 的 `wrapOpen` 曾经漏掉,
-  表现为"文字内容在、但按节点 id 查不到"。属性一律排在 `style` **之后**。
+- **插入媒体:用 `insert_video`,不要让 AI 改写 HTML**(`videos.json` + `videoElement`)。
+  工具集原来只有改文字/改样式/词云/数据绑定,想让 AI 塞一个 `<video>` 只能整体改写
+  HTML —— 而首页动辄 600+ 节点,**`read_file` 会截断**,凭半份内容写回会把后半页
+  整段弄丢。正确做法是加一个声明式工具,把「插视频」变成一条覆盖层记录,由构建落笔:
+  - `insert_video({slug, nodeId, src, poster?, fit?, controls?, autoplay?, loop?, muted?})`
+    把**某个已存在的节点整体换成** `<video>`,位置尺寸沿用该节点(`videoElement` 复用
+    `nodeStyle`,所以 CENTER/SCALE 的定位规则自动一致);
+  - `videos.json` 和其它覆盖层一样只由 `ai.mjs` 写,`build.mjs` 只读;
+  - 视频文件放进输出目录即可 —— `collectDeployFiles` 递归上传整个目录,不需要额外通道;
+  - `src` 支持输出目录内的相对路径或 http(s) 直链;本地文件**必须存在**,否则页面上
+    是个静默 404 的空白播放器;
+  - `autoplay` 会自动加 `muted`(浏览器一律拦截带声音的自动播放),并在返回值里说明;
+  - 元素上**不能**残留原节点的填充(`background-*`/`border`),否则会画在视频后面。
+- **`read_page_text` 只列「会被渲染」的节点**(`collectAll` 而非 `nodeById`)。发布数据
+  里有一大块**组件定义区的原件**:它们在 `nodeById` 里有坐标、看着完全正常,却
+  **永远不会出现在页面上**。把整张表列给模型,它挑中幽灵节点后
+  `edit_text` / `insert_video` 都"成功"了却什么都没发生 —— 用户看到的是
+  "AI 说改了但页面没变"。`insert_video` 另外再校验一次可达性,并在拒绝时列出
+  页面上真正可用的矩形。
 - **Text**: `font-family` uses **single quotes** (`'Inter', system-ui, sans-serif`).
   The whole style attr is double-quoted, so a double quote inside `font-family`
   breaks the attribute and **silently drops every inline style** on that element.

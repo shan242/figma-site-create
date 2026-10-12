@@ -14,10 +14,10 @@
 // generated files; edits are gated behind a human confirmation unless
 // autoApply is on. There is no shell access.
 
-import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname, sep, join, basename } from "node:path";
 import { buildSite } from "./build.mjs";
-import { findCanvas, hexToColor, expandInstances } from "./lib.mjs";
+import { findCanvas, hexToColor, expandInstances, collectAll } from "./lib.mjs";
 import { extractKeywordsLocal } from "./wordcloud.mjs";
 
 // --- 图片理解 ------------------------------------------------------------------
@@ -71,6 +71,13 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
   · 只支持 JPEG/PNG/GIF/WebP,单张 ≤32MB;SVG 这类矢量只能当文本读源码,无法"看图"。
   · 只看大概用 detail:'low'(快、省 token);要看细节用 detail:'original'。
   · 若 view_image 报错说模型不支持图片,说明当前模型不是多模态的,需在设置里换一个多模态模型(deepseek-v4-flash 或 deepseek-flash)。
+- 插入视频:调用 insert_video(slug, nodeId, src, ...)。把某个已存在的节点**整体换成** <video>,位置尺寸沿用该节点 —— 所以挑一个占位矩形即可,**不要**用 write_file 去改 HTML(首页动辄 600+ 节点,read_file 会截断,凭半份内容写回会把后半页整段弄丢)。
+  · src 填输出目录内的视频路径(如 assets/clip.mp4)或 http(s) 直链;本地文件必须真实存在,找不到时工具会列出目录里的媒体文件。
+  · 视频文件放进输出目录就会被发布(发布是整个目录递归上传),不需要额外操作。
+  · 可选:poster(封面图)、fit(cover/contain/fill)、controls、autoplay、loop、muted。
+  · autoplay 会自动加 muted —— 浏览器一律拦截带声音的自动播放,这不是 bug。
+  · 想插在空白处:让用户先在 Figma 里画一个矩形占位,或挑一个现有矩形节点。
+  · 删除用 delete_video(id 或 nodeId),该节点恢复原本渲染。
 - 修改页面文本:调用 edit_text(slug, nodeId, 以及 text/fontSize/fontWeight/color 中至少一个)。nodeId 来自 read_page_text 返回的 all 列表中 type=TEXT 的节点;color 用 #RRGGBB。持久保存,重新生成后仍在。
 - 修改任意节点(文本/图片/矩形)的样式:调用 edit_node(slug, nodeId, style)。style 是原始 CSS 属性对象,如 {color:'#ff0000','font-size':'24px'};nodeId 来自 read_page_text 的 all 列表。持久保存,重新生成后仍在。
 - 全站全局样式:调用 append_css(css),会追加到 styles.css 末尾,作用于所有页面。
@@ -442,6 +449,8 @@ function summarize(name, result) {
   if (name === "read_page_text") return `${result?.slug ?? ""} 页面文本 ${result?.text?.length ?? 0} 字符`;
   if (name === "list_images") return `${result?.count ?? 0} 张图片`;
   if (name === "view_image") return result?.error ? result.error : `已把图片交给模型查看: ${result?.label ?? ""}`;
+  if (name === "insert_video") return result?.error ? result.error : `已插入视频到 ${result?.nodeId ?? ""} (${result?.box ?? ""})`;
+  if (name === "delete_video") return result?.error ? result.error : `已删除视频 ${result?.id ?? ""}`;
   if (name === "read_file") return `已读 ${result?.path ?? ""}`;
   if (name === "write_file") return `已写入 ${result?.path ?? ""}`;
   if (name === "apply_wordcloud") return `词云 ${result?.wordCount ?? 0} 词 → ${result?.slug ?? ""}`;
@@ -465,7 +474,7 @@ function summarize(name, result) {
 // them corrupts the build or bypasses the dedicated overlay tools. Everything
 // else under the out dir (generated *.html, styles.css, data/**, aux files) is
 // writable.
-const WRITE_DENY = ["manifest.json", "wordclouds.json", "databinds.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"];
+const WRITE_DENY = ["manifest.json", "wordclouds.json", "databinds.json", "videos.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"];
 
 export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   const root = resolve(outDir);
@@ -531,6 +540,47 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     const file = resolve(root, "databinds.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
+  };
+
+  // 插入的视频(insert_video)。和别的覆盖层一样:ai.mjs 写,build.mjs 只读。
+  const loadVideos = () => {
+    try {
+      const d = JSON.parse(readFileSync(resolve(root, "videos.json"), "utf8"));
+      return Array.isArray(d?.items) ? d.items : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveVideos = (items) => {
+    const file = resolve(root, "videos.json");
+    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
+    renameSync(`${file}.tmp`, file);
+  };
+
+  // 输出目录里的媒体文件 —— 用户说"视频放在文件夹里"时,AI 需要知道文件叫什么。
+  // 没有「列目录」工具,所以由 insert_video 在找不到 src 时把它列出来。
+  const MEDIA_EXT = new Set([".mp4", ".webm", ".ogv", ".mov", ".m4v", ".avi", ".mkv"]);
+  const listMediaFiles = (dir = root, prefix = "", depth = 0) => {
+    if (depth > 2) return [];
+    const found = [];
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    for (const e of entries) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        // node_modules 之类不可能有用户的视频,别白翻
+        if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+        found.push(...listMediaFiles(resolve(dir, e.name), rel, depth + 1));
+      } else if (MEDIA_EXT.has(e.name.toLowerCase().slice(e.name.lastIndexOf(".")))) {
+        found.push(rel);
+      }
+    }
+    return found;
   };
 
   const loadEdits = () => {
@@ -618,12 +668,17 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       const canvas = findCanvas(data);
       const cb = canvas?.absoluteBoundingBox;
       const truncated = text.length > 20000 ? `${text.slice(0, 20000)}\n…(truncated)` : text;
-      // Node ids for edit_text/edit_node targeting: every node with position
-      // and type, TEXT nodes carrying a short snippet. Bounded so the reply
-      // stays small; the model picks a nodeId from here rather than inventing
-      // one.
+      // Node ids for edit_text/edit_node/insert_video targeting: every node with
+      // position and type, TEXT nodes carrying a short snippet. Bounded so the
+      // reply stays small; the model picks a nodeId from here rather than
+      // inventing one.
+      //
+      // **只列真正会被渲染的节点**(从 roots 可达)。发布数据里还有一大块组件定义区
+      // 的原件:它们在 nodeById 里、有坐标、看着完全正常,但**永远不会出现在页面上**。
+      // 之前把整张表都列给模型,它挑中幽灵节点后 edit_text / insert_video 都"成功"了
+      // 却什么都没发生 —— 用户看到的是"AI 说改了但页面没变"。
       const all = [];
-      for (const n of Object.values(data.nodeById || {})) {
+      for (const n of collectAll(data)) {
         const bb = n.absoluteBoundingBox;
         const entry = { id: n.id, type: n.type, x: Math.round(bb?.x ?? 0), y: Math.round(bb?.y ?? 0), w: Math.round(bb?.width ?? 0), h: Math.round(bb?.height ?? 0) };
         if (n.type === "TEXT" && n.characters) entry.text = n.characters.length > 40 ? `${n.characters.slice(0, 40)}…` : n.characters;
@@ -886,6 +941,105 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       }
       saveDatabinds(items.filter((i) => i.id !== id));
       return { id, slug: hit.slug };
+    },
+
+    // 往页面里放一个视频。做法:把某个已存在的节点(nodeId)整体换成 <video>,
+    // 位置尺寸沿用该节点 —— 所以 AI 只要挑一个占位矩形即可,不必改 HTML。
+    // 这是之前缺失的能力:工具集里没有「插入媒体」,想让 AI 塞视频只能整体改写
+    // HTML,而首页 600+ 节点、read_file 会截断,凭半份内容写回会把后半页弄丢。
+    async insert_video({ id, slug, nodeId, src, poster, fit, controls, autoplay, loop, muted }) {
+      const page = loadPages().find((p) => p.slug === slug);
+      if (!page) return { error: `没有这个页面: ${slug}` };
+      const { data } = pageTextOf(slug);
+      const node = data.nodeById?.[nodeId];
+      if (!node) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
+      // 必须选**会被渲染**的节点:发布数据里有一大块组件定义区的原件,位置尺寸都正常
+      // 但永远不出现在页面上。插到那种节点上会"成功"却什么也看不见。
+      const renderable = new Set(collectAll(data).map((n) => n.id));
+      if (!renderable.has(nodeId)) {
+        const cands = collectAll(data)
+          .filter((n) => (n.type === "RECTANGLE" || n.type === "FRAME" || n.type === "IMAGE") && (n.absoluteBoundingBox?.width ?? 0) > 80)
+          .slice(0, 6)
+          .map((n) => `${n.id}(${n.type} ${Math.round(n.absoluteBoundingBox.width)}x${Math.round(n.absoluteBoundingBox.height)})`);
+        return {
+          error: `节点 ${nodeId} 不在页面上(它是组件定义区的原件,永远不会被渲染),换一个`,
+          ...(cands.length ? { hint: `页面上的可用矩形: ${cands.join(", ")}` } : {}),
+        };
+      }
+      if (!src) return { error: "需要 src:输出目录里的视频文件路径(如 assets/clip.mp4),或一个 http(s) 直链" };
+
+      // 外部直链直接用;本地文件必须真的存在 —— 否则页面上是个静默 404 的空白播放器
+      let useSrc = String(src).trim();
+      if (!/^https?:\/\//i.test(useSrc)) {
+        let p;
+        try {
+          p = resolveInDir(useSrc);
+        } catch (e) {
+          return { error: e.message };
+        }
+        if (!existsSync(p)) {
+          const media = listMediaFiles();
+          return {
+            error: `找不到视频文件: ${useSrc}`,
+            ...(media.length ? { hint: `输出目录里的媒体文件: ${media.slice(0, 12).join(", ")}` } : { hint: "输出目录里没有找到任何视频文件,请先把视频放进去" }),
+          };
+        }
+        useSrc = useSrc.replace(/\\/g, "/").replace(/^\.\//, "");
+      }
+
+      let usePoster = null;
+      if (poster) {
+        usePoster = String(poster).trim();
+        if (!/^https?:\/\//i.test(usePoster)) {
+          let pp;
+          try {
+            pp = resolveInDir(usePoster);
+          } catch (e) {
+            return { error: e.message };
+          }
+          if (!existsSync(pp)) return { error: `找不到封面图: ${usePoster}` };
+          usePoster = usePoster.replace(/\\/g, "/").replace(/^\.\//, "");
+        }
+      }
+
+      const newId = id || `vid-${Date.now().toString(36)}`;
+      const spec = {
+        id: newId,
+        slug,
+        nodeId,
+        src: useSrc,
+        poster: usePoster,
+        fit: fit === "contain" || fit === "fill" ? fit : "cover",
+        controls: controls !== false,
+        autoplay: !!autoplay,
+        loop: !!loop,
+        muted: muted !== false,
+      };
+      if (!(await confirm({ kind: "video", payload: spec }))) return { error: "用户拒绝了插入视频" };
+      const kept = loadVideos().filter((i) => i.id !== newId && i.nodeId !== nodeId);
+      kept.push({ ...spec, createdAt: new Date().toISOString() });
+      saveVideos(kept);
+      const bb = node.absoluteBoundingBox || {};
+      return {
+        id: newId,
+        slug,
+        nodeId,
+        src: useSrc,
+        box: `${Math.round(bb.width ?? 0)}x${Math.round(bb.height ?? 0)}`,
+        autoplay: spec.autoplay,
+        note: spec.autoplay && !muted ? "已自动加 muted:浏览器会拦截带声音的自动播放" : undefined,
+      };
+    },
+
+    async delete_video({ id }) {
+      const items = loadVideos();
+      const hit = items.find((i) => i.id === id || i.nodeId === id);
+      if (!hit) return { error: `没有这个视频 id: ${id}` };
+      if (!(await confirm({ kind: "video", payload: { id: hit.id, slug: hit.slug, delete: true } }))) {
+        return { error: "用户拒绝了删除" };
+      }
+      saveVideos(items.filter((i) => i.id !== hit.id));
+      return { id: hit.id, slug: hit.slug, nodeId: hit.nodeId };
     },
 
     async edit_text({ id, slug, nodeId, text, fontSize, fontWeight, color }) {
@@ -1204,6 +1358,41 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         name: "delete_databind",
         description: "删除一个数据绑定(按 id)。会请求用户确认",
         parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "insert_video",
+        description:
+          "往页面里插入视频:把某个已存在的节点(nodeId)整体换成 <video>,位置和尺寸沿用该节点。" +
+          "src 填输出目录里的视频文件路径(如 assets/clip.mp4),或一个 http(s) 直链;本地文件必须真实存在。" +
+          "视频文件放进输出目录即可,发布时会一起上传。" +
+          "想插到空白处就先让用户画一个占位矩形,或挑一个现有矩形节点。会请求用户确认",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "可选,自定义 id;不填自动生成" },
+            slug: { type: "string", description: "页面 slug" },
+            nodeId: { type: "string", description: "要被替换成视频的节点 id,来自 read_page_text 的 all 列表" },
+            src: { type: "string", description: "视频路径(输出目录内)或 http(s) 直链" },
+            poster: { type: "string", description: "可选封面图,播放前显示" },
+            fit: { type: "string", enum: ["cover", "contain", "fill"], description: "视频如何填满节点框,默认 cover(裁切铺满)" },
+            controls: { type: "boolean", description: "是否显示播放控件,默认 true" },
+            autoplay: { type: "boolean", description: "自动播放(会自动加 muted,否则浏览器拦截)" },
+            loop: { type: "boolean", description: "循环播放" },
+            muted: { type: "boolean", description: "静音,默认 true" },
+          },
+          required: ["slug", "nodeId", "src"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "delete_video",
+        description: "删除一个已插入的视频(按 id 或 nodeId),该节点恢复原本的渲染。会请求用户确认",
+        parameters: { type: "object", properties: { id: { type: "string", description: "视频 id 或 nodeId" } }, required: ["id"] },
       },
     },
     {

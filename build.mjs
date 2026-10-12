@@ -7,7 +7,7 @@
 // lib.mjs; this file decides fonts + page wiring.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { join, basename, resolve, sep } from "node:path";
-import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime } from "./lib.mjs";
+import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime, videoElement } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
 import { databindInjection, databindHead } from "./databind.mjs";
 import { httpFetch } from "./netfetch.mjs";
@@ -22,6 +22,8 @@ let WORDCLOUDS = [];
 // 后端。同样只读;后端地址来自 --data-api 或 REPLICA_DATA_API,空则不注入。
 let DATABINDS = [];
 let DATA_API = "";
+// AI 插入的视频(insert_video):每条记录把某个节点换成 <video>。同样只读。
+let VIDEOS = [];
 // Text/style edits persisted by the AI chat tool (edit_text). Same read-only
 // contract: ai.mjs owns the write, the build just applies the overlay.
 let EDITS = [];
@@ -42,6 +44,8 @@ const readEdits = (dir) => readItems(join(dir, "edits.json"));
 const readNodeStyles = (dir) => readItems(join(dir, "nodeStyles.json"));
 const readOverrides = (dir) => readItems(join(dir, "overrides.json"));
 const readDatabinds = (dir) => readItems(join(dir, "databinds.json"));
+// AI 插入的视频(insert_video):一条记录 = 把某个节点换成 <video>。
+const readVideos = (dir) => readItems(join(dir, "videos.json"));
 
 // Files the AI locked via write_file survive a rebuild by being re-applied
 // after the build regenerates them. file-locks.json is owned by ai.mjs; the
@@ -254,12 +258,22 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
     parentOf,
     edits: new Map(EDITS.filter((e) => e.slug === page.slug).map((e) => [e.nodeId, e])),
     nodeStyles: new Map(NODE_STYLES.filter((s) => s.slug === page.slug).map((s) => [s.nodeId, s.style])),
+    // insert_video:nodeId -> 视频记录。命中的节点由 videoElement 接管,
+    // 不再走普通渲染(否则底色会画在视频后面)。
+    videos: new Map(VIDEOS.filter((v) => v.slug === page.slug).map((v) => [v.nodeId, v])),
     // Scroll frames render their subtree themselves; the flat loop must not
     // render those children a second time at canvas level.
     handled: new Set(),
   };
   for (const n of all) {
     if (n === canvas || ctx.handled.has(n.id)) continue;
+    // 插了视频的节点:交给 videoElement,不再普通渲染。先于 renderNode 判断,
+    // 因为 renderNode 会接管 ctx.handled 之外的一切。
+    const vid = ctx.videos.get(n.id);
+    if (vid) {
+      out.push(videoElement(n, cb, ctx, vid));
+      continue;
+    }
     renderNode(n, nodes, cb, out, ctx);
   }
 
@@ -335,6 +349,7 @@ export async function buildSite(outDirParam, opts = {}) {
   fontDir = join(outDir, "fonts");
   WORDCLOUDS = readWordClouds(outDir);
   DATABINDS = readDatabinds(outDir);
+  VIDEOS = readVideos(outDir);
   // 后端地址:显式参数优先,其次环境变量。空 = 数据功能关闭(纯静态,与以前一致)。
   DATA_API = String(opts.dataApi ?? process.env.REPLICA_DATA_API ?? "").trim().replace(/\/+$/, "");
   EDITS = readEdits(outDir);
@@ -377,6 +392,8 @@ body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
    文本节点靠内联 display:flex 排版,直接改 style.display 会把排版弄散。 */
 [data-swap-off] { display: none !important; }
 [data-swap-to] { cursor: pointer; }
+/* AI 插入的视频。定位与尺寸走内联样式(和节点一致),这里只兜底外观。 */
+.replica-video { background: #000; }
 `;
   const extraCss = await selfHostedCss(selfHost);
   // AI global CSS (append_css) goes last so its rules take precedence over the

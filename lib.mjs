@@ -815,9 +815,46 @@ export function cssText(obj) {
     .join("; ");
 }
 
-export function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+// AI 插入的视频(insert_video):把 <video> 摆在节点原本的位置与尺寸上,替换掉该
+// 节点原本的渲染。视频文件放进输出目录即可 —— 发布时 collectDeployFiles 会把整个
+// 目录递归传上去,所以不需要额外的上传通道。
+//
+// 为什么要有这个:工具集原本只有「改文字 / 改样式 / 词云 / 数据绑定」,想让 AI 塞进
+// 一个 <video> 只能让 it 用 write_file 整体改写 HTML —— 而首页动辄 600+ 节点、
+// read_file 会截断,凭半份内容写回会把后半页整段弄丢。所以正确做法是加一个声明式
+// 工具,把「插视频」变成一条覆盖层记录,由构建来落笔。
+export function videoElement(node, canvas, ctx, spec) {
+  const assetUrl = makeAssetUrl(ctx.assetDir);
+  // 与 renderNode 同样的定位规则(CENTER 约束或居中祖先 → calc(50% ± off))
+  const centered = node.constraints?.horizontal === "SCALE" ? false : hasCenteredAncestor(node, ctx.parentOf);
+  const st = nodeStyle(node, canvas, ctx.fontStack, assetUrl, centered);
+  const overlay = ctx.nodeStyles?.get(node.id);
+  if (overlay) Object.assign(st, overlay);
+  // 节点原本的填充/描边不该画在视频后面 —— 视频自己就是内容
+  for (const k of ["background-image", "background-size", "background-position", "background-repeat", "background-color", "border"]) {
+    delete st[k];
+  }
+  // 节点自身的 opacity 保留(那是设计意图);但 fill 的透明度是 nodeStyle 为了
+  // 图像填充才塞进 opacity 的,这里要还原成节点自己的值。
+  if (node.opacity !== undefined && node.opacity < 1) st.opacity = node.opacity;
+  else delete st.opacity;
+  if (!st["border-radius"] && node.cornerRadius) st["border-radius"] = `${node.cornerRadius}px`;
+  st["object-fit"] = spec.fit === "contain" ? "contain" : spec.fit === "fill" ? "fill" : "cover";
+  st["display"] = "block";
+
+  const flag = (k) => (spec[k] ? ` ${k}` : "");
+  // autoplay 必须配 muted:浏览器一律拦截带声音的自动播放。
+  const autoplay = !!spec.autoplay;
+  const muted = autoplay || spec.muted !== false ? " muted" : "";
+  const attrs =
+    // controls 默认开:一个没法播放的视频不是好默认值。insert_video 也会显式存这个值。
+    `${spec.controls === false ? "" : " controls"}${autoplay ? " autoplay" : ""}${muted}${flag("loop")} playsinline preload="metadata"` +
+    (spec.poster ? ` poster="${escapeHtml(String(spec.poster))}"` : "");
+  return `  <video class="replica-video" src="${escapeHtml(String(spec.src))}"${attrs} style="${cssText(st)}" data-node-id="${node.id}" data-video-id="${escapeHtml(String(spec.id || ""))}"></video>`;
 }
+
+export function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");}
 
 export function collectNodes(id, nodes, acc) {
   const n = nodes[id];

@@ -6,7 +6,77 @@
 // 一个子节点都取不到。这里的用例把这个还原逻辑钉死。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss } from "./lib.mjs";
+import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement } from "./lib.mjs";
+
+// --- 插入视频(videoElement) --------------------------------------------------
+// 把某个节点整体换成 <video>,位置尺寸沿用该节点。之前工具集里没有「插入媒体」,
+// 想让 AI 塞视频只能整体改写 HTML —— 首页 600+ 节点、read_file 会截断,
+// 凭半份内容写回会把后半页弄丢。
+
+const vctx = () => ({ assetDir: "D:/out/assets", fontStack: (f) => `'${f}', sans-serif`, parentOf: new Map(), nodeStyles: new Map() });
+const vcanvas = { x: 0, y: 0, width: 1440, height: 19200 };
+const vnode = (extra = {}) => ({
+  id: "2:178",
+  type: "RECTANGLE",
+  name: "clip",
+  absoluteBoundingBox: { x: 100, y: 200, width: 640, height: 360 },
+  constraints: { horizontal: "CENTER" },
+  fills: [{ type: "SOLID", visible: true, opacity: 0.5, color: { r: 1, g: 1, b: 1, a: 1 } }],
+  ...extra,
+});
+
+test("videoElement:沿用节点的定位与尺寸", () => {
+  const html = videoElement(vnode(), vcanvas, vctx(), { id: "v1", src: "assets/clip.mp4" });
+  assert.match(html, /^ {2}<video /, "和其它元素一样两空格缩进");
+  assert.match(html, /top: 200px/);
+  assert.match(html, /width: 640px/);
+  assert.match(html, /height: 360px/);
+  // CENTER 约束 → calc(50% ± off),和普通节点同一套规则
+  assert.match(html, /left: calc\(50% - 620px\)/);
+  assert.match(html, /data-node-id="2:178"/);
+});
+
+test("videoElement:不再画出原节点的填充", () => {
+  const html = videoElement(vnode(), vcanvas, vctx(), { id: "v1", src: "a.mp4" });
+  assert.equal(/background-color/.test(html), false, "原节点的纯色填充不该画在视频后面");
+  assert.equal(/background-image/.test(html), false);
+  // fill 的透明度是 nodeStyle 为图像填充塞进 opacity 的,视频不该继承
+  assert.equal(/opacity:/.test(html), false, "不该带上填充的透明度");
+});
+
+test("videoElement:节点自身的 opacity 仍然保留", () => {
+  const html = videoElement(vnode({ opacity: 0.4 }), vcanvas, vctx(), { id: "v1", src: "a.mp4" });
+  assert.match(html, /opacity: 0.4/, "节点自己的透明度是设计意图");
+});
+
+test("videoElement:autoplay 必须自动配 muted", () => {
+  const auto = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", autoplay: true, muted: false });
+  assert.match(auto, / autoplay/);
+  assert.match(auto, / muted/, "带声音的自动播放会被浏览器拦截");
+  const manual = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", autoplay: false, muted: false });
+  assert.equal(/ autoplay/.test(manual), false);
+  assert.equal(/ muted/.test(manual), false, "不自动播放时 muted:false 应当尊重");
+});
+
+test("videoElement:controls / loop / fit / poster", () => {
+  const plain = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4" });
+  assert.match(plain, / controls/, "默认显示控件");
+  assert.equal(/ loop/.test(plain), false, "默认不循环");
+  assert.match(plain, /object-fit: cover/, "默认 cover");
+  assert.match(plain, /playsinline/);
+
+  const tuned = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", controls: false, loop: true, fit: "contain", poster: "assets/p.jpg" });
+  assert.equal(/ controls/.test(tuned), false);
+  assert.match(tuned, / loop/);
+  assert.match(tuned, /object-fit: contain/);
+  assert.match(tuned, /poster="assets\/p.jpg"/);
+});
+
+test("videoElement:src 会被转义,不能突破属性", () => {
+  const html = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: 'a.mp4" onerror="alert(1)' });
+  assert.equal(html.includes('onerror="alert(1)"'), false, "引号必须被转义");
+  assert.match(html, /&quot;/);
+});
 
 // --- 图像/渐变填充的透明度 ---------------------------------------------------
 // CSS 没有 background-opacity,所以图像填充的透明度只能落在元素 opacity 上。

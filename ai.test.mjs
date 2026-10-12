@@ -187,12 +187,137 @@ function fixture() {
 const allowAll = async () => true;
 const denyAll = async () => false;
 
+// --- 插入视频(insert_video / delete_video) -----------------------------------
+// 起因:工具集里没有「插入媒体」,AI 只能建议用 write_file 整体改写 HTML,
+// 而首页 600+ 节点、read_file 会截断,凭半份内容写回会把后半页整段弄丢。
+
+// fixture + 一个**不可达**的节点(组件定义区的原件:在 nodeById 里、有坐标,
+// 但永远不会被渲染 —— 之前 read_page_text 会把它列给 AI,AI 选中后"操作成功"却毫无效果)
+function videoFixture() {
+  const dir = fixture();
+  const p = join(dir, "data", "index.json");
+  const d = JSON.parse(readFileSync(p, "utf8"));
+  d.nodeById["9:9"] = {
+    id: "9:9",
+    type: "RECTANGLE",
+    name: "ghost",
+    absoluteBoundingBox: { x: 300, y: 300, width: 200, height: 100 },
+  };
+  d.nodeById["1:3"] = {
+    id: "1:3",
+    type: "RECTANGLE",
+    name: "slot",
+    absoluteBoundingBox: { x: 10, y: 200, width: 320, height: 180 },
+  };
+  d.nodeById["1:1"].children.push("1:3");
+  writeFileSync(p, JSON.stringify(d));
+  mkdirSync(join(dir, "assets"), { recursive: true });
+  writeFileSync(join(dir, "assets", "real-clip.mp4"), Buffer.from([0, 0, 0, 0x20]));
+  writeFileSync(join(dir, "assets", "cover.jpg"), Buffer.from([0xff, 0xd8, 0xff]));
+  return dir;
+}
+
+test("insert_video:找不到视频时报错并列出目录里的媒体文件", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/nope.mp4" });
+  assert.ok(r.error, "必须报错");
+  // 没有「列目录」工具,不告诉 AI 文件叫什么它就无从下手
+  assert.match(String(r.hint || ""), /real-clip\.mp4/, "提示里要列出实际存在的媒体文件");
+});
+
+test("insert_video:拒绝组件定义区的幽灵节点", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "9:9", src: "assets/real-clip.mp4" });
+  assert.ok(r.error, "不可达节点必须拒绝 —— 否则插了也永远看不见");
+  assert.match(r.error, /不在页面上|永远不会被渲染/);
+  assert.match(String(r.hint || ""), /1:3/, "应提示页面上可用的矩形");
+});
+
+test("insert_video:正常插入并落盘", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4", poster: "assets/cover.jpg", loop: true });
+  assert.ok(!r.error, `不该报错: ${r.error}`);
+  assert.equal(r.src, "assets/real-clip.mp4");
+  const saved = JSON.parse(readFileSync(join(dir, "videos.json"), "utf8"));
+  assert.equal(saved.items.length, 1);
+  assert.equal(saved.items[0].nodeId, "1:3");
+  assert.equal(saved.items[0].loop, true);
+  assert.equal(saved.items[0].controls, true, "默认显示控件");
+  assert.equal(saved.items[0].muted, true, "默认静音");
+});
+
+test("insert_video:autoplay 会提示自动静音;同一节点重复插入只留一条", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const a = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4", autoplay: true, muted: false });
+  assert.match(String(a.note || ""), /muted/, "要告诉用户自动静音了");
+  await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4" });
+  const saved = JSON.parse(readFileSync(join(dir, "videos.json"), "utf8"));
+  assert.equal(saved.items.filter((i) => i.nodeId === "1:3").length, 1, "同一节点只能有一条");
+});
+
+test("insert_video:缺少参数与非法路径", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  assert.ok((await handlers.insert_video({ slug: "index", nodeId: "1:3" })).error, "缺 src 要报错");
+  assert.ok((await handlers.insert_video({ slug: "nope", nodeId: "1:3", src: "assets/real-clip.mp4" })).error, "页面不存在要报错");
+  assert.ok((await handlers.insert_video({ slug: "index", nodeId: "nope", src: "assets/real-clip.mp4" })).error, "节点不存在要报错");
+  assert.ok((await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "../../outside.mp4" })).error, "路径逃逸要挡住");
+  assert.ok((await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4", poster: "assets/nope.jpg" })).error, "封面不存在要报错");
+});
+
+test("insert_video:http(s) 直链不需要文件存在", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "https://cdn.example.com/a.mp4" });
+  assert.ok(!r.error, `直链应当接受: ${r.error}`);
+  assert.equal(r.src, "https://cdn.example.com/a.mp4");
+});
+
+test("insert_video:用户拒绝时不落盘", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: denyAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4" });
+  assert.ok(r.error);
+  assert.equal(existsSync(join(dir, "videos.json")), false, "拒绝后不该写文件");
+});
+
+test("delete_video:按 id 或 nodeId 都能删", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4" });
+  assert.ok((await handlers.delete_video({ id: r.id })).id, "按 id 删");
+  const r2 = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4" });
+  const byNode = await handlers.delete_video({ id: "1:3" });
+  assert.equal(byNode.id, r2.id, "按 nodeId 也要能删");
+  assert.equal(JSON.parse(readFileSync(join(dir, "videos.json"), "utf8")).items.length, 0);
+  assert.ok((await handlers.delete_video({ id: "nope" })).error);
+});
+
+test("视频:read_page_text 不再把不可达的节点列给 AI", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.read_page_text({ slug: "index" });
+  const ids = r.all.map((n) => n.id);
+  assert.ok(ids.includes("1:3"), "可达节点要在列表里");
+  assert.equal(ids.includes("9:9"), false, "组件定义区的幽灵节点不能列出来 —— AI 选了它只会白忙");
+});
+
+test("videos.json 在 write_file 的禁写名单里", async () => {
+  const dir = videoFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.write_file({ path: "videos.json", content: "{}" });
+  assert.ok(r.error, "必须拒绝直接改写 videos.json");
+});
+
 test("tools reject path traversal", async () => {
   const dir = fixture();
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   const r = await handlers.write_file({ path: "../escape.txt", content: "x" });
-  assert.ok(r.error, "traversal must be blocked");
-});
+  assert.ok(r.error, "traversal must be blocked");});
 
 test("write_file refuses metadata / overlay files", async () => {
   const dir = fixture();
