@@ -11,8 +11,10 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, net } = require("electron");
 const path = require("path");
 const { writeFileSync, readFileSync, renameSync, existsSync } = require("fs");
-const { applyConfigPatch } = require("./config-merge.cjs");
-const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch } = require("./worker.cjs");
+// applyConfigPatch 从 worker.cjs 拿(它由 esbuild 打进同一个产物)。
+// 不要 require("./config-merge.cjs"):electron-builder 的 files 是白名单,
+// 单独的 .cjs 不在名单里就不会进 asar —— 本地测试全过,装到用户机器上启动即崩。
+const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch, applyConfigPatch } = require("./worker.cjs");
 
 let win = null;
 let chatRunning = false;

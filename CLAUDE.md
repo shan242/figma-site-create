@@ -457,6 +457,17 @@ worth remembering:
 The macOS job verifies the result with `lipo -archs`, so a silent fallback to the
 host architecture fails the build instead of shipping the wrong binary.
 
+**打包白名单是个陷阱**:`build.files` 是**白名单**,`main.js` / `preload.js` 里
+`require` 的本地模块若不在名单里就**不会进 asar** —— 本地测试全绿、CI 构建也 success,
+用户装上一启动就是 `A JavaScript error occurred in the main process:
+Cannot find module './config-merge.cjs'`。实际踩过(`config-merge.cjs`)。
+两条规则:
+- 新增的运行时辅助模块**优先并进 `worker.cjs`**(esbuild bundle,单产物),
+  而不是让 `main.js` require 一个单独的 `.cjs`;
+- `electron/packaging.test.cjs` 会把 `main.js`/`preload.js` 的本地 require 与白名单
+  对一遍,并核对 `worker.cjs` 是否导出了 `main.js` 解构的全部名字 ——
+  漏文件在本地就暴露,不用等用户装完。
+
 **Artifacts are unsigned** (`CSC_IDENTITY_AUTO_DISCOVERY: "false"`), so the CI log
 shows `skipped macOS application code signing`. Consequences: Windows shows a
 SmartScreen warning, and macOS reports the app as damaged on first launch — the user
