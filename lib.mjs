@@ -240,29 +240,44 @@ export function nodeStyle(node, canvas, fontStackFn, assetUrl, centered) {
 }
 
 // Split a text node into style runs based on characterStyleOverrides (rich
-// text). Each run is a contiguous char range sharing the same override
-// weight/size; null weight/size means "inherit the node's base style".
+// text). Each run is a contiguous char range sharing the same override style;
+// null fields mean "inherit the node's base style".
+//
+// ⚠️ 这里以前**只取 weight 和 size**,把 override 里的 `fontFamily` 和
+// `lineHeightPx` 丢掉了。后果不是"字体不太对"这么轻:富文本里 20px Actor(行高 28px)
+// 的段落会退回节点的基准 25px Abril Fatface(行高 normal ≈ 33.7px),**每行高出
+// 5.7px**;一段 7 行的正文就是 231px vs 线上的 196px,整个文本块超出容器 76px,
+// 用 `overflow: visible` 压到下面的内容上 —— 用户看到的就是"文字重行"。
 export function textRuns(node) {
   const chars = node.characters || "";
   const overrides = node.characterStyleOverrides || [];
   const table = node.styleOverrideTable || {};
+  // 一条 run 的完整样式。只有 lineHeightUnit === "PIXELS" 才是真的固定行高;
+  // INTRINSIC_% 交给字体自身的 normal(线上的行为也是如此)。
+  const shape = (o) => {
+    if (!o) return { weight: null, size: null, family: null, lineHeight: null, italic: false };
+    return {
+      weight: fontStyleToWeight(o.fontStyle),
+      size: o.fontSize || null,
+      family: o.fontFamily || null,
+      lineHeight: o.lineHeightUnit === "PIXELS" && o.lineHeightPx ? o.lineHeightPx : null,
+      italic: !!o.italic,
+    };
+  };
+  const key = (s) => [s.weight, s.size, s.family, s.lineHeight, s.italic].join("|");
   const runs = [];
   let i = 0;
   while (i < chars.length) {
     const oid = overrides[i] || 0;
-    const o = oid ? table[String(oid)] : null;
-    const weight = o ? fontStyleToWeight(o.fontStyle) : null;
-    const size = o && o.fontSize ? o.fontSize : null;
+    const st = shape(oid ? table[String(oid)] : null);
+    const k = key(st);
     let j = i + 1;
     while (j < chars.length) {
       const oid2 = overrides[j] || 0;
-      const o2 = oid2 ? table[String(oid2)] : null;
-      const w2 = o2 ? fontStyleToWeight(o2.fontStyle) : null;
-      const s2 = o2 && o2.fontSize ? o2.fontSize : null;
-      if (w2 !== weight || s2 !== size) break;
+      if (key(shape(oid2 ? table[String(oid2)] : null)) !== k) break;
       j++;
     }
-    runs.push({ start: i, end: j, weight, size });
+    runs.push({ start: i, end: j, ...st });
     i = j;
   }
   return { chars, runs };
@@ -784,32 +799,59 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     const wrapClose = href ? "</a>" : "</div>";
     // The live site splits multi-paragraph text into stacked <p> blocks with
     // no inter-paragraph gap; blank lines are preserved as <p>&#8203;</p>.
-    // characterStyleOverrides mark spans with a different weight/size — those
-    // become inline <span> overrides.
+    // characterStyleOverrides mark spans with a different family/size/weight/
+    // line-height — those become inline <span> overrides.
     const { chars, runs } = textRuns(eff);
-    if (!chars.includes("\n") && !runs.some((r) => r.weight || r.size)) {
+    // 单行且没有任何富文本覆盖时才走这条捷径:否则必须拆成 <p>,因为
+    // 字体/行高要落在块级元素上才能正确影响行盒高度。
+    const plain = runs.every((r) => !r.weight && !r.size && !r.family && !r.lineHeight && !r.italic);
+    if (!chars.includes("\n") && plain) {
       out.push(`${wrapOpen}${escapeHtml(chars)}${wrapClose}`);
       return;
     }
     const lines = chars.split("\n");
+    // 一条 run 的 CSS 声明。`line-height` 必须落在 <p> 上 —— 行盒高度由块级元素的
+    // strut 决定,只写在 <span> 上的话,基准字体的行高仍会把行撑高,富文本的
+    // 28px 行高就白设了(这正是文本溢出容器的原因)。
+    const decls = (r, opts = {}) => {
+      const out = [];
+      const family = opts.noFamily ? null : r?.family;
+      if (family) out.push(`font-family: ${fontStack ? fontStack(family) : `'${family}', system-ui, sans-serif`}`);
+      if (r?.size) out.push(`font-size: ${r.size}px`);
+      if (r?.weight) out.push(`font-weight: ${r.weight}`);
+      if (r?.italic) out.push("font-style: italic");
+      const lh = !opts.normalLineHeight && r?.lineHeight ? `${r.lineHeight}px` : "normal";
+      out.push(`line-height: ${lh}`);
+      return out.join("; ");
+    };
+    // 落在某个字符位置上的 run(空行也要用,见下)
+    const runAt = (pos) => runs.find((r) => pos >= r.start && pos < r.end) || null;
     let offset = 0;
     const paras = lines.map((line) => {
       const lineStart = offset;
       offset += line.length + 1;
-      const base = `<p style="display: block; white-space: pre-wrap; line-height: normal; margin: 0">`;
-      if (line.trim().length === 0) return `${base}&#8203;</p>`;
+      if (line.trim().length === 0) {
+        // 空行**只继承所在 run 的字号**,字族仍用节点的基准字体,行高用 normal。
+        // 实测线上:"About Kulangsu" 之后是 33px(normal@25 Abril Fatface),
+        // 20px Actor 正文之间的空行是 27px(= normal@20 **Abril Fatface**,
+        // 不是 Actor 的 24px,也不是 run 的 28px 固定行高)。
+        return `<p style="display: block; white-space: pre-wrap; ${decls(runAt(lineStart), { noFamily: true, normalLineHeight: true })}; margin: 0">&#8203;</p>`;
+      }
       const overlap = runs.filter((r) => r.end > lineStart && r.start < lineStart + line.length);
-      if (!overlap.some((r) => r.weight || r.size)) return `${base}${escapeHtml(line)}</p>`;
+      // 行首那条 run 决定整段的字体/字号/行高(线上就是这么排的)
+      const lead = overlap.find((r) => r.start <= lineStart) || overlap[0] || null;
+      const base = `<p style="display: block; white-space: pre-wrap; ${decls(lead)}; margin: 0">`;
+      if (overlap.length <= 1) return `${base}${escapeHtml(line)}</p>`;
+      // 同一行里样式不同的片段才需要 <span> 覆盖
+      const leadKey = lead ? `${lead.family}|${lead.size}|${lead.weight}|${lead.lineHeight}|${lead.italic}` : "";
       let body = "";
       for (const r of overlap) {
         const s = Math.max(r.start, lineStart);
         const e = Math.min(r.end, lineStart + line.length);
         if (e <= s) continue;
         const txt = escapeHtml(line.slice(s - lineStart, e - lineStart));
-        const style = [];
-        if (r.weight) style.push(`font-weight: ${r.weight}`);
-        if (r.size) style.push(`font-size: ${r.size}px`);
-        body += style.length ? `<span style="${style.join("; ")}">${txt}</span>` : txt;
+        const k = `${r.family}|${r.size}|${r.weight}|${r.lineHeight}|${r.italic}`;
+        body += k === leadKey ? txt : `<span style="${decls(r)}">${txt}</span>`;
       }
       return `${base}${body}</p>`;
     });

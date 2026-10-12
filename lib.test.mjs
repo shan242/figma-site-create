@@ -6,7 +6,7 @@
 // 一个子节点都取不到。这里的用例把这个还原逻辑钉死。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement } from "./lib.mjs";
+import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement, textRuns } from "./lib.mjs";
 
 // --- 插入视频(videoElement) --------------------------------------------------
 // 把某个节点整体换成 <video>,位置尺寸沿用该节点。之前工具集里没有「插入媒体」,
@@ -371,7 +371,109 @@ test("SCALE:父级也是(可缩放的)SCALE → 继续缩放", () => {
   assert.match(html, /width: 15\.6250*%/, "200/1280");
 });
 
-test("renderNode 给 TEXT 也带 data-node-id(曾经漏掉,导致定位不到文字)", () => {  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 } };
+// --- 富文本(styleOverrideTable) ---------------------------------------------
+// 起因:用户报「文字重行」。根因是 textRuns 只取 override 里的 weight/size,
+// **丢掉了 fontFamily 和 lineHeightPx** —— 富文本里 20px Actor(行高 28)的段落
+// 退回节点基准 25px Abril Fatface(行高 normal ≈ 33.7px),一段 7 行正文
+// 是 231px vs 线上的 196px,整块超出容器 76px,用 overflow:visible 压到下面的内容上。
+// 数值全部来自与线上 DOM 的逐段对比(creme-zipper index 的 2146:109)。
+
+function richTextNode() {
+  const head = "About Kulangsu";
+  const body = "B".repeat(90);
+  const src = "Source: UNESCO";
+  // 排布:head[0..13] \n[14] \n[15] body[16..105] \n[106] \n[107] src[108..]
+  // 两个空行分别落在基准段之后(override 0)与正文之后(override 479),
+  // 正好覆盖"空行只继承字号"的两条分支。
+  const chars = `${head}\n\n${body}\n\n${src}`;
+  const bodyStart = head.length + 2;
+  const bodyEnd = bodyStart + body.length;
+  const overrides = [...chars].map((_, i) => (i < bodyStart ? 0 : i <= bodyEnd + 1 ? 479 : 483));
+  return {
+    id: "1:1",
+    type: "TEXT",
+    name: "rich",
+    characters: chars,
+    characterStyleOverrides: overrides,
+    styleOverrideTable: {
+      479: { fontSize: 20, fontFamily: "Actor", lineHeightPx: 28, lineHeightUnit: "PIXELS" },
+      483: { fontSize: 16, fontFamily: "Actor" },
+    },
+    absoluteBoundingBox: { x: 0, y: 0, width: 1180, height: 419 },
+    style: { fontFamily: "Abril Fatface", fontSize: 25, lineHeightPx: 33.725, lineHeightUnit: "INTRINSIC_%" },
+    fills: [{ type: "SOLID", visible: true, opacity: 1, color: { r: 0, g: 0, b: 0 } }],
+  };
+}
+
+test("textRuns 带上 override 的 fontFamily 与 lineHeightPx(以前只取 weight/size)", () => {
+  const { runs } = textRuns(richTextNode());
+  assert.equal(runs.length, 3);
+  assert.deepEqual(
+    runs.map((r) => ({ family: r.family, size: r.size, lineHeight: r.lineHeight })),
+    [
+      { family: null, size: null, lineHeight: null }, // 基准段
+      { family: "Actor", size: 20, lineHeight: 28 }, // PIXELS → 取像素行高
+      { family: "Actor", size: 16, lineHeight: null }, // 没有 lineHeightPx → normal
+    ],
+  );
+});
+
+test("textRuns:只有 lineHeightUnit=PIXELS 才当固定行高", () => {
+  const n = richTextNode();
+  n.styleOverrideTable[479].lineHeightUnit = "INTRINSIC_%";
+  const { runs } = textRuns(n);
+  assert.equal(runs[1].lineHeight, null, "百分比行高交给字体自身的 normal");
+  assert.equal(runs[1].family, "Actor", "但字族仍要保留");
+});
+
+test("renderNode:富文本段落的字体/字号/行高必须落在 <p> 上", () => {
+  const node = richTextNode();
+  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1280, height: 800 } };
+  const out = [];
+  renderNode(node, { "1:1": node }, canvas, out, {
+    assetDir: ".",
+    parentOf: new Map(),
+    edits: new Map(),
+    nodeStyles: new Map(),
+    handled: new Set(),
+    fontStack: (f) => `'${f}', sans-serif`,
+  });
+  const html = out.join("\n");
+  // 行盒高度由块级元素的 strut 决定 —— 行高只写在 span 上不起作用
+  const bodyP = html.split("\n").find((l) => l.includes("BBBB"));
+  assert.ok(bodyP, "正文段落要渲染出来");
+  assert.match(bodyP, /font-family: 'Actor'/, "字族要落到 <p>");
+  assert.match(bodyP, /font-size: 20px/);
+  assert.match(bodyP, /line-height: 28px/, "28px 行高必须落在 <p> 上");
+  // 基准段保持节点自身的字体与 normal 行高
+  assert.match(html, /<p style="display: block; white-space: pre-wrap; line-height: normal; margin: 0">About Kulangsu<\/p>/);
+});
+
+test("renderNode:空行只继承 run 的字号,字族与行高都回退", () => {
+  const node = richTextNode();
+  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1280, height: 800 } };
+  const out = [];
+  renderNode(node, { "1:1": node }, canvas, out, {
+    assetDir: ".",
+    parentOf: new Map(),
+    edits: new Map(),
+    nodeStyles: new Map(),
+    handled: new Set(),
+    fontStack: (f) => `'${f}', sans-serif`,
+  });
+  const html = out.join("\n");
+  const blank = html.split("\n").filter((l) => l.includes("&#8203;"));
+  assert.ok(blank.length >= 2, "应有多个空行段落");
+  // 20px Actor 正文之间的空行:线上是 27px(即 normal@20 **Abril Fatface**),
+  // 既不是 Actor 的 24px,也不是 run 的 28px 固定行高。
+  const between = blank.find((l) => l.includes("font-size: 20px"));
+  assert.ok(between, "空行要继承所在 run 的字号");
+  assert.equal(/Actor/.test(between), false, "空行不使用 run 的字族");
+  assert.match(between, /line-height: normal/);
+});
+
+test("renderNode 给 TEXT 也带 data-node-id(曾经漏掉,导致定位不到文字)", () => {
+  const canvas = { id: "0:1", type: "FRAME", absoluteBoundingBox: { x: 0, y: 0, width: 1440, height: 900 } };
   const nodes = {
     "1:1": {
       id: "1:1",

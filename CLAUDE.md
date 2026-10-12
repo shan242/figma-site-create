@@ -153,8 +153,25 @@ These are the non-obvious decisions; don't "fix" them without a live-site compar
   dropped the hero image and the card glass backgrounds. Frames with neither are
   pure layout and render nothing; a non-scroll frame's children are still emitted
   by the flat loop (not nested inside it).
-- **Rich text**: `characterStyleOverrides` + `styleOverrideTable` split a text node
-  into inline `<span style="font-weight:/font-size:">` runs (`textRuns()`).
+- **富文本(run)必须带上 `fontFamily` 与 `lineHeightPx`,而且样式要落在 `<p>` 上**。
+  `characterStyleOverrides`(每字符一个 override id)+ `styleOverrideTable` 描述 run。
+  两个坑,合起来就是用户报的「文字重行」:
+  - `textRuns()` 以前**只取 weight/size**,把 override 的 `fontFamily` 和
+    `lineHeightPx` 丢了。实测(creme-zipper index 的 `2146:109`):富文本里
+    20px Actor(行高 28px)的段落退回节点基准 25px Abril Fatface(行高 normal ≈ 33.7px),
+    **每行高出 5.7px**;一段 7 行正文 231px vs 线上 196px,整块超出容器 **76px**,
+    而元素是 `overflow: visible` —— 压到下面的内容上,看起来就是文字重叠。
+  - **行高必须写在 `<p>` 上**,不能只写在 `<span>` 上:行盒高度由块级元素的 strut
+    决定,基准字体的行高仍会把行撑高,run 的 28px 就白设了。线上也是把
+    `font-family/font-size/line-height` 放在 `<p>` 上。
+  - 只有 `lineHeightUnit === "PIXELS"` 才是真的固定行高;`INTRINSIC_%` 交给
+    `normal`(线上同样如此)。
+  - **空行有单独的规则**:只继承所在 run 的**字号**,字族仍用节点基准,行高 `normal`。
+    实测:正文之后的空行线上是 27px(= normal@20 **Abril Fatface**),
+    既不是 Actor 的 24px,也不是 run 的 28px。
+  修好后逐段与线上完全一致(33/33/196/27/84/27/19 = 419px,与容器严丝合缝),
+  全站扫描的文字溢出数量与线上持平(7 vs 6,本地更少)。
+  **验证这类问题必须逐段对比线上 DOM**:只看"有没有溢出"会漏掉"溢出多少"。
 - **Multi-paragraph text**: split on `\n` into stacked `<p style="display:block;
   white-space:pre-wrap; line-height:normal; margin:0">` blocks with no gap; blank
   lines become `<p>&#8203;</p>` (zero-width space preserves the line).
