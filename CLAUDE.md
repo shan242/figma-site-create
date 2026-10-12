@@ -428,6 +428,21 @@ contains rich-text spans — that's a capture artifact, not a rendering bug.
   was dropped **silently**, so the only symptom was a blank image much later. If a
   scrape reports failures now, re-run before assuming a regression — the same URL
   failing and then succeeding is the observed pattern.
+- **代理/VPN:浏览器能打开 ≠ 程序能拉取**(`netfetch.mjs`)。Node 自带的 `fetch`
+  走 undici,**不读 Windows 的系统代理** —— 系统代理只写在注册表
+  (`HKCU\...\Internet Settings\ProxyServer`),浏览器读它,Node 不读。所以开着
+  VPN(代理模式)时:浏览器能打开 figma.site,**抓取却 10.6 秒 `UND_ERR_CONNECT_TIMEOUT`**;
+  同一时刻经代理只要 883ms。
+  实测过的**无效**方案,别再试:
+  - 运行时设 `NODE_USE_ENV_PROXY` + `HTTPS_PROXY` —— 该变量只在 Node 启动时读取,
+    在已经跑起来的 Electron 进程里设置**完全无效**;
+  - `import("undici")` + `ProxyAgent` —— 开发目录里能 import 只是因为上级目录的
+    dev 依赖,应用是 `dependencies: {}` **零运行时依赖**,打包后拿不到。
+  有效方案:GUI 里把抓取用的 fetch 换成 Electron 的 **`net.fetch`**(走 Chromium
+  网络栈,与浏览器同一套代理解析,含绕过列表)。`netfetch.mjs` 是一层可替换的间接;
+  `main.js` 在 `app.whenReady()` 里注入,注入失败安全回退到全局 fetch。
+  注意:**CLI(`node scrape.mjs`)仍然不走代理** —— 命令行下没有 Electron,
+  这条路径要保持能独立运行;要让 CLI 也支持代理得自己实现 CONNECT 隧道。
 - **Rare node types** (vectors, groups with effects) → skipped by `renderNode`; the
   replica renders what the proven path handles. Extend `lib.mjs`, not `build.mjs`.
 - **New font families** → add to `GOOGLE_FONTS` only if Google Fonts serves them;

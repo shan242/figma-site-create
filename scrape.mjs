@@ -22,6 +22,7 @@
 //   - Assets are served at /_assets/v11/<hash>.<ext>; some .png-named files
 //     are actually JPEG bytes, so extensions are sniffed from magic bytes.
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { httpFetch } from "./netfetch.mjs";
 import { join } from "node:path";
 import { generateDesignReport } from "./design-report.mjs";
 
@@ -58,7 +59,10 @@ function resolveSiteUrl(raw) {
 }
 
 async function get(url, { asText = true } = {}) {
-  const res = await fetch(url, { redirect: "follow" });
+  // httpFetch,不是全局 fetch:在 GUI 里它是 Electron 的 net.fetch,走 Chromium
+  // 网络栈,因此**遵循系统代理**;Node 自己的 fetch 不读注册表里的系统代理,
+  // 于是开着 VPN(代理模式)时浏览器能打开 figma.site、抓取却超时。详见 netfetch.mjs。
+  const res = await httpFetch(url, { redirect: "follow" });
   if (!res.ok) {
     // Attach the status so callers can tell a definitive 4xx (missing file,
     // no point retrying) from a transient 5xx/network error (retry helps).
@@ -98,7 +102,7 @@ async function fetchAsset(url, attempts = 3, timeoutMs = 60000) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetch(url, { redirect: "follow", signal: ctrl.signal });
+      const res = await httpFetch(url, { redirect: "follow", signal: ctrl.signal });
       if (res.status >= 400 && res.status < 500) return null; // 确实不在服务器上
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return Buffer.from(await res.arrayBuffer());

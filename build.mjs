@@ -10,6 +10,7 @@ import { join, basename, resolve, sep } from "node:path";
 import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
 import { databindInjection, databindHead } from "./databind.mjs";
+import { httpFetch } from "./netfetch.mjs";
 
 // Populated inside main() so the packaged CLI can normalize argv first.
 let outDir, manifest, assetDir, fontDir, HAS_CJK;
@@ -183,7 +184,9 @@ async function selfHostedCss(selfHost) {
     if (!have) {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const res = await fetch(`${manifest.liveBase}${url}`);
+          // httpFetch: 在 GUI 里走 Electron 的 net.fetch,才会遵循系统代理
+          // (字体也是从 figma.site 下的,同样受 VPN 影响)。
+          const res = await httpFetch(`${manifest.liveBase}${url}`);
           if (!res.ok) {
             // Drain the body: an unconsumed response keeps the connection out of
             // undici's pool and can wedge later requests to the same origin.

@@ -8,10 +8,10 @@
 // `chat:send`, the tool-calling loop runs here (the renderer never touches the
 // filesystem), file/word-cloud edits are gated by human confirmation through
 // `chat:resolve`, and the whole run can be cancelled with `chat:cancel`.
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, net } = require("electron");
 const path = require("path");
 const { writeFileSync, readFileSync, renameSync, existsSync } = require("fs");
-const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense } = require("./worker.cjs");
+const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch } = require("./worker.cjs");
 
 let win = null;
 let chatRunning = false;
@@ -526,6 +526,16 @@ async function snapshotMode() {
 }
 
 app.whenReady().then(() => {
+  // 抓取/下载统一改走 Chromium 的网络栈。
+  // Node 自带的 fetch 不读 Windows 的系统代理(它只在注册表里),于是开着 VPN
+  // (代理模式)时会出现"浏览器能打开 figma.site、程序却拉不到"——实测直连
+  // 10.6 秒超时,而同一时刻 net.fetch 2.5 秒就拿到 200。net.fetch 和浏览器
+  // 用同一套代理解析(含系统代理与绕过列表),所以行为与浏览器一致。
+  try {
+    setFetch((url, opts) => net.fetch(url, opts));
+  } catch (e) {
+    console.warn("net.fetch 注入失败,将回退到 Node 的 fetch:", e.message);
+  }
   createWindow();
   if (process.argv.includes("--snapshot")) {
     win.webContents.on("did-finish-load", () =>

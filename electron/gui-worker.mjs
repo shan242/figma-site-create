@@ -8,5 +8,6 @@ import { runAgent, createDeepSeekModel, makeTools } from "../ai.mjs";
 import { layoutWordCloud } from "../wordcloud.mjs";
 import { publishSite, testPanel, httpsOptions, ensureHttps, dataApiHealth } from "../publish.mjs";
 import { machineCode, checkLicense } from "../license.mjs";
+import { setFetch, usingNetFetch } from "../netfetch.mjs";
 
-export { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, layoutWordCloud, publishSite, testPanel, httpsOptions, ensureHttps, dataApiHealth, machineCode, checkLicense };
+export { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, layoutWordCloud, publishSite, testPanel, httpsOptions, ensureHttps, dataApiHealth, machineCode, checkLicense, setFetch, usingNetFetch };
