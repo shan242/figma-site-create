@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime } from "./ai.mjs";
@@ -248,6 +248,35 @@ test("insert_video:找不到视频时报错并列出目录里的媒体文件", a
   assert.ok(r.error, "必须报错");
   // 没有「列目录」工具,不告诉 AI 文件叫什么它就无从下手
   assert.match(String(r.hint || ""), /real-clip\.mp4/, "提示里要列出实际存在的媒体文件");
+  // 只有一个候选时直接在 error 里点名 —— 否则模型会反过来问用户"准确文件名是什么",
+  // 用户答不上来就卡死(实际发生过:中文名被错编码)
+  assert.match(r.error, /real-clip\.mp4/, "唯一的候选要写进错误本身,不能只藏在 hint 里");
+});
+
+test("insert_video:中文名被错误编码时能认出同前缀的那个文件", async () => {
+  const dir = videoFixture();
+  // 复刻真实事故:磁盘上是乱码名,用户按原名字调用。
+  // "lily网站视频_副本.mp4" → "lily缃戠珯瑙嗛_鍓湰.mp4":ASCII 前缀和扩展名保留,
+  // 但汉字数量变了(长度 15 → 17),所以判据不能是长度。
+  const bad = "lily缃戠珯瑙嗛_鍓湰.mp4";
+  renameSync(join(dir, "assets", "real-clip.mp4"), join(dir, "assets", bad));
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/lily网站视频_副本.mp4" });
+  assert.ok(r.error, "名字对不上时必须报错,不能瞎猜着插入");
+  assert.match(r.error, /lily缃戠珯瑙嗛_鍓湰\.mp4/, "要把真实文件名写进错误里");
+  assert.match(r.error, /ASCII 前缀和扩展名都一致/, "并说明为什么认定是它");
+  assert.match(r.error, /不要回头问用户/, "明确要求模型自己用真实名字重试");
+});
+
+test("insert_video:目录里有多个不相关视频时不要乱猜", async () => {
+  const dir = videoFixture();
+  writeFileSync(join(dir, "assets", "another-long-name.mp4"), Buffer.from([0, 0, 0, 0x20]));
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/nope.mp4" });
+  assert.ok(r.error);
+  assert.equal(/一致的文件是/.test(r.error), false, "前缀对不上就不该猜");
+  assert.equal(/唯一的视频文件/.test(r.error), false, "候选不止一个时也不该猜");
+  assert.match(String(r.hint || ""), /another-long-name\.mp4/, "但仍要列出全部候选让模型自己判断");
 });
 
 test("insert_video:拒绝组件定义区的幽灵节点", async () => {

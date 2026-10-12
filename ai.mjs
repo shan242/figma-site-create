@@ -1025,8 +1025,28 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         }
         if (!existsSync(p)) {
           const media = listMediaFiles();
+          // 猜一下用户指的是哪一个。中文名被 GBK/UTF-8 互相错读之后,**ASCII 部分和
+          // 扩展名会原样保留**,只有汉字变成另一串汉字 ——
+          // 实测 "lily网站视频_副本.mp4" 在磁盘上成了 "lily缃戠珯瑙嗛_鍓湰.mp4":
+          // "lily" 和 ".mp4" 都在,长度却从 15 变成了 17(汉字数量变了)。
+          // 所以判据是「同 ASCII 前缀 + 同扩展名」,不是长度。
+          const want = useSrc.split("/").pop();
+          const ext = want.slice(want.lastIndexOf(".")).toLowerCase();
+          const ascii = (s) => (s.match(/^[\x20-\x7e]*/) || [""])[0].toLowerCase();
+          const wp = ascii(want);
+          const byPrefix = media.find((m) => {
+            const b = m.split("/").pop();
+            return b !== want && wp.length >= 3 && b.toLowerCase().endsWith(ext) && ascii(b) === wp;
+          });
+          const guessed = byPrefix || (media.length === 1 ? media[0] : null);
+          const why = byPrefix ? "ASCII 前缀和扩展名都一致的文件" : "唯一的视频文件";
           return {
-            error: `找不到视频文件: ${useSrc}`,
+            error:
+              `找不到视频文件: ${useSrc}` +
+              (guessed
+                ? `。输出目录里${why}是 ${guessed} —— 中文名被错误编码过就会变成这样。` +
+                  `如果你要的就是它,直接用 ${guessed} 重试,不要回头问用户"准确文件名是什么"`
+                : ""),
             ...(media.length ? { hint: `输出目录里的媒体文件: ${media.slice(0, 12).join(", ")}` } : { hint: "输出目录里没有找到任何视频文件,请先把视频放进去" }),
           };
         }
