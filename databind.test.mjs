@@ -81,6 +81,18 @@ test("运行时必须内联 window.renderWordCloud,否则画布永远是空的",
   assert.match(clientRuntime, /window\.renderWordCloud\s*=/, "运行时里必须定义 renderWordCloud");
 });
 
+test("同 collection 的多条绑定只发一次请求(否则 25 条打 25 次 /mine)", () => {
+  // 实测 kulangsu.site:一个页面 25 条 databind 全绑 voices,每条启动都发一次
+  // /mine?client=...,再加上 /stats 轮询 —— 请求刷屏而且可能触发后端限速。
+  assert.match(clientRuntime, /function apiShared\(/, "要有按 URL 去重的 apiShared");
+  assert.equal(/api\(path \+ "\/mine\?client=" \+ encodeURIComponent\(client\)\)/.test(clientRuntime), false, "/mine 必须走 apiShared");
+  assert.match(clientRuntime, /INFLIGHT\[path\]/, "并发要合并成同一个 Promise");
+  assert.match(clientRuntime, /CACHE\[path\]/, "结果要在 TTL 内复用");
+  // 写操作绝不能合并 —— 每次点击都要真的发出去
+  assert.match(clientRuntime, /if \(method !== "GET"\) \{ return api\(path, opts\); \}/, "POST 不走缓存");
+  assert.match(clientRuntime, /apiShared\(url\)/, "读数据走 apiShared");
+});
+
 test("本地(file://)走完整模拟,发布后自动切后端", () => {
   // 用户的要求:本地要能完整走一遍词云/投票,但用本地模拟数据;发布后自动切到真后端。
   // 做法是运行时判断,不靠构建开关 —— 同一份产物两处都能用。

@@ -144,6 +144,32 @@ function localApi(path, opts) {
   }
 }
 
+/* ---------- 请求去重 ----------
+   同一页可能有几十条绑定指向**同一个 collection**(实测 kulangsu.site:25 条 databind
+   全绑 voices),每条都自己发一次 /mine,页面一加载就是 25 个请求 —— 用户会看到
+   刷屏而且可能触发限速。这里按 URL 共享:
+     · 正在飞的请求 → 复用同一个 Promise(并发合并);
+     · 已完成的结果 → 在 TTL 内直接复用(避免轮询时重复打)。
+   写操作(POST)不合并 —— 每次点击都必须真的发出去。 */
+var INFLIGHT = {}, CACHE = {}, TTL = 4000;
+function apiShared(path, opts) {
+  var method = (opts && opts.method) || "GET";
+  if (method !== "GET") { return api(path, opts); }
+  var now = Date.now();
+  if (CACHE[path] && now - CACHE[path].at < TTL) { return Promise.resolve(CACHE[path].v); }
+  if (INFLIGHT[path]) { return INFLIGHT[path]; }
+  var p = api(path, opts).then(function (v) {
+    CACHE[path] = { at: Date.now(), v: v };
+    delete INFLIGHT[path];
+    return v;
+  }, function (e) {
+    delete INFLIGHT[path];
+    throw e;
+  });
+  INFLIGHT[path] = p;
+  return p;
+}
+
 /* ---------- HTTP ---------- */
 function api(path, opts) {
   if (LOCAL) { return localApi(path, opts); }
@@ -280,7 +306,8 @@ function initOne(root) {
     else if (spec.kind === "counter") { q = "?field=" + encodeURIComponent(read.groupBy || "id") + "&limit=1"; }
     else { q = "/stats?field=" + encodeURIComponent(read.groupBy || "value") + "&limit=" + (read.limit || 10); }
     var url = spec.kind === "list" ? path + q : path + q;
-    return api(url).then(function (d) {
+    // apiShared:25 条绑定指向同一个 collection 时,轮询也只真的打一次
+    return apiShared(url).then(function (d) {
       if (spec.kind === "list") { paint({ items: d.items }); }
       else if (spec.kind === "counter") { renderCounter(root, spec, d.total || 0); }
       else { paint({ buckets: d.buckets, total: d.total }); }
@@ -361,9 +388,10 @@ function initOne(root) {
     }
   }
 
-  // 启动:先问"我提交过吗",再决定是否要求提交
+  // 启动:先问"我提交过吗",再决定是否要求提交。
+  // 用 apiShared —— 同页 25 条绑定指向同一个 collection 时,这里只会真的发一次。
   var boot = write && write.client !== false
-    ? api(path + "/mine?client=" + encodeURIComponent(client))
+    ? apiShared(path + "/mine?client=" + encodeURIComponent(client))
         .then(function (d) {
           if (d.items && d.items.length) {
             submitted = true;
