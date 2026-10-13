@@ -366,6 +366,32 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
   // overflow-x:hidden clips the min-width overflow instead of showing a scrollbar.
   const canvasW = Math.round(cb.width);
   const bodyBg = bg["background-color"] || "#ffffff";
+  // **给"滚到这里"的锚点补占位元素。**
+  // 页头的 SCROLL_TO 导航用 href="#<节点id>" 跳转,但目标常常是一个**纯布局
+  // FRAME** —— 按渲染规则,既没有滚动方向、也没有可见填充的 FRAME 不产生元素,
+  // 于是页面上没有那个 id,点击就**落在空处**。
+  // 线上(React 应用)不存在这个问题:它每个元素都是真实 DOM 节点。
+  // 所以这里补一个 0×0 的占位 div,落在该节点的设计坐标上 —— 滚动位置正确,
+  // 又不画出任何东西。
+  const body = out.join("\n");
+  const wanted = new Set();
+  for (const m of body.matchAll(/href="#([^"]+)"/g)) wanted.add(m[1]);
+  const missing = [];
+  for (const id of wanted) {
+    if (!body.includes(`id="${id}"`)) missing.push(id);
+  }
+  if (missing.length) {
+    const byId = new Map(all.map((n) => [n.id, n]));
+    for (const id of missing) {
+      const n = byId.get(id);
+      const bb = n?.absoluteBoundingBox;
+      if (!bb) continue;
+      const top = Math.round(bb.y - cb.y);
+      const left = Math.round(bb.x - cb.x);
+      out.push(`  <div id="${id}" data-anchor-for="${id}" style="position:absolute;top:${top}px;left:${left}px;width:0;height:0"></div>`);
+    }
+    if (missing.length) console.log(`  ↳ 补了 ${missing.length} 个滚动锚点(目标是不渲染的布局框): ${missing.slice(0, 6).join(", ")}`);
+  }
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
