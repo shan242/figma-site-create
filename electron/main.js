@@ -14,7 +14,7 @@ const { writeFileSync, readFileSync, renameSync, existsSync } = require("fs");
 // applyConfigPatch 从 worker.cjs 拿(它由 esbuild 打进同一个产物)。
 // 不要 require("./config-merge.cjs"):electron-builder 的 files 是白名单,
 // 单独的 .cjs 不在名单里就不会进 asar —— 本地测试全过,装到用户机器上启动即崩。
-const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch, applyConfigPatch } = require("./worker.cjs");
+const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch, setPageProbe, applyConfigPatch } = require("./worker.cjs");
 
 let win = null;
 let chatRunning = false;
@@ -578,6 +578,35 @@ app.whenReady().then(() => {
     setFetch((url, opts) => net.fetch(url, opts));
   } catch (e) {
     console.warn("net.fetch 注入失败,将回退到 Node 的 fetch:", e.message);
+  }
+
+  // check_page 用的页面探针:开一个**隐藏窗口**把产物页面真的渲染一遍。
+  // 用 Electron 自带的 Chromium,所以打包后不需要用户装 Chrome,也不依赖外部进程。
+  // 这一轮所有"DOM 全对但页面不对"的问题(词云一个像素没画、面板 opacity 0.0003、
+  // 控件被 pointer-events 挡住)都只能这样发现 —— AI 看不到页面。
+  try {
+    setPageProbe(async (url, script, opts = {}) => {
+      const probe = new BrowserWindow({
+        show: false,
+        width: 1440,
+        height: 900,
+        webPreferences: { offscreen: true, javascript: true, images: true, contextIsolation: true, nodeIntegration: false },
+      });
+      const errors = [];
+      probe.webContents.on("console-message", (_e, level, message) => {
+        if (level >= 2) errors.push(String(message).slice(0, 300));
+      });
+      try {
+        await probe.loadURL(url);
+        await new Promise((r) => setTimeout(r, Math.max(500, Number(opts.waitMs) || 1500)));
+        const value = await probe.webContents.executeJavaScript(script, true);
+        return { value, errors };
+      } finally {
+        try { probe.destroy(); } catch {}
+      }
+    });
+  } catch (e) {
+    console.warn("check_page 探针注入失败,将回退到本机 Chrome/Edge:", e.message);
   }
   createWindow();
   if (process.argv.includes("--snapshot")) {
