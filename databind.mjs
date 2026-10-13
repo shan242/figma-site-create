@@ -241,6 +241,24 @@ function renderWordcloud(root, spec, buckets) {
   // 线上同理:还没有人投票时,词云是空的而不是"待投票的选项"。
   if ((!buckets || !buckets.length) && spec.fallback && spec.fallback.buckets && spec.fallback.buckets.length) {
     buckets = spec.fallback.buckets;
+  } else if (buckets && buckets.length && spec.fallback && spec.fallback.buckets && spec.fallback.buckets.length) {
+    // **把票数和选项表合并。**
+    // 后端 /stats 只返回**有票的**桶,于是投了 3 项就只画 3 个词 —— 而问卷要的是
+    // "看到各个选项的统计":没被投过的选项也应该在,只是停在最小字号、最浅的颜色。
+    // 以 fallback 的选项表为准,把实时票数贴上去,谁多谁大、谁多谁深由渲染器排序决定。
+    var counts = {};
+    for (var b = 0; b < buckets.length; b++) { counts[String(buckets[b].key)] = buckets[b].count; }
+    var merged = [];
+    for (var f = 0; f < spec.fallback.buckets.length; f++) {
+      var k = String(spec.fallback.buckets[f].key);
+      merged.push({ key: k, count: counts[k] !== undefined ? counts[k] : 0 });
+    }
+    for (var c in counts) {
+      var known = false;
+      for (var m = 0; m < merged.length; m++) { if (merged[m].key === c) { known = true; break; } }
+      if (!known) merged.push({ key: c, count: counts[c] });
+    }
+    buckets = merged;
   }
   var words = [];
   for (var i = 0; i < buckets.length; i++) { words.push({ text: String(buckets[i].key === null ? "" : buckets[i].key), weight: buckets[i].count }); }
