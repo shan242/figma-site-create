@@ -451,6 +451,27 @@ test("bind_data:perVisitor 落到 spec 里,默认 once", async () => {
   assert.equal(bs3.find((i) => i.id === c.id).options.perVisitor, "once");
 });
 
+test("edit_node:height/width 直接给数字,并核对文字还放不放得下", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  // 文本节点 1:2:edit_text 会警告溢出,修的办法就是这个
+  const a = await handlers.edit_node({ slug: "index", nodeId: "1:2", height: 400 });
+  assert.ok(!a.error, `不该报错: ${a.error}`);
+  const saved = JSON.parse(readFileSync(join(dir, "nodeStyles.json"), "utf8")).items;
+  const ns = saved.find((i) => i.id === a.id);
+  assert.equal(ns.style.height, "400px", "要自动补上单位");
+  assert.match(String(a.note || ""), /估算/, "要顺带核对文字放不放得下");
+  // width 一起给
+  const b = await handlers.edit_node({ slug: "index", nodeId: "1:2", width: 320, style: { color: "#123456" } });
+  const ns2 = JSON.parse(readFileSync(join(dir, "nodeStyles.json"), "utf8")).items.find((i) => i.id === b.id);
+  assert.equal(ns2.style.width, "320px");
+  assert.equal(ns2.style.color, "#123456", "style 和 width/height 要能一起用");
+  // 非法值
+  assert.match(String((await handlers.edit_node({ slug: "index", nodeId: "1:2", height: -5 })).error), /正数/);
+  assert.match(String((await handlers.edit_node({ slug: "index", nodeId: "1:2", height: 99999 })).error), /太大/);
+  assert.match(String((await handlers.edit_node({ slug: "index", nodeId: "1:2" })).error), /至少要提供/);
+});
+
 // --- 覆盖层快照 / 回滚 --------------------------------------------------------
 // 覆盖层是 AI 改动的唯一事实来源,一次写坏就没有退路。这一轮我用脚本清 CSS 时
 // 按 } 切块删规则,把按钮样式整块删掉了,最后靠文件旁边的 .bak 才救回来 ——

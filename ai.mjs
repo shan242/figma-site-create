@@ -1758,17 +1758,22 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       return { id, slug: hit.slug, nodeId: hit.nodeId };
     },
 
-    async edit_node({ id, slug, nodeId, style }) {
+    // style 之外再支持 width/height 两个**语义化**参数。
+    // 为什么:edit_text 会因为文字变长而警告"估算需要 Xpx,节点框只有 Ypx";
+    // 而修的办法就是用 height 把框调大。之前只能塞进 style:{height:"Xpx"},
+    // 但那样得自己记得写单位,而且工具说明里没引导 —— AI 往往就放着不管了。
+    async edit_node({ id, slug, nodeId, style, height, width }) {
       const page = loadPages().find((p) => p.slug === slug);
       if (!page) return { error: `没有这个页面: ${slug}` };
       const data = JSON.parse(readFileSync(resolve(root, "data", `${slug}.json`), "utf8"));
       const node = data.nodeById?.[nodeId];
       if (!node) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
-      if (!style || typeof style !== "object" || Array.isArray(style)) return { error: "style 需要是一个 CSS 属性对象" };
-      // Values are inlined into style="..." attributes, so anything that would
-      // break the attribute or escape into markup is rejected outright.
+      if (!style && height === undefined && width === undefined) {
+        return { error: "至少要提供 style 或 height / width" };
+      }
+      if (style !== undefined && (typeof style !== "object" || Array.isArray(style) || style === null)) return { error: "style 需要是一个 CSS 属性对象" };
       const clean = {};
-      for (const [k, v] of Object.entries(style)) {
+      for (const [k, v] of Object.entries(style || {})) {
         if (!/^[a-zA-Z][a-zA-Z0-9-]*$/.test(k)) return { error: `非法样式属性名: ${k}` };
         if (typeof v !== "string" && typeof v !== "number") return { error: `属性 ${k} 的值需要是字符串或数字` };
         const s = String(v).trim();
@@ -1776,6 +1781,20 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         if (s.length > 200 || /[";<>]/.test(s)) return { error: `属性 ${k} 的值含非法字符或过长` };
         clean[k] = s;
       }
+      // width/height 走同一套校验(它们是 CSS 值,直接内联进 style 属性)
+      const num = (v, name) => {
+        if (v === undefined) return null;
+        if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return { error: `${name} 需要是正数(单位 px;不写单位)` };
+        if (v > 20000) return { error: `${name} 太大了(${v}px),确认一下是不是写错了` };
+        return Math.round(v);
+      };
+      const h = num(height, "height");
+      if (h && h.error) return { error: h.error };
+      const wd = num(width, "width");
+      if (wd && wd.error) return { error: wd.error };
+      if (h) clean.height = `${h}px`;
+      if (wd) clean.width = `${wd}px`;
+
       const newId = id || `ns-${Date.now().toString(36)}`;
       if (!(await confirm({ kind: "node_style", payload: { id: newId, slug, nodeId, nodeType: node.type, style: clean } }))) {
         return { error: "用户拒绝了这次样式修改" };
@@ -1787,7 +1806,18 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       // doesn't wipe previously set props on the same node.
       kept.push({ ...existing, id: newId, slug, nodeId, style: { ...(existing.style || {}), ...clean }, createdAt: new Date().toISOString() });
       saveNodeStyles(kept);
-      return { id: newId, slug, nodeId, props: Object.keys(clean) };
+      // 改了高度就顺便核对一下文字放不放得下 —— 这正是这个功能的用途
+      const notes = [];
+      if (h && node.type === "TEXT") {
+        const bb = node.absoluteBoundingBox || {};
+        const st = node.style || {};
+        const fs = st.fontSize || 16;
+        const lh = st.lineHeightPx || fs * 1.3;
+        const need = estimateTextHeight(String(node.characters || ""), { width: bb.width || 1, fontSize: fs, lineHeight: lh });
+        if (need > h * 1.15) notes.push(`文字按 ${fs}px/行高 ${lh.toFixed(1)}px 估算需要约 ${Math.round(need)}px,仍超过新的 ${h}px —— 还要再调大,或者缩短文字。`);
+        else notes.push(`框已调到 ${h}px(文字估算约 ${Math.round(need)}px),放得下了。`);
+      }
+      return { id: newId, slug, nodeId, props: Object.keys(clean), ...(notes.length ? { note: notes.join("；") } : {}) };
     },
 
     async delete_node_style({ id }) {
@@ -2181,7 +2211,10 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       type: "function",
       function: {
         name: "edit_node",
-        description: "持久修改任意节点(文本/图片/矩形)的样式。style 为原始 CSS 属性对象,如 {color:'#ff0000','font-size':'24px'}。nodeId 来自 read_page_text 的 all 列表。修改持久保存,重新生成后仍在。会请求用户确认",
+        description:
+          "持久修改任意节点(文本/图片/矩形)的样式。style 为原始 CSS 属性对象,如 {color:'#ff0000','font-size':'24px'}。" +
+          "也可以直接给 height / width(数字,单位 px)—— **edit_text 警告文字溢出时就用它把框调大**,不用自己拼单位。" +
+          "nodeId 来自 read_page_text 的 all 列表。修改持久保存,重新生成后仍在。会请求用户确认",
         parameters: {
           type: "object",
           properties: {
@@ -2189,8 +2222,10 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
             slug: { type: "string", description: "页面 slug" },
             nodeId: { type: "string", description: "任意节点 id,来自 read_page_text 的 all 列表" },
             style: { type: "object", description: "要合并设置的 CSS 属性(不删除未提及属性)" },
+            height: { type: "number", description: "可选;把节点高度设成这个像素值(修文字溢出用)" },
+            width: { type: "number", description: "可选;把节点宽度设成这个像素值" },
           },
-          required: ["slug", "nodeId", "style"],
+          required: ["slug", "nodeId"],
         },
       },
     },
