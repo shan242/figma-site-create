@@ -49,9 +49,12 @@ export function sniffImageMime(buf) {
 
 // assets/ 里的文件可能是 .png 名字装着 JPEG 字节(scrape 会嗅探后按真实扩展名落盘),
 // 所以这里按 base 名找所有可能扩展名,再由内容定 mime。
-function findAssetFile(assetDir, hash) {
+// 在 assets/ 里按内容哈希找落地文件。扩展名要**按用途给** —— 视频是 .mp4,
+// 图片是 png/jpg/svg 那一串。以前只认图片扩展名,于是找视频必然返回 null,
+// 调用方会报"文件缺失,需重新抓取"这种**假警报**。
+function findAssetFile(assetDir, hash, exts) {
   if (!hash) return null;
-  for (const ext of ["png", "jpg", "jpeg", "gif", "webp", "svg"]) {
+  for (const ext of exts || ["png", "jpg", "jpeg", "gif", "webp", "svg"]) {
     const p = join(assetDir, `${hash}.${ext}`);
     if (existsSync(p)) return p;
   }
@@ -90,6 +93,7 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 - 需要大改页面结构时,可以用 write_file 改写生成的 *.html(也可以写 data/ 下的页面数据)。改写 *.html 后,系统会在每次重新生成后把你改的内容自动套回去(记录在 file-locks.json),所以是持久的。
 - 注意:对同一个页面,要么用 edit_text / edit_node / apply_wordcloud 这类覆盖层工具改,要么用 write_file 整体改写 HTML,不要混用——整体改写会把该页覆盖层的改动盖掉。append_css 与 write_file 改 styles.css 同理。
 - 不要改写 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json(它们是构建元数据/覆盖层来源/设计报告,直接改会破坏一致性)。
+- **绝不要靠节点名字猜 id,也不要一个个试。** 名字里有"视频"/"图片"/"按钮"的节点不一定真是那个东西。要拿 nodeId 就用对应的列举工具:图片和**视频**用 list_images(它同时列出设计自带的 VIDEO 填充和 insert_video 插入的),文字用 read_page_text,页面上有什么问题用 check_page(check_page 报视频时会带上 nodeId)。实测有一次 AI 因为找不到视频节点,连猜了 20 多个 id 才放弃 —— 那些调用全是白费的。
 - **加任何覆盖层之前先 list_overlays(slug)**。你看不到页面,而词云/绑定/视频是你自己加的、发布数据里没有 —— 只靠记忆很容易在同一处叠第二个(实测:25 条绑定全绑同一个 collection,其中两条的矩形完全重叠,页面上两行字叠着)。它还会直接告诉你哪些已经重叠了。
 - **改坏了可以回退**:每次改动覆盖层(文字/样式/词云/绑定/视频)之前程序都会自动存一份快照。如果用户说"还是刚才那样好"、或者你发现把样式改烂了,用 list_history 找到那一步、再 restore_history 回去 —— **不要靠自己凭记忆反着改**,那几乎一定改不回来。回滚本身也是可逆的。:每次改动覆盖层(文字/样式/词云/绑定/视频)之前程序都会自动存一份快照。如果用户说"还是刚才那样好"、或者你发现把样式改烂了,用 list_history 找到那一步、再 restore_history 回去 —— **不要靠自己凭记忆反着改**,那几乎一定改不回来。回滚本身也是可逆的。
 - **工具的返回值里出现 warnings 或 problems 时,必须逐条处理,不能只记下来。** 你**看不到页面**,这些是程序代替你的眼睛算出来的:文字会溢出框、覆盖层会叠在一起、样式里有让功能失效的写法、页面渲染后某块是空的。忽略它们等于把问题留给用户去发现。
@@ -594,7 +598,13 @@ const PAGE_PROBE = `(function () {
   var vids = document.querySelectorAll("video");
   for (var i = 0; i < vids.length; i++) {
     var cs3 = getComputedStyle(vids[i]);
-    out.blocked.push({ tag: "video", muted: vids[i].muted, controls: vids[i].controls, autoplay: vids[i].autoplay,
+    // **必须带 nodeId**。不带的话 AI 只知道"页面上有个视频",不知道**是哪个节点**,
+    // 于是只能去猜 id —— 实测它连猜了 20 多个(2:178/2:156/2:155/2:153…),
+    // 全部失败,而真正的视频在 2:1915。猜 id 是纯粹的浪费。
+    out.blocked.push({ tag: "video", nodeId: vids[i].getAttribute("data-node-id") || "",
+      videoId: vids[i].getAttribute("data-video-id") || "",
+      muted: vids[i].muted, controls: vids[i].controls, autoplay: vids[i].autoplay,
+      hasAudio: null,
       src: (vids[i].getAttribute("src") || "").split("/").pop().slice(0, 24), pointerEvents: cs3.pointerEvents });
   }
   // 文字互相压住:带 data-node-id 的叶子文本块两两比
@@ -1056,8 +1066,33 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       const page = loadPages().find((p) => p.slug === slug);
       if (!page) return { error: `没有这个页面: ${slug}` };
       const { data } = pageTextOf(slug);
+      // 只列**会被渲染**的节点。nodeById 里有组件定义区的原件:存在、有坐标、
+      // 永远不出现 —— 把它们列出来,AI 会挑中它们然后白忙一场。
+      const renderable = new Set(collectAll(data).map((n) => n.id));
       const images = [];
+      const videos = [];
       for (const n of Object.values(data.nodeById || {})) {
+        if (!renderable.has(n.id)) continue;
+        // **视频也必须列**。这个工具是"这页有什么媒体"的答案,而 VIDEO 填充
+        // 以前被完全跳过 —— 实测 AI 想改首页视频时,唯一能拿到 nodeId 的地方
+        // 都没有它,于是它按节点**名字**猜了个像视频的矩形,失败后又连猜了
+        // 20 多个 id。真正的视频是另一个名字几乎一样、id 完全不同的节点。
+        const vid = (n.fills || []).find((f) => f.type === "VIDEO");
+        if (vid) {
+          const vfile = findAssetFile(assetDir, vid.videoRef, ["mp4", "webm", "mov"]);
+          const vbb = n.absoluteBoundingBox || {};
+          videos.push({
+            nodeId: n.id, kind: "video", name: n.name || "",
+            w: Math.round(vbb.width || 0), h: Math.round(vbb.height || 0),
+            file: vfile ? basename(vfile) : `${vid.videoRef} (文件缺失,需重新抓取)`,
+            mb: vfile ? +(statSync(vfile).size / 1048576).toFixed(1) : 0,
+            muted: vid.muted !== false, controls: vid.showControls === true,
+            autoplay: vid.autoplay === true, loop: vid.mediaLoop === true,
+            ...(vfile ? { audio: (videoTracks(vfile) || {}).audio === true } : {}),
+            via: "设计自带的 VIDEO 填充",
+          });
+          continue;
+        }
         const refs = [n.hash, ...(n.fills || []).filter((f) => f.type === "IMAGE").map((f) => f.imageRef)].filter(Boolean);
         if (!refs.length) continue;
         const ref = refs[0];
@@ -1074,7 +1109,16 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
           readable: !!file && !!sniffImageMime(readFileSync(file)),
         });
       }
-      return { slug, count: images.length, images };
+      // insert_video 插的(覆盖层里,不在发布数据里)
+      for (const v of loadVideos().filter((i) => i.slug === slug && i.kind !== "fillOptions")) {
+        videos.push({ nodeId: v.nodeId, kind: "inserted-video", file: v.src, muted: v.muted, controls: v.controls, autoplay: v.autoplay, via: "insert_video 插入" });
+      }
+      return {
+        slug,
+        count: images.length,
+        images,
+        ...(videos.length ? { videos, videoNote: "视频用 set_video_options({slug, nodeId, muted, controls}) 改声音/控件;nodeId 就是上面这些(不要按节点名字猜)。" } : {}),
+      };
     },
 
     // 让模型"看"一张图。图片不能走工具返回值(role:"tool" 不支持图片),
@@ -1296,8 +1340,10 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         problems.push(`有元素披着 ${t.duration} 的过渡(超过 5 秒)—— 状态切换会看起来像"没反应"。这一轮就踩过:100000s 的过渡让揭示永远跑不完,刷新后词云不显示,必须再点一次才出来。`);
       }
       for (const b of v.blocked || []) {
+        const at = b.nodeId ? `节点 ${b.nodeId}` : b.src;
         if (b.pointerEvents === "none") problems.push(`video(${b.src}) 被设了 pointer-events: none —— 控件会显示但点不动。`);
-        if (b.muted && b.controls === false && b.autoplay === false) problems.push(`video(${b.src}) 既静音、又没控件、又不自动播放 —— 访客完全无法播放它。`);
+        if (b.muted && b.controls === false && b.autoplay === false) problems.push(`video(${at}) 既静音、又没控件、又不自动播放 —— 访客完全无法播放它。要有声音和控件就用 set_video_options({nodeId:"${b.nodeId}", muted:false, controls:true});只想要一个跟设计同色的播放按钮就传 controls:"custom"。`);
+        else if (b.muted && b.controls === false) problems.push(`video(${at}) 没有播放控件,而访客默认听不到声音。要有声音用 set_video_options({nodeId:"${b.nodeId}", muted:false, controls:true})。`);
       }
       for (const o of v.overlaps || []) problems.push(`文字叠在一起: ${o.a} 与 ${o.b}(重叠 ${o.pct}%)。`);
       for (const e of r?.errors || []) problems.push(`页面抛了 JS 异常: ${e}`);
@@ -1655,10 +1701,27 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       const existing = loadVideos().find((i) => i.nodeId === nodeId && i.slug === slug);
       const fill = (node.fills || []).find((f) => f.type === "VIDEO");
       if (!existing && !fill) {
-        const vids = loadVideos().filter((i) => i.slug === slug).map((i) => `${i.nodeId}(${i.src.split("/").pop()})`);
+        // 提示要把**设计自带的 VIDEO 填充**也列出来,不能只看 videos.json ——
+        // 那是 AI 插入的记录,全新抓取的站点里根本没有这个文件。
+        // 实测:AI 按节点**名字**(叫"lily网站视频 1")挑了个没有 VIDEO 填充的矩形,
+        // 收到"没有视频"后因为没有别的线索,又连猜了 20 多个 id,全部失败 ——
+        // 而真正的视频是另一个名字几乎一样的节点。
+        const vids = [
+          // kind:"fillOptions" 的是"只改设计自带视频的选项"的记录,它指向的就是
+          // 下面那个设计填充本身 —— 不排掉的话同一个节点会列两遍。
+          ...loadVideos().filter((i) => i.slug === slug && i.kind !== "fillOptions").map((i) => `${i.nodeId}(插入的 ${i.src.split("/").pop()})`),
+          ...collectAll(chk.data || pageTextOf(slug).data)
+            .filter((n) => (n.fills || []).some((f) => f.type === "VIDEO"))
+            .map((n) => {
+              const f = n.fills.find((x) => x.type === "VIDEO");
+              return `${n.id}(设计自带 ${Math.round(n.absoluteBoundingBox?.width)}x${Math.round(n.absoluteBoundingBox?.height)} "${String(n.name || "").slice(0, 20)}"${f.muted ? " 静音" : ""})`;
+            }),
+        ];
         return {
           error: `节点 ${nodeId} 上没有视频(既不是设计自带的 VIDEO 填充,也没有 insert_video 记录)`,
-          ...(vids.length ? { hint: `这个页面的视频在: ${vids.join(", ")}` } : {}),
+          ...(vids.length
+            ? { hint: `这个页面上的视频在: ${vids.join(", ")}。**不要靠节点名字猜** —— 名字里有"视频"的节点不一定真的有视频填充;用上面这些 id,或者用 list_images 看全貌。` }
+            : { hint: "这个页面上没有视频。要加视频先用 insert_video。" }),
         };
       }
 

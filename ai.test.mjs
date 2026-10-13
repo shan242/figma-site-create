@@ -201,8 +201,11 @@ function fixture() {
     JSON.stringify({
       roots: ["1:1"],
       nodeById: {
-        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, children: ["1:2"] },
+        "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, children: ["1:2", "1:9"] },
         "1:2": { id: "1:2", type: "TEXT", characters: "hello world hello travel", absoluteBoundingBox: { x: 20, y: 20, width: 100, height: 20 } },
+      // 设计自带的 VIDEO 填充(实测 germanschoolhistories 的 2:1915 就是这样)
+      "1:9": { id: "1:9", type: "RECTANGLE", name: "lily网站视频 2", absoluteBoundingBox: { x: 0, y: 0, width: 760, height: 427 },
+        fills: [{ type: "VIDEO", videoRef: "deadbeef", muted: true, showControls: false, autoplay: true, mediaLoop: true }] },
       },
     }),
   );
@@ -577,6 +580,25 @@ test("check_page:没问题时 ok=true,并且不编造问题", async () => {
   assert.equal(r.ok, true);
   assert.deepEqual(r.problems, []);
   setPageProbe(null);
+});
+
+test("list_images:必须把视频也列出来,并带上 nodeId", async () => {
+  // 实测事故:用户让 AI 给首页视频加声音,AI 想找一个能传给 set_video_options 的
+  // nodeId。list_images 是"这页有什么媒体"的答案,但它只认 IMAGE 填充 ——
+  // VIDEO 填充被完全跳过。AI 于是按节点**名字**挑了个叫"…视频 1"的矩形,
+  // 失败后又连猜了 20 多个 id,全部落空;真正的视频是另一个名字几乎一样、
+  // id 完全不同的节点(2:1915)。
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.list_images({ slug: "index" });
+  assert.ok(!r.error, `不该报错: ${r.error}`);
+  assert.ok(Array.isArray(r.videos), "要有一个 videos 列表");
+  assert.equal(r.videos.length, 1, `应列出 1 个视频: ${JSON.stringify(r.videos)}`);
+  assert.equal(r.videos[0].nodeId, "1:9", "要带 nodeId,否则 AI 只能猜");
+  assert.equal(r.videos[0].via, "设计自带的 VIDEO 填充");
+  assert.match(String(r.videoNote || ""), /不要按节点名字猜/, "要明确警告别靠名字猜");
+  // 幽灵节点(组件定义区的原件)不该出现
+  assert.equal(r.videos.some((v) => v.nodeId === "9:9"), false, "幽灵节点不该被列出");
 });
 
 // --- 覆盖层快照 / 回滚 --------------------------------------------------------
@@ -1417,7 +1439,7 @@ test("edit_node validates node, style and inline-safety", async () => {
   const dir = fixture();
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   assert.ok((await handlers.edit_node({ slug: "nope", nodeId: "1:2", style: { color: "#000" } })).error);
-  assert.ok((await handlers.edit_node({ slug: "index", nodeId: "1:9", style: { color: "#000" } })).error);
+  assert.ok((await handlers.edit_node({ slug: "index", nodeId: "99:99", style: { color: "#000" } })).error);
   assert.ok((await handlers.edit_node({ slug: "index", nodeId: "1:2" })).error); // no style
   assert.ok((await handlers.edit_node({ slug: "index", nodeId: "1:2", style: "color:#000" })).error);
   assert.ok((await handlers.edit_node({ slug: "index", nodeId: "1:2", style: { "font-size;x": "1px" } })).error);
