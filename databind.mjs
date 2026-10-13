@@ -9,7 +9,7 @@
 //   1. 运行时里**不能出现反引号或 ${** —— 它被内联进 <script>(与 cloudInjection 同理)
 //   2. slugify 必须与 data-api/slug.mjs、软件端逐字符一致(databind.test.mjs 钉住)
 //   3. 后端不可用时必须保留 fallback 静态内容,绝不白屏
-import { layoutRuntime } from "./wordcloud.mjs";
+import { layoutRuntime, clientScript } from "./wordcloud.mjs";
 
 // 与 data-api/slug.mjs 的同名函数保持一致(databind.test.mjs 逐样本比对)。
 export const slugRuntimeSource = `function slugify(host) {
@@ -29,14 +29,27 @@ const SLUG_SOURCE = slugRuntimeSource;
 export const clientRuntime = `(function () {
 "use strict";
 var API = window.__DATA_API__;
-if (!API) { return; }
 
 ${SLUG_SOURCE}
 
+// 能不能联网,而不是"能不能渲染"。两件事必须分开:
+//   · 没有 API(构建时没配数据后端)→ 不联网;
+//   · 没有 Site(用 file:// 直接打开本地文件时 location.hostname 是空的)
+//     → 不知道往哪个命名空间写,也不联网。
+// **但两种情况都要把 fallback 画出来。** 旧代码在这里直接 return,结果
+// file:// 预览时连 fallback 都没有 —— 页面上那块是空的,用户看到的就是
+// "词云不能用"(实测:coco figma2 的 .databind 容器存在、db-body 全空,
+// 变量都还在但一个字都没画)。优雅降级的要求是"绝不白屏",不是"绝不联网"。
 var Site = slugify(location.hostname);
-if (!Site) { return; }             /* file:// 预览:保留 fallback,不发请求 */
+var ONLINE = !!(API && Site);
 
 ${layoutRuntime}
+
+// 真正的画布渲染器(window.renderWordCloud)。**必须内联** ——
+// layoutRuntime 只算出 layout,renderWordcloud() 靠 window.renderWordCloud 落笔。
+// 这里漏掉它,canvas 就永远停在 300x150 的默认尺寸、一个字都不画,
+// 而代码看起来一切正常(实测:coco figma2 的词云宿主在、canvas 在、就是空的)。
+${clientScript}
 
 /* ---------- 匿名访客标识(按站点隔离,localStorage) ---------- */
 function newClientId() {
@@ -52,10 +65,13 @@ function newClientId() {
   return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
 }
 var LS = "__dc_" + Site, client = null;
-try { client = localStorage.getItem(LS); } catch (e) { client = null; }
-if (!client) {
-  client = newClientId();
-  try { localStorage.setItem(LS, client); } catch (e) {}
+// 没联网时不碰 localStorage(file:// 下有些浏览器直接抛异常)
+if (ONLINE) {
+  try { client = localStorage.getItem(LS); } catch (e) { client = null; }
+  if (!client) {
+    client = newClientId();
+    try { localStorage.setItem(LS, client); } catch (e) {}
+  }
 }
 
 /* ---------- HTTP ---------- */
@@ -162,6 +178,10 @@ function initOne(root) {
 
   // 1) 先画 fallback —— 首屏立刻有内容,后端挂了也不白屏
   paint((spec.fallback && spec.fallback.data) || spec.fallback || null);
+
+  // 没联网(没配后端,或是 file:// 本地预览)就到此为止:
+  // fallback 已经画出来了,后面的读/写都需要后端。
+  if (!ONLINE) { return; }
 
   function paint(data) {
     if (!data) { return; }

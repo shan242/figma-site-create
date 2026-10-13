@@ -424,6 +424,27 @@ AI: bind_data(...)  →  databinds.json  →  build.mjs  →  databind.mjs 注�
   与纯静态完全一致。
 - **优雅降级是硬要求**:`fallback` 先画,后端不可用时保留它,绝不白屏;
   写失败只在角落提示,不阻塞页面其他交互。
+  ⚠️ **"不联网"和"不渲染"是两件事,必须分开。** 旧运行时的开头是
+  `if (!API) return;` 和 `if (!Site) return;` —— 而用 `file://` 打开本地文件时
+  `location.hostname` 是空的,`Site` 就是空串,于是脚本在**画 fallback 之前**就退出:
+  本地预览看到的是一块空白,用户报的就是"词云不能用"。现在用
+  `var ONLINE = !!(API && Site)` 当开关:fallback 照画,只把请求关掉。
+  (实测 coco figma2:`.databind` 容器和 canvas 都在,就是一个字都没画。)
+- **`weight: 0` 是合法值,不能过滤掉**。实时词云的 fallback 在"还没有人投票"时
+  每个桶的 count 都是 0,那时正确表现是把**全部选项按最小字号铺出来**,让访客
+  看得到可以点什么(实测那页配的正是 `minFont:14` + `empty:"No responses yet —
+  click the options above to grow the cloud."`)。旧条件 `.filter(w => w.weight > 0)`
+  把它们全丢掉 → `ranked` 为空 → **空布局**。同时 `sqrt(weight/maxWeight)` 在
+  maxWeight 也是 0 时得到 `0/0 = NaN`,字号变 NaN。负权重才是真的非法。
+  ⚠️ **"静默空布局"是这个模块的惯犯,已经栽过三次**:字符串数组被当成没有 `.text`
+  全部过滤掉、权重为 0 被过滤掉、以及下面的漏注入。**症状永远是"代码路径全通,
+  但页面上什么都没有"** —— 排查时先量"到底画出来没有"(读 canvas 的像素),
+  不要只看 DOM 结构在不在。
+- **注入运行时必须同时内联 `layoutRuntime` 和 `clientScript`**。前者只算出
+  layout,后者才定义真正落笔的 `window.renderWordCloud`。漏掉后者时,
+  `renderWordcloud()` 里那句 `if (window.renderWordCloud)` 会**静默跳过**,
+  canvas 停在 300x150 的默认尺寸、一个像素都不画,而控制台没有任何报错。
+  `databind.test.mjs` 现在直接断言 `clientRuntime` 里含 `window.renderWordCloud =`。
 - **"投过就不用再投"**:运行时用 localStorage 的匿名 UUID(`__dc_<site>`,按站点隔离)
   查 `/{site}/{collection}/mine`;有记录就回显并禁用提交。服务端**不做去重**(按设计),
   清掉 localStorage 即可重投 —— 已知且接受的边界。`options.mode:"single"` 时后端

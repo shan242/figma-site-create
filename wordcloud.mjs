@@ -50,14 +50,22 @@ export function layoutWordCloud(words, opts = {}) {
   // 会因为它没有 .text 而把**所有词过滤掉**,静默算出空布局:页面出来是个空框,
   // 看起来完全像"词云功能坏了",还查不出原因。这里给字符串补一个按顺序递减的
   // 默认权重(调用方通常按重要程度排序),让它退化成一张正常的词云而不是空框。
+  //
+  // **weight = 0 必须保留**,这是第二个同类坑。实时词云的 fallback 在"还没有人
+  // 投过票"时每个桶的 count 都是 0 —— 那时候正确表现是把全部选项按最小字号铺出来,
+  // 让访客看得到可以点什么(实测 coco figma2:24 个分类全 0,配上
+  // minFont:14 / empty:"No responses yet — click the options above to grow the cloud."
+  // 就是这个意图)。旧条件 `w.weight > 0` 把它们全部丢掉,排出一张空布局,
+  // 画布 1180x440 一个像素都不画。**空布局是这类 bug 的共同症状:代码路径全通,
+  // 只是什么都不显示。** 负权重才是真的非法。
   const ranked = (words || [])
     .map((w, i) => (typeof w === "string" ? { text: w, weight: Math.max(20, 100 - i * 5) } : w))
-    .filter((w) => w && typeof w.text === "string" && w.text.trim() && Number.isFinite(w.weight) && w.weight > 0 && !PUNCT_ONLY.test(w.text.trim()))
+    .filter((w) => w && typeof w.text === "string" && w.text.trim() && Number.isFinite(w.weight) && w.weight >= 0 && !PUNCT_ONLY.test(w.text.trim()))
     .map((w) => ({ text: w.text.trim(), weight: w.weight }))
     .sort((a, b) => b.weight - a.weight)
     .slice(0, maxWords);
 
-  const maxWeight = ranked.length ? ranked[0].weight : 1;
+  const maxWeight = ranked.length ? ranked[0].weight : 0;
   const placed = [];
 
   const tryPlace = (item, cx, cy) => {
@@ -73,7 +81,11 @@ export function layoutWordCloud(words, opts = {}) {
   const items = [];
   for (let i = 0; i < ranked.length; i++) {
     const r = ranked[i];
-    const size = Math.round(clamp(maxFont * Math.sqrt(r.weight / maxWeight), minFont, maxFont));
+    // 权重全为 0(还没有任何投票)时 sqrt(0/0) 是 NaN,字号也会变成 NaN,
+    // 整张图什么都画不出来。那种情况一律用最小字号:把选项铺满,
+    // 让访客看到"可以点这些"。
+    const scaled = maxWeight > 0 ? maxFont * Math.sqrt(r.weight / maxWeight) : minFont;
+    const size = Math.round(clamp(scaled, minFont, maxFont));
     const w = measureText(r.text, size);
     const h = size + GAP;
     const box = { w: w + GAP, h };

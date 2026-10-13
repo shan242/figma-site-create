@@ -56,6 +56,56 @@ test("注入的词云布局运行时与 layoutWordCloud 结果完全一致", () 
   assert.deepEqual(injected(words, opts), layoutWordCloud(words, opts), "实时词云与构建期词云必须同源同结果");
 });
 
+test("运行时必须内联 window.renderWordCloud,否则画布永远是空的", () => {
+  // 实测事故(coco figma2):词云宿主在、canvas 在、数据结构全对,就是一个像素都不画。
+  // 根因是 databind.mjs 只内联了 layoutRuntime(算布局),漏了 wordcloud.mjs 的
+  // clientScript(真正落笔的 window.renderWordCloud)—— renderWordcloud() 里那句
+  // `if (window.renderWordCloud)` 于是静默跳过,canvas 停在 300x150 默认尺寸。
+  // 这种"什么错都不报、只是不显示"的漏注入最难查,所以钉住它。
+  assert.match(clientRuntime, /window\.renderWordCloud\s*=/, "运行时里必须定义 renderWordCloud");
+});
+
+test("离线(没后端 / file:// 预览)时也要画 fallback,不能提前 return", () => {
+  // 旧代码 `if (!Site) return;` 在画 fallback 之前就退出 —— file:// 下
+  // location.hostname 是空的,于是整块是空的。优雅降级的要求是"绝不白屏",
+  // 不是"绝不联网":联网与否只该关掉请求,不该关掉渲染。
+  assert.match(clientRuntime, /var ONLINE = !!\(API && Site\)/, "用开关而不是提前 return");
+  assert.equal(/if \(!Site\) \{ return; \}/.test(clientRuntime), false, "不能再提前 return");
+  const paintIdx = clientRuntime.indexOf("先画 fallback");
+  const gateIdx = clientRuntime.indexOf("if (!ONLINE) { return; }");
+  assert.ok(paintIdx >= 0 && gateIdx >= 0, "两处都要在");
+  assert.ok(paintIdx < gateIdx, "必须先画 fallback,再判断要不要联网");
+});
+
+test("词云布局:权重全为 0 也要铺出全部选项(不是空布局)", () => {
+  // 实时词云的 fallback 在"还没人投票"时每个桶的 count 都是 0。正确表现是把
+  // 全部选项按最小字号铺出来让访客看得到能点什么。旧条件 `.filter(w => w.weight > 0)`
+  // 把它们全部丢掉 → ranked 为空 → 空布局 → 画布一个像素都不画。
+  const words = ["Landmarks", "Photographs", "Architecture", "Tickets"].map((text) => ({ text, weight: 0 }));
+  const layout = layoutWordCloud(words, { width: 1180, height: 440, minFont: 14, maxFont: 58 });
+  assert.equal(layout.items.length, 4, "4 个词一个都不能少");
+  for (const it of layout.items) {
+    assert.equal(it.size, 14, "权重全 0 时一律用最小字号");
+    assert.ok(Number.isFinite(it.x) && Number.isFinite(it.y), "坐标必须是有限数,不能是 NaN");
+  }
+});
+
+test("词云布局:负权重仍然丢弃(只有 0 是合法的)", () => {
+  const layout = layoutWordCloud([{ text: "ok", weight: 5 }, { text: "bad", weight: -1 }], { width: 400, height: 300 });
+  assert.deepEqual(layout.items.map((i) => i.text), ["ok"]);
+});
+
+test("词云布局:混合权重时 0 分的词用最小字号,不是 NaN", () => {
+  const layout = layoutWordCloud(
+    [{ text: "hot", weight: 100 }, { text: "cold", weight: 0 }],
+    { width: 600, height: 400, minFont: 12, maxFont: 48 },
+  );
+  const cold = layout.items.find((i) => i.text === "cold");
+  assert.ok(cold, "0 分的词也要出现");
+  assert.equal(cold.size, 12);
+  assert.equal(layout.items.find((i) => i.text === "hot").size, 48);
+});
+
 test("运行时源码语法有效(构造 Function 不抛)", () => {
   assert.doesNotThrow(() => new Function(clientRuntime));
   assert.match(clientRuntime, /function slugify/);
