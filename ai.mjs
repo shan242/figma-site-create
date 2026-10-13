@@ -19,6 +19,8 @@ import { resolve, dirname, sep, join, basename } from "node:path";
 import { buildSite } from "./build.mjs";
 import { findCanvas, hexToColor, expandInstances, collectAll, videoTracks, videoOptionsFrom } from "./lib.mjs";
 import { extractKeywordsLocal } from "./wordcloud.mjs";
+import { pageProbe } from "./pageprobe.mjs";
+import { pathToFileURL } from "node:url";
 
 // --- 图片理解 ------------------------------------------------------------------
 // DeepSeek 的图像理解只接受 JPEG/PNG/GIF/WebP,且**只允许出现在 user 消息里**
@@ -530,6 +532,91 @@ function summarize(name, result) {
 // writable.
 const WRITE_DENY = ["manifest.json", "wordclouds.json", "databinds.json", "videos.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"];
 
+// --- check_page 的页面探针脚本 ------------------------------------------------
+//
+// 在页面里跑,只回答"渲染出来到底是什么样"。这几项都是这一轮真出过问题的:
+// canvas 存在但一个像素没画、面板带着 submitted 属性却 opacity 0、
+// 过渡时长 27 小时、控件被 pointer-events 挡住、文字互相压住。
+const PAGE_PROBE = `(function () {
+  var out = { url: location.href, databinds: 0, states: {}, clouds: [], hidden: [], slowTransition: [], blocked: [], overlaps: [], canvasTotal: 0 };
+  var els = document.querySelectorAll(".databind");
+  out.databinds = els.length;
+  for (var i = 0; i < els.length; i++) {
+    var st = els[i].getAttribute("data-db-state") || "(无)";
+    out.states[st] = (out.states[st] || 0) + 1;
+  }
+  // 词云 canvas:真的画了东西吗?读像素,不看 DOM。
+  var cvs = document.querySelectorAll("canvas");
+  out.canvasTotal = cvs.length;
+  for (var i = 0; i < cvs.length; i++) {
+    var c = cvs[i], r = c.getBoundingClientRect();
+    if (r.width < 40 || r.height < 20) continue;
+    var painted = 0, samples = 0;
+    try {
+      var d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+      for (var j = 3; j < d.length; j += 4 * 53) { samples++; if (d[j] > 8) painted++; }
+    } catch (e) { painted = -1; }
+    // 容器可见吗?不可见时"没画像素"不算问题 —— 揭示式的面板本来就藏着。
+    var host = c.closest(".databind") || c.parentElement;
+    var hostOp = host ? parseFloat(getComputedStyle(host.querySelector(".db-body") || host).opacity) : 1;
+    out.clouds.push({ size: c.width + "x" + c.height, box: Math.round(r.width) + "x" + Math.round(r.height),
+      y: Math.round(r.top + window.scrollY), painted: painted, samples: samples,
+      pct: samples ? Math.round(painted / samples * 100) : -1,
+      visible: hostOp > 0.05, opacity: hostOp });
+  }
+  // 有内容却几乎看不见的容器
+  var all = document.querySelectorAll(".databind, .db-body, .replica-video");
+  for (var i = 0; i < all.length; i++) {
+    var el = all[i], cs = getComputedStyle(el);
+    var op = parseFloat(cs.opacity);
+    if (op > 0.001 && op < 0.9 && el.getBoundingClientRect().width > 40) {
+      out.hidden.push({ sel: el.className.split(" ")[0], opacity: cs.opacity, node: el.getAttribute("data-node-id") || "" });
+    }
+    if (parseFloat(cs.opacity) <= 0.001 && el.getBoundingClientRect().width > 40) {
+      out.hidden.push({ sel: el.className.split(" ")[0], opacity: cs.opacity, node: el.getAttribute("data-node-id") || "", note: "完全透明" });
+    }
+  }
+  // 过渡时长异常(会让"切换状态"看起来像没反应)
+  var every = document.querySelectorAll("*");
+  for (var i = 0; i < every.length && out.slowTransition.length < 5; i++) {
+    var cs2 = getComputedStyle(every[i]);
+    var durs = String(cs2.transitionDuration || "").split(",");
+    for (var k = 0; k < durs.length; k++) {
+      var sec = durs[k].trim().endsWith("ms") ? parseFloat(durs[k]) / 1000 : parseFloat(durs[k]);
+      if (sec > 5) { out.slowTransition.push({ sel: (every[i].className || every[i].tagName).toString().slice(0, 40), duration: durs[k].trim() }); break; }
+    }
+  }
+  // video / 控件被挡住
+  var vids = document.querySelectorAll("video");
+  for (var i = 0; i < vids.length; i++) {
+    var cs3 = getComputedStyle(vids[i]);
+    out.blocked.push({ tag: "video", muted: vids[i].muted, controls: vids[i].controls, autoplay: vids[i].autoplay,
+      src: (vids[i].getAttribute("src") || "").split("/").pop().slice(0, 24), pointerEvents: cs3.pointerEvents });
+  }
+  // 文字互相压住:带 data-node-id 的叶子文本块两两比
+  var texts = [];
+  for (var i = 0; i < every.length; i++) {
+    var el = every[i];
+    if (!el.getAttribute || !el.getAttribute("data-node-id")) continue;
+    var own = "";
+    for (var m = 0; m < el.childNodes.length; m++) { var n = el.childNodes[m]; if (n.nodeType === 3) own += n.textContent; }
+    if (!own.trim()) continue;
+    var rr = el.getBoundingClientRect();
+    if (rr.width < 8 || rr.height < 6) continue;
+    texts.push({ id: el.getAttribute("data-node-id"), x: rr.left, y: rr.top + window.scrollY, w: rr.width, h: rr.height, t: own.replace(/\\s+/g, " ").trim().slice(0, 30) });
+  }
+  for (var a = 0; a < texts.length; a++) for (var b = a + 1; b < texts.length; b++) {
+    var A = texts[a], B = texts[b];
+    var ox = Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x);
+    var oy = Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y);
+    if (ox <= 1 || oy <= 1) continue;
+    var pct = (ox * oy) / Math.min(A.w * A.h, B.w * B.h);
+    if (pct > 0.5) out.overlaps.push({ a: A.id + " " + A.t, b: B.id + " " + B.t, pct: Math.round(pct * 100) });
+  }
+  out.overlaps = out.overlaps.slice(0, 8);
+  return out;
+})()`;
+
 // --- CSS 体检 -----------------------------------------------------------------
 // 为什么需要:这一整轮排查下来,页面上"样式不生效 / 看不见 / 点不动"的问题**全部**
 // 出在 AI 手写的 CSS 上,而且是它自己看不出来的那种:
@@ -1005,6 +1092,61 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         cssWarnings = auditCss(content).map((w) => `[${w.rule}] ${w.message}${w.sample ? `  例: ${w.sample}` : ""}`);
       }
       return { path, bytes: Buffer.byteLength(content), locked, ...(cssWarnings.length ? { warnings: cssWarnings } : {}) };
+    },
+
+    // 把产物页面真的打开看一眼 —— 代替 AI 的眼睛。
+    // 这一轮所有"DOM 全对但页面不对"的问题都只能靠它发现。
+    async check_page({ slug, waitMs }) {
+      const page = loadPages().find((p) => p.slug === slug);
+      if (!page) return { error: `没有这个页面: ${slug}` };
+      const file = resolve(root, page.file);
+      if (!existsSync(file)) return { error: `产物还没生成: ${page.file}。先 regenerate 再检查` };
+      if (waitMs) process.env.REPLICA_PROBE_WAIT = String(Math.max(1000, Math.min(20000, waitMs)));
+      let r;
+      try {
+        r = await pageProbe(pathToFileURL(file).href, PAGE_PROBE);
+      } catch (e) {
+        return { error: `打不开页面做检查: ${e.message}` };
+      }
+      const v = r?.value || {};
+      const problems = [];
+      for (const c of v.clouds || []) {
+        // 只在**容器可见**时判定"画没画" —— 还没提交时面板本来就 opacity:0 藏着,
+        // 那时候 canvas 里是 fallback,报"一个像素没画"是误报,只会让 AI 白忙。
+        if (c.visible === false) {
+          problems.push(`词云容器 ${c.box} 当前是隐藏的(opacity ${c.opacity}) —— 如果这是"提交后才揭示"的设计就正常;否则检查揭示逻辑。`);
+          continue;
+        }
+        if (c.painted === 0) problems.push(`词云画布 ${c.box}(y=${c.y}) 一个像素都没画 —— canvas 在、尺寸对,但内容是空的。通常是布局函数返回了空数组(比如权重全为 0 被过滤掉),或者渲染器没挂上。`);
+        else if (c.pct >= 0 && c.pct < 1) problems.push(`词云画布 ${c.box} 只有 ${c.pct}% 的采样点有颜色,基本等于空白。`);
+      }
+      for (const h of v.hidden || []) {
+        problems.push(`${h.sel}${h.node ? " (节点 " + h.node + ")" : ""} 的 opacity 是 ${h.opacity}${h.note ? "(" + h.note + ")" : ""} —— 有内容却几乎看不见。这一轮遇到过:面板带着 data-db-state="submitted" 却是 opacity 0.0003,原因是揭示卡在 27 小时的过渡动画中途。`);
+      }
+      // 同一种时长只报一次 —— 页面上往往几十个元素共用同一条规则,
+      // 逐条列出来会把真正的问题淹掉。
+      const slowSeen = new Set();
+      for (const t of v.slowTransition || []) {
+        if (slowSeen.has(t.duration)) continue;
+        slowSeen.add(t.duration);
+        problems.push(`有元素披着 ${t.duration} 的过渡(超过 5 秒)—— 状态切换会看起来像"没反应"。这一轮就踩过:100000s 的过渡让揭示永远跑不完,刷新后词云不显示,必须再点一次才出来。`);
+      }
+      for (const b of v.blocked || []) {
+        if (b.pointerEvents === "none") problems.push(`video(${b.src}) 被设了 pointer-events: none —— 控件会显示但点不动。`);
+        if (b.muted && b.controls === false && b.autoplay === false) problems.push(`video(${b.src}) 既静音、又没控件、又不自动播放 —— 访客完全无法播放它。`);
+      }
+      for (const o of v.overlaps || []) problems.push(`文字叠在一起: ${o.a} 与 ${o.b}(重叠 ${o.pct}%)。`);
+      for (const e of r?.errors || []) problems.push(`页面抛了 JS 异常: ${e}`);
+      return {
+        slug,
+        ok: problems.length === 0,
+        databinds: v.databinds,
+        states: v.states,
+        clouds: (v.clouds || []).length,
+        videos: v.blocked || [],
+        problems,
+        ...(problems.length ? { hint: "这些问题浏览器控制台一条都不会报,只能靠这个检查发现。请逐条处理。" } : {}),
+      };
     },
 
     async apply_wordcloud({ id, slug, rect, spec }) {
@@ -1658,6 +1800,24 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
             },
           },
           required: ["slug", "rect", "spec"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "check_page",
+        description:
+          "把生成好的页面真的打开渲染一遍,报告**只有渲染后才发现得了**的问题:词云 canvas 是不是真的画了像素、有内容的容器是不是几乎透明(opacity 接近 0)、过渡时长是否长得离谱、" +
+          "video 是否被 pointer-events 挡住/既静音又没控件、文字是否互相压住、页面有没有抛 JS 异常。" +
+          "这些问题浏览器控制台一条都不会报,而你**看不到页面** —— 改完样式、放完词云、插完视频后都应该调一次。返回 problems 数组时逐条处理。不消耗 API 额度",
+        parameters: {
+          type: "object",
+          properties: {
+            slug: { type: "string", description: "页面 slug" },
+            waitMs: { type: "number", description: "可选;等页面渲染多久再检查,默认 6000 毫秒(有轮询/动画时可以调大)" },
+          },
+          required: ["slug"],
         },
       },
     },
