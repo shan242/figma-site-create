@@ -599,6 +599,110 @@ test("restore_history:和当前状态一样时不做任何事,也不打扰用户
   assert.equal(asked, 0, "没有实际改动就不该弹确认框");
 });
 
+// --- read_page_text 的过滤与"说清总数" -----------------------------------------
+// 起因:AI 要改一个页面里的 Q1,但节点清单被剪掉一半,它于是自己编出
+// rootId/fromIndex/skip 三个**不存在的参数**,还拿 apply_wordcloud 和假视频路径
+// 去"探测"节点 —— 十几轮全白费。工具得给它真的过滤能力,并且**永远别静默截断**。
+
+test("read_page_text:节点多时明确报告总数,不静默截断", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  // 造一个 200 节点的页面
+  const data = JSON.parse(readFileSync(join(dir, "data", "index.json"), "utf8"));
+  const kids = [];
+  for (let i = 0; i < 200; i++) {
+    data.nodeById[`5:${i}`] = { id: `5:${i}`, type: "TEXT", characters: `节点 ${i}`, absoluteBoundingBox: { x: i, y: 100 + i, width: 50, height: 10 } };
+    kids.push(`5:${i}`);
+  }
+  data.nodeById["1:1"].children = [...data.nodeById["1:1"].children, ...kids];
+  writeFileSync(join(dir, "data", "index.json"), JSON.stringify(data));
+
+  const r = await handlers.read_page_text({ slug: "index" });
+  assert.equal(r.totalNodes, 203, "要说清总共有多少节点");
+  assert.equal(r.shown, 150, "默认一次给 150");
+  assert.match(String(r.more), /还有 53 个/, "要说清还剩多少");
+  assert.match(String(r.more), /under/, "要给出真实存在的缩小范围手段(read_page_text 的 under/type/q/limit/offset)");
+  assert.match(String(r.more), /limit\/offset/, "翻页方式也要说");
+});
+
+test("read_page_text:under / type / q / limit / offset 真的能缩小范围", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const data = JSON.parse(readFileSync(join(dir, "data", "index.json"), "utf8"));
+  data.nodeById["7:1"] = { id: "7:1", type: "FRAME", name: "Q1区", absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 }, children: ["7:2", "7:3"] };
+  data.nodeById["7:2"] = { id: "7:2", type: "TEXT", characters: "Q1 你更理解哪些", absoluteBoundingBox: { x: 0, y: 0, width: 50, height: 10 } };
+  data.nodeById["7:3"] = { id: "7:3", type: "RECTANGLE", absoluteBoundingBox: { x: 0, y: 20, width: 50, height: 10 } };
+  data.nodeById["1:1"].children = [...data.nodeById["1:1"].children, "7:1"];
+  writeFileSync(join(dir, "data", "index.json"), JSON.stringify(data));
+
+  // under:只看这棵子树
+  const sub = await handlers.read_page_text({ slug: "index", under: "7:1" });
+  assert.deepEqual(sub.all.map((n) => n.id).sort(), ["7:1", "7:2", "7:3"], `under 应该只给子树: ${JSON.stringify(sub.all.map((n) => n.id))}`);
+  // type:只看文本
+  const texts = await handlers.read_page_text({ slug: "index", type: "TEXT" });
+  assert.equal(texts.all.every((n) => n.type === "TEXT"), true);
+  // q:按文字找 —— 这正是"找 Q1 那个节点"该走的路。
+  // 名字也参与匹配(叫「Q1区」的 FRAME 也该被找到),所以断言"命中"而不是"只命中一个"。
+  const found = await handlers.read_page_text({ slug: "index", q: "Q1" });
+  assert.ok(found.all.some((n) => n.id === "7:2"), `q 要能命中正文里的 Q1: ${JSON.stringify(found.all)}`);
+  assert.ok(found.all.some((n) => n.id === "7:1"), "名字里带 Q1 的容器也该被找到");
+  // limit / offset 翻页
+  const page1 = await handlers.read_page_text({ slug: "index", limit: 2 });
+  const page2 = await handlers.read_page_text({ slug: "index", limit: 2, offset: 2 });
+  assert.equal(page1.all.length, 2);
+  assert.equal(page2.all.length, 2);
+  assert.notEqual(page1.all[0].id, page2.all[0].id, "翻页要真的往后走");
+  // under 给错要明确报错,不能静默返回空
+  const bad = await handlers.read_page_text({ slug: "index", under: "nope" });
+  assert.match(String(bad.error), /没有节点/);
+});
+
+test("read_file:读到目录时说清它是目录并列内容", async () => {
+  // 日志里 AI 读 data/chapter-4.json 时撞上过 EISDIR,一次就放弃了
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.read_file({ path: "data" });
+  assert.match(String(r.error), /是一个目录/);
+  assert.match(String(r.hint), /index\.json/, "要列出目录里有什么");
+});
+
+test("read_file:文件猜错时列出该目录实际有什么", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.read_file({ path: "data/chapter-4.text.json" });
+  assert.match(String(r.error), /文件不存在/);
+  assert.match(String(r.hint), /index\.json/, `要给出真实存在的文件名: ${JSON.stringify(r)}`);
+});
+
+test("参数不是合法 JSON 时,报错要列出合法参数名", async () => {
+  // 实测:AI 给 read_page_text 传了 rootId/fromIndex/skip(三个都不存在),参数
+  // 序列化直接坏了;旧报错只说"不是合法 JSON",它于是又试了别的组合。
+  const events = [];
+  let turn = 0;
+  const model = async () => {
+    turn++;
+    if (turn === 1) return { content: "", toolCalls: [{ id: "c1", name: "read_page_text", arguments: { __raw: '{"slug":"x","fromIndex":1,"skip":2' } }] };
+    return { content: "好", toolCalls: [] };
+  };
+  let seen = null;
+  await runAgent({
+    messages: [{ role: "user", content: "go" }],
+    model: async (history, schemas) => {
+      const r = await model(history, schemas);
+      return r;
+    },
+    tools: {
+      schemas: [{ function: { name: "read_page_text", parameters: { properties: { slug: {}, under: {}, type: {}, q: {}, limit: {}, offset: {} } } } }],
+      handlers: { read_page_text: async () => ({ ok: 1 }) },
+    },
+    onEvent: (e) => { events.push(e); },
+    config: {},
+  });
+  // 从 history 里把那条 tool 结果捞出来看
+  const found = events.find((e) => e.type === "tool_end");
+  assert.ok(found, "应该有工具结束事件");
+});
+
 test("buildSystemPrompt:关键规则一条都不能丢", () => {
   const p = buildSystemPrompt(null);
   // 每条都是"删掉了会出事故"的规则,列在这里防止重构时无声丢失
@@ -1177,12 +1281,31 @@ test("pruneToolResult:按 code point 切,不劈开代理对/不撕裂汉字", ()
   assert.equal(r.text.endsWith("🌏"), true);
 });
 
-test("pruneToolResult:超长数组保留前若干项并说明省略了多少", () => {
-  const r = pruneToolResult({ all: Array.from({ length: 200 }, (_, i) => ({ id: `${i}`, type: "TEXT" })) });
-  assert.ok(r.all.length < 200, "要变短");
-  assert.equal(r.all.length, 41, "保留 40 项 + 1 条说明");
-  assert.match(String(r.all[40]), /省略 160 项,共 200 项/);
-  assert.equal(r.all[0].id, "0", "顺序不能变");
+test("pruneToolResult:项数多但总字节小的数组**不许动**", () => {
+  // 这是踩出来的:原来按项数砍(maxItems:80/keepItems:40),于是 read_page_text
+  // 的 143 个节点(才 14KB)被砍成 40 个,而用户要改的那个 Q1 节点排在第 41 位 ——
+  // **恰好被剪掉**。AI 拿着残缺列表只能到处乱试(用词云当探针、用假视频路径骗
+  // 文件列表、自己编 fromIndex/skip 参数)。按字节判断就不会有这种事。
+  const all = Array.from({ length: 200 }, (_, i) => ({ id: `${i}`, type: "TEXT", x: i, y: i, w: 10, h: 10 }));
+  const r = pruneToolResult({ all });
+  assert.equal(r.all.length, 200, "200 个小对象总共才几 KB,不该动");
+  assert.equal(r.all[199].id, "199", "最后一项必须还在");
+});
+
+test("pruneToolResult:真的很大时按字节尽量多留,并说清总数和出路", () => {
+  // 每项 1KB,400 项 ≈ 400KB,远超预算
+  const big = Array.from({ length: 400 }, (_, i) => ({ id: `${i}`, blob: "x".repeat(1000) }));
+  const r = pruneToolResult({ all: big });
+  assert.ok(r.all.length < 400, "要裁");
+  // 24KB 预算,每项约 1KB → 能留 20 多项。重点是**留多少由字节决定**,
+  // 而不是写死 40 —— 而且现在工具真的支持 limit/offset/under/type 翻页与过滤。
+  assert.ok(r.all.length > 5, `至少该留下几项,实际 ${r.all.length - 1}`);
+  const marker = String(r.all[r.all.length - 1]);
+  assert.match(marker, /共 400 项/);
+  assert.match(marker, /read_page_text 支持 under \/ type \/ limit \/ offset/, "要给出**真实存在**的过滤手段");
+  // 列表项本身不该被改
+  assert.equal(r.all[0].id, "0");
+  assert.equal(r.all[0].blob.length, 1000);
 });
 
 test("pruneToolResult:剪完没变小就宁可不动", () => {

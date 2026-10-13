@@ -237,7 +237,10 @@ export const PROMPT_SECTIONS = [
     when: "list_images",
     text:
       "## 先发现,再动手\n" +
-      "- **绝不要靠节点名字猜 id,也不要一个个试。** 名字里有\"视频\"/\"图片\"/\"按钮\"的节点不一定真是那个东西。要拿 nodeId 就用对应的列举工具:图片和**视频**用 list_images(它同时列出设计自带的 VIDEO 填充和 insert_video 插入的),文字用 read_page_text,页面上有什么问题用 check_page(check_page 报视频时会带上 nodeId)。实测有一次 AI 因为找不到视频节点,连猜了 20 多个 id 才放弃 —— 那些调用全是白费的。\n" +
+      "- **绝不要靠节点名字猜 id,也不要一个个试。** 名字里有\"视频\"/\"图片\"/\"按钮\"的节点不一定真是那个东西。要拿 nodeId 就用对应的列举工具:图片和**视频**用 list_images(它同时列出设计自带的 VIDEO 填充和 insert_video 插入的),文字的节点清单用 read_page_text,页面上有什么问题用 check_page(check_page 报视频时会带上 nodeId)。实测有一次 AI 因为找不到视频节点,连猜了 20 多个 id 才放弃 —— 那些调用全是白费的。\n" +
+      "- **页面节点很多、清单看起来不全时,用 read_page_text 自带的过滤翻页** —— `under`(只看某棵子树)、`type`、`q`(文字包含)、`limit` + `offset`。返回里的 `totalNodes` / `more` 会告诉你总共多少、还有多少。\n" +
+      "- **不要拿别的工具当探针。** 实测有一次 AI 找不到节点 id,于是:用 apply_wordcloud 放一个临时词云、指望重叠检查顺带报出坐标,再用 append_css + check_page 探一遍,最后用一个**故意不存在的视频路径**去骗出媒体文件列表 —— 十几轮全是白费的。正确的做法只有一个:用上面那些**列举工具**拿 id。\n" +
+      "- **不要发明工具参数。** read_page_text 只有 slug / under / type / q / limit / offset。参数名不在工具说明里的就是不存在 —— 工具会报错并把合法参数名列给你。\n" +
       "- **改从来不会渲染的节点是白费的。** 发布数据里有一大块组件定义区的原件:在数据里有坐标、看着正常,但页面上永远不出现。工具会拒绝这种 id 并列出一个可用的;遇到就直接改用列出来的那些。",
   },
   {
@@ -661,7 +664,14 @@ export function createDeepSeekModel(config) {
 // 直接砍字符串会得到非法 JSON,模型想按字段读就废了。所以这里**按字段递归剪**:
 // 长字符串各自保留头尾,超长数组保留前若干项,结构始终是合法 JSON。
 export const PRUNE_MARKER = "\n\n[... 中间内容已裁剪 ...]\n\n";
-export const PRUNE_DEFAULTS = Object.freeze({ thresholdChars: 8192, headChars: 4096, tailChars: 1024, maxItems: 80, keepItems: 40, maxDepth: 6 });
+export const PRUNE_DEFAULTS = Object.freeze({
+  thresholdChars: 8192,
+  headChars: 4096,
+  tailChars: 1024,
+  maxArrayChars: 24000, // 数组序列化后超过这个才裁(143 个节点才 14KB,不动)
+  maxItems: 400, // 绝对上限,防止病态巨数组
+  maxDepth: 6,
+});
 
 /** 按 code point 切,避免劈开代理对。 */
 function slicePoints(s, start, end) {
@@ -681,15 +691,40 @@ export function pruneToolResult(result, cfg = {}) {
     if (n <= c.thresholdChars) return s;
     return slicePoints(s, 0, c.headChars) + PRUNE_MARKER + slicePoints(s, n - c.tailChars, n);
   };
+  // 序列化大小 —— 数组该不该裁看的是这个,不是项数
+  const size = (v) => {
+    try {
+      return JSON.stringify(v).length;
+    } catch {
+      return Infinity;
+    }
+  };
   const walk = (v, depth) => {
     if (typeof v === "string") return pruneString(v);
     if (depth >= c.maxDepth) return v;
     if (Array.isArray(v)) {
       const mapped = v.map((x) => walk(x, depth + 1));
-      if (mapped.length <= c.maxItems) return mapped;
+      // **按总字节判断,不按项数** —— 这一条是踩出来的:
+      // 原来写 maxItems:80 / keepItems:40,于是 read_page_text 的 143 个节点
+      // (才 14KB,完全不算大)被砍成 40 个。而用户要改的那个 Q1 节点排在第 41 位,
+      // **恰好被剪掉** —— AI 拿着残缺列表只能到处乱试:用 apply_wordcloud 当探针、
+      // 用不存在的视频路径骗出文件列表、甚至自己编出 fromIndex/skip 这类
+      // 工具根本没有的参数。而剪枝的说明还写着"缩小范围再查一次" ——
+      // 那个能力当时并不存在,等于给了个做不到的承诺。
+      if (mapped.length <= c.maxItems && size(mapped) <= c.maxArrayChars) return mapped;
+      const kept = [];
+      let bytes = 0;
+      for (const item of mapped) {
+        const n = size(item);
+        if (bytes + n > c.maxArrayChars) break;
+        kept.push(item);
+        bytes += n;
+      }
+      // 至少留一项 —— 整个抹掉比不剪更糟
+      if (!kept.length) kept.push(mapped[0]);
       return [
-        ...mapped.slice(0, c.keepItems),
-        `[... 省略 ${mapped.length - c.keepItems} 项,共 ${mapped.length} 项。需要更多就缩小范围再查一次 ...]`,
+        ...kept,
+        `[... 共 ${mapped.length} 项,已列出前 ${kept.length} 项(内容太大)。**用工具自带的过滤参数缩小范围** (read_page_text 支持 under / type / limit / offset),不要靠猜 nodeId ...]`,
       ];
     }
     if (v && typeof v === "object") {
@@ -992,7 +1027,22 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
       }
       let result;
       if (tc.arguments && tc.arguments.__raw) {
-        result = { error: `工具参数不是合法 JSON: ${tc.arguments.__raw.slice(0, 160)}` };
+        // 参数不是合法 JSON 时,**必须把合法参数名列出来**。
+        // 实测:AI 想给 read_page_text 传 rootId/fromIndex/skip(这三个参数
+        // 根本不存在,是它自己编的),参数序列化直接坏了,而旧报错只说
+        // "不是合法 JSON" —— 它于是又试了一遍别的组合。报错里给出真实参数,
+        // 它一次就能改对。
+        const schema = (tools.schemas || []).find((s) => s?.function?.name === tc.name);
+        const props = schema?.function?.parameters?.properties || null;
+        result = {
+          error: `工具参数不是合法 JSON: ${String(tc.arguments.__raw).slice(0, 160)}`,
+          ...(props
+            ? {
+                validParams: Object.keys(props),
+                hint: `${tc.name} 接受的参数只有:${Object.keys(props).join(", ")}。**不要发明参数名** —— 上面没有的就是不存在。`,
+              }
+            : {}),
+        };
       } else {
         const fn = tools.handlers[tc.name];
         if (!fn) result = { error: `未知工具: ${tc.name}` };
@@ -1584,7 +1634,12 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       return { pages: loadPages().map(({ path, slug, title, file }) => ({ path, slug, title, file })) };
     },
 
-    async read_page_text({ slug }) {
+    // under / type / q / limit / offset 是给**大页面**用的。
+    // 起因:AI 在 143 个节点的页面上要改 Q1,但列表被别处剪掉了一半,
+    // 它于是自己编出 rootId / fromIndex / skip 这些**不存在的参数**,
+    // 还试着用 apply_wordcloud 和假视频路径去"探测"节点 —— 全是白费的。
+    // 与其让它猜,不如给它真的过滤能力。
+    async read_page_text({ slug, under, type, q, limit, offset }) {
       const page = loadPages().find((p) => p.slug === slug);
       if (!page) return { error: `没有这个页面: ${slug}。可用 list_pages 查看。` };
       const { data, text } = pageTextOf(slug);
@@ -1592,23 +1647,59 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       const cb = canvas?.absoluteBoundingBox;
       const truncated = text.length > 20000 ? `${text.slice(0, 20000)}\n…(truncated)` : text;
       // Node ids for edit_text/edit_node/insert_video targeting: every node with
-      // position and type, TEXT nodes carrying a short snippet. Bounded so the
-      // reply stays small; the model picks a nodeId from here rather than
-      // inventing one.
+      // position and type, TEXT nodes carrying a short snippet. The model picks a
+      // nodeId from here rather than inventing one.
       //
       // **只列真正会被渲染的节点**(从 roots 可达)。发布数据里还有一大块组件定义区
       // 的原件:它们在 nodeById 里、有坐标、看着完全正常,但**永远不会出现在页面上**。
       // 之前把整张表都列给模型,它挑中幽灵节点后 edit_text / insert_video 都"成功"了
       // 却什么都没发生 —— 用户看到的是"AI 说改了但页面没变"。
+      let nodes = collectAll(data);
+      if (under) {
+        // 只要这一棵子树 —— 大页面里"Q1 那一块"就是这么拿到的
+        const root = data.nodeById?.[under];
+        if (!root) return { error: `页面 ${slug} 没有节点 ${under}`, hint: "under 要是这条页面数据里的节点 id;先不带 under 调一次拿顶层节点。" };
+        const sub = [];
+        const walk = (id) => {
+          const n = data.nodeById?.[id];
+          if (!n) return;
+          sub.push(n);
+          for (const c of n.children || []) walk(c);
+        };
+        walk(under);
+        nodes = sub;
+      }
+      if (type) nodes = nodes.filter((n) => String(n.type).toUpperCase() === String(type).toUpperCase());
+      if (q) {
+        const needle = String(q).toLowerCase();
+        nodes = nodes.filter((n) => String(n.characters || n.name || "").toLowerCase().includes(needle));
+      }
+      const total = nodes.length;
+      const lim = Math.max(1, Math.min(Number.isFinite(limit) ? limit : 150, 400));
+      const start = Math.max(0, Number.isFinite(offset) ? offset : 0);
       const all = [];
-      for (const n of collectAll(data)) {
+      for (const n of nodes.slice(start, start + lim)) {
         const bb = n.absoluteBoundingBox;
         const entry = { id: n.id, type: n.type, x: Math.round(bb?.x ?? 0), y: Math.round(bb?.y ?? 0), w: Math.round(bb?.width ?? 0), h: Math.round(bb?.height ?? 0) };
         if (n.type === "TEXT" && n.characters) entry.text = n.characters.length > 40 ? `${n.characters.slice(0, 40)}…` : n.characters;
         all.push(entry);
-        if (all.length >= 150) break;
       }
-      return { slug, canvas: cb ? { width: cb.width, height: cb.height } : null, text: truncated, all };
+      const more = start + all.length < total;
+      return {
+        slug,
+        canvas: cb ? { width: cb.width, height: cb.height } : null,
+        text: truncated,
+        all,
+        // **永远说清总共多少、现在给了多少、还有没有** —— 静默截断是这一整类
+        // 问题的根源:AI 不知道少了东西,就会去猜、去试、去用别的工具探测。
+        totalNodes: total,
+        shown: all.length,
+        ...(start ? { offset: start } : {}),
+        ...(more
+          ? { more: `还有 ${total - start - all.length} 个没列出来。用 limit/offset 翻页,或者用 under(节点 id)只看某一棵子树、用 type('TEXT'/'RECTANGLE'…)或 q(文字包含)过滤 —— **不要猜 nodeId**。` }
+          : {}),
+        ...(under || type || q || start ? { filtered: { ...(under ? { under } : {}), ...(type ? { type } : {}), ...(q ? { q } : {}), ...(start ? { offset: start } : {}) } } : {}),
+      };
     },
 
     // 列出页面上的图片节点,让模型知道"有哪些图可以看"以及它们的 id。
@@ -1737,7 +1828,25 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
             note: `该文件尚不存在,说明这个目录里还没有任何记录(${OVERLAY_HINT[rel]})。这是正常的初始状态,**不是错误** —— 直接用对应工具添加第一条即可,不需要先创建它。`,
           };
         }
-        return { error: `文件不存在: ${path}` };
+        // 目录也一样:猜一个不存在的文件名很常见,直接报 ENOENT 帮不上忙。
+        // 能安全列出所在目录就列出来,它下一句就能说对。
+        const parentRel = dirname(norm(path));
+        try {
+          const dir = parentRel && parentRel !== "." ? resolveInDir(parentRel) : root;
+          const entries = readdirSync(dir).slice(0, 30);
+          return { error: `文件不存在: ${path}`, hint: `该目录下实际有: ${entries.join(", ")}${entries.length >= 30 ? " …" : ""}` };
+        } catch {
+          return { error: `文件不存在: ${path}` };
+        }
+      }
+      if (statSync(p).isDirectory()) {
+        // 曾经这里直接 readFileSync → EISDIR,日志里 AI 试了一次就放弃。
+        // 说清"这是目录"并列出内容,它就能改对。
+        const entries = readdirSync(p).slice(0, 30);
+        return {
+          error: `${path} 是一个目录,不是文件`,
+          hint: `目录里有: ${entries.join(", ")}${entries.length >= 30 ? " …" : ""}。要列目录用这个报错就够了,不需要别的工具。`,
+        };
       }
       let content = readFileSync(p, "utf8");
       // 记下"读过它、内容是这一版" —— write_file 靠它判断能不能安全覆写
@@ -2597,8 +2706,22 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       type: "function",
       function: {
         name: "read_page_text",
-        description: "读取某个页面(slug)的全部文本与画布尺寸,用于提炼关键词和选择词云位置",
-        parameters: { type: "object", properties: { slug: { type: "string", description: "页面 slug,来自 list_pages" } }, required: ["slug"] },
+        description:
+          "读取某个页面(slug)的全部文本、画布尺寸,以及**节点清单**(id/类型/坐标/尺寸;TEXT 带前 40 字片段)。" +
+          "nodeId 一律从这里拿 —— 不要猜、不要一个个试。页面节点很多时用 under(只看某棵子树)/ type / q(文字包含)/ limit / offset 缩小范围;" +
+          "返回里的 totalNodes 和 more 会告诉你总共多少、还有多少没列出来。不消耗 API 额度",
+        parameters: {
+          type: "object",
+          properties: {
+            slug: { type: "string", description: "页面 slug,来自 list_pages" },
+            under: { type: "string", description: "可选;只看这个节点及其子树(要先从一次不带 under 的调用里拿到 id)" },
+            type: { type: "string", description: "可选;只列这一种节点类型,如 TEXT / RECTANGLE / FRAME / IMAGE" },
+            q: { type: "string", description: "可选;只列文字或名字里包含这段文字的节点(不区分大小写)" },
+            limit: { type: "number", description: "可选;这次最多列几个,默认 150、上限 400" },
+            offset: { type: "number", description: "可选;从第几个开始列,配合 limit 翻页" },
+          },
+          required: ["slug"],
+        },
       },
     },
     {
