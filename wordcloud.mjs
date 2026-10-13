@@ -20,15 +20,17 @@ const GAP = 4; // px padding around every placed word
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Rough glyph width so Node can place words without a canvas: CJK is
-// square-ish, latin/digits are narrower. 5% extra so neighbor boxes rarely
-// collide once the real font renders.
+// square-ish, latin/digits are narrower (0.55em), the rest (punctuation,
+// spaces) is 0.3em. 5% extra so neighbor boxes rarely collide once the real
+// font renders.
+// (函数体内不写注释 —— 它会被 toString() 打进浏览器脚本,见 layoutWordCloud 上方。)
 export function measureText(text, size) {
   let w = 0;
   for (const ch of text) {
     const code = ch.codePointAt(0);
-    if (code >= 0x2e80) w += size; // CJK + wide glyphs
+    if (code >= 0x2e80) w += size;
     else if (/[0-9a-zA-Z'’&%@#]/.test(ch)) w += size * 0.55;
-    else w += size * 0.3; // punctuation/space
+    else w += size * 0.3;
   }
   return w * 1.05;
 }
@@ -36,6 +38,28 @@ export function measureText(text, size) {
 const PUNCT_ONLY = /^[^\p{L}\p{N}]+$/u;
 
 // Layout words inside a rectangle. Deterministic given the same input.
+//
+// ⚠️ 这个函数(以及 clamp / measureText)会被 `Function.prototype.toString()` 打进
+// 浏览器的注入脚本,所以**函数体里不要写注释** —— toString() 返回的是源码本身,
+// 注释会一字不差地发到每个访客的页面上(实测一次泄漏了 756 个中文字符、运行时
+// 从 ~9KB 涨到 16KB,而这些注释还是中文的,出现在英文站点的 view-source 里)。
+// 说明一律写在这里,函数体内只留代码。
+//
+// 契约是 [{text, weight}],但纯字符串数组 ["词","词"] 是很自然的误用 —— 旧逻辑
+// 会因为它没有 .text 而把**所有词过滤掉**,静默算出空布局:页面出来是个空框,
+// 看起来完全像"词云功能坏了",还查不出原因。这里给字符串补一个按顺序递减的
+// 默认权重(调用方通常按重要程度排序),让它退化成一张正常的词云而不是空框。
+//
+// **weight = 0 必须保留**,这是第二个同类坑。实时词云的 fallback 在"还没有人
+// 投过票"时每个桶的 count 都是 0 —— 那时候正确表现是把全部选项按最小字号铺出来,
+// 让访客看得到可以点什么(实测 coco figma2:24 个分类全 0,配上 minFont:14 /
+// empty:"No responses yet — click the options above to grow the cloud." 就是这个意图)。
+// 旧条件 `.filter(w => w.weight > 0)` 把它们全部丢掉,排出一张空布局,
+// 画布 1180x440 一个像素都不画。**空布局是这类 bug 的共同症状:代码路径全通,
+// 只是什么都不显示。** 负权重才是真的非法。
+//
+// 字号:权重全为 0 时 sqrt(0/0) 是 NaN,会算出 NaN 字号 → 什么都画不出来;
+// 那种情况一律用 minFont,把选项铺满。
 export function layoutWordCloud(words, opts = {}) {
   const width = opts.width || 400;
   const height = opts.height || 300;
@@ -45,19 +69,6 @@ export function layoutWordCloud(words, opts = {}) {
   const maxWords = opts.maxWords || 60;
   const fontFamily = opts.fontFamily || "'Inter', system-ui, sans-serif";
 
-  // Normalize + filter, largest weight first.
-  // 契约是 [{text, weight}],但纯字符串数组 ["词","词"] 是很自然的误用 —— 旧逻辑
-  // 会因为它没有 .text 而把**所有词过滤掉**,静默算出空布局:页面出来是个空框,
-  // 看起来完全像"词云功能坏了",还查不出原因。这里给字符串补一个按顺序递减的
-  // 默认权重(调用方通常按重要程度排序),让它退化成一张正常的词云而不是空框。
-  //
-  // **weight = 0 必须保留**,这是第二个同类坑。实时词云的 fallback 在"还没有人
-  // 投过票"时每个桶的 count 都是 0 —— 那时候正确表现是把全部选项按最小字号铺出来,
-  // 让访客看得到可以点什么(实测 coco figma2:24 个分类全 0,配上
-  // minFont:14 / empty:"No responses yet — click the options above to grow the cloud."
-  // 就是这个意图)。旧条件 `w.weight > 0` 把它们全部丢掉,排出一张空布局,
-  // 画布 1180x440 一个像素都不画。**空布局是这类 bug 的共同症状:代码路径全通,
-  // 只是什么都不显示。** 负权重才是真的非法。
   const ranked = (words || [])
     .map((w, i) => (typeof w === "string" ? { text: w, weight: Math.max(20, 100 - i * 5) } : w))
     .filter((w) => w && typeof w.text === "string" && w.text.trim() && Number.isFinite(w.weight) && w.weight >= 0 && !PUNCT_ONLY.test(w.text.trim()))
@@ -81,9 +92,6 @@ export function layoutWordCloud(words, opts = {}) {
   const items = [];
   for (let i = 0; i < ranked.length; i++) {
     const r = ranked[i];
-    // 权重全为 0(还没有任何投票)时 sqrt(0/0) 是 NaN,字号也会变成 NaN,
-    // 整张图什么都画不出来。那种情况一律用最小字号:把选项铺满,
-    // 让访客看到"可以点这些"。
     const scaled = maxWeight > 0 ? maxFont * Math.sqrt(r.weight / maxWeight) : minFont;
     const size = Math.round(clamp(scaled, minFont, maxFont));
     const w = measureText(r.text, size);
@@ -91,7 +99,6 @@ export function layoutWordCloud(words, opts = {}) {
     const box = { w: w + GAP, h };
     const color = colors[i % colors.length];
 
-    // Center the biggest word, spiral outward for the rest.
     const cx = width / 2;
     const cy = height / 2;
     let pos = null;
@@ -104,7 +111,7 @@ export function layoutWordCloud(words, opts = {}) {
         pos = tryPlace(box, cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
       }
     }
-    if (!pos) continue; // too big / no room — skip rather than overlap
+    if (!pos) continue;
     placed.push({ x: pos.x, y: pos.y, w: box.w, h: box.h });
     items.push({ text: r.text, weight: r.weight, x: pos.x, y: pos.y, size, color, w: Math.round(w) });
   }

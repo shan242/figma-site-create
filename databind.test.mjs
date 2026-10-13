@@ -8,7 +8,7 @@
 // 真实的浏览器行为放在 databind.e2e.test.mjs(headless Chrome)。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { slugRuntimeSource, clientRuntime, databindInjection, databindHead } from "./databind.mjs";
+import { slugRuntimeSource, clientRuntime, databindInjection, databindHead, stripComments } from "./databind.mjs";
 import { layoutWordCloud, layoutRuntime } from "./wordcloud.mjs";
 // 后端的同名实现 —— 浏览器/后端/软件端三处必须一致。
 import { slugify as serverSlugify } from "./data-api/slug.mjs";
@@ -18,6 +18,22 @@ function evalSources() {
   const fn = new Function(`${slugRuntimeSource}\n${layoutRuntime}\nreturn { slugify: slugify, layoutWordCloud: layoutWordCloud };`);
   return fn();
 }
+
+test("注入的运行时里不留源码注释(会一字不差发给访客)", () => {
+  // Function.prototype.toString() 返回的是函数**源码**,注释一起带走;
+  // clientRuntime 本身也是内联的模板字符串。实测一次泄漏了 756 个中文注释字符,
+  // 运行时从 ~9KB 涨到 16KB,而且内部说明出现在英文站点的 view-source 里。
+  const stripped = stripComments("// 整行注释\nconst a = 1; // 行尾保留\n/* 块注释 */\nconst b = 2;");
+  assert.equal(stripped.includes("整行注释"), false, "整行 // 注释要剥掉");
+  assert.equal(stripped.includes("块注释"), false, "/* */ 要剥掉");
+  assert.ok(stripped.includes("行尾保留"), "行尾 // 不动(区分正则里的 // 需要词法状态机,不值得冒险)");
+  assert.match(stripped, /const a = 1;/);
+  assert.match(stripped, /const b = 2;/);
+  // 真正注入的那份必须干净
+  const cjk = (clientRuntime.match(/[\u4e00-\u9fff]+/g) || []).join("");
+  assert.ok(cjk.length < 60, `运行时里不该有成段中文注释,实际 ${cjk.length} 个字符: ${cjk.slice(0, 80)}`);
+  assert.equal(/^\s*\/\//m.test(clientRuntime), false, "不该有整行注释残留");
+});
 
 test("注入的 slugify 与后端 data-api/slug.mjs 逐样本一致", () => {
   const { slugify } = evalSources();
@@ -71,7 +87,8 @@ test("离线(没后端 / file:// 预览)时也要画 fallback,不能提前 retur
   // 不是"绝不联网":联网与否只该关掉请求,不该关掉渲染。
   assert.match(clientRuntime, /var ONLINE = !!\(API && Site\)/, "用开关而不是提前 return");
   assert.equal(/if \(!Site\) \{ return; \}/.test(clientRuntime), false, "不能再提前 return");
-  const paintIdx = clientRuntime.indexOf("先画 fallback");
+  // 用真实代码定位(注释会被 stripComments 剥掉,不能拿注释当锚点)
+  const paintIdx = clientRuntime.indexOf("paint((spec.fallback");
   const gateIdx = clientRuntime.indexOf("if (!ONLINE) { return; }");
   assert.ok(paintIdx >= 0 && gateIdx >= 0, "两处都要在");
   assert.ok(paintIdx < gateIdx, "必须先画 fallback,再判断要不要联网");

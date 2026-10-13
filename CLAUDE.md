@@ -452,6 +452,26 @@ AI: bind_data(...)  →  databinds.json  →  build.mjs  →  databind.mjs 注�
   ⚠️ `refresh()` 成功回调**不能**清空提示:否则刚显示的"已提交"会被立刻擦掉,
   访客以为没提交成功(首次实现踩过,`databind-e2e.mjs` 现在钉住这一条)。
 - **Admin Token 绝不进生成的页面**:页面只拿到公开的后端地址。
+- **工具要主动报告"AI 看不到的东西"**。AI 只能靠坐标判断页面上有没有内容,而
+  **覆盖层(wordclouds / databinds / videos)是它自己加的,发布数据里没有** ——
+  它看不到上一轮自己放了什么,极容易在同一处叠第二个。实测 coco figma2:
+  26 条 databind 里有两条 counter 的矩形**完全重叠**(都是 400x26 @(502,6792)),
+  页面上两行字叠着,用户的描述是"词云生成之后提示内容不会消失"。
+  现在 `bind_data` / `apply_wordcloud` 返回时会用 `overlayCollisions()` 比一遍,
+  重叠超过 25% 就在 `warnings` 里点名(撞上了谁、重叠多少、该改用 id 更新还是挪开)。
+  同理 `edit_text` 用 `estimateTextHeight()`(汉字 1em、拉丁 0.5em 估算换行)
+  提醒"这段文字会溢出节点框",对 `textAutoResize:"NONE"` 的固定高度节点尤其重要 ——
+  溢出部分会**直接盖到相邻内容上**。系统提示里也写明了:warnings 必须处理,不能忽略。
+  ⚠️ 这类"看不见的错"光靠渲染管不了 —— **必须让程序代替 AI 的眼睛检查**。
+- **注入到页面的运行时不能带源码注释**。`Function.prototype.toString()` 返回的是
+  函数**源码**,注释一字不差地发给每个访客;`clientRuntime` 本身也是内联模板字符串。
+  实测一次泄漏 756 个中文注释字符、运行时从 ~9KB 涨到 16KB,内部说明还出现在
+  英文站点的 view-source 里。两条规矩:
+  - 会被 `toString()` 的函数(`layoutWordCloud` / `measureText` / `clamp`)**函数体内不写注释**,
+    说明写在函数上方(那部分不进 toString);
+  - `clientRuntime` 整体过一遍 `stripComments()`(剥整行 `//` 和 `/* */`;
+    行尾 `//` 不动 —— 要区分正则里的 `//` 得有完整词法状态机,不值得为几句注释冒险)。
+  剥完只剩 27 个中文字符,全是"请求失败/未选/暂无数据"这类**该有的 UI 文案**。
 
 验证分两层:`databind.test.mjs` 覆盖纯函数(slug 三处一致、布局等价、注入转义),
 `databind-e2e.mjs` 用 headless Chrome 打真实后端跑通读/写/去重全链路

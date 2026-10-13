@@ -11,6 +11,20 @@
 //   3. 后端不可用时必须保留 fallback 静态内容,绝不白屏
 import { layoutRuntime, clientScript } from "./wordcloud.mjs";
 
+// 注入到 <script> 里的源码会**一字不差地发给每个访客**,所以注释必须剥掉:
+// 它们既占体积(实测一次泄漏 756 个中文字符、运行时从 ~9KB 涨到 16KB),
+// 又会把内部说明暴露在 view-source 里(还是中文,出现在英文站点的源码中)。
+// 只剥**整行** `//` 注释和 `/* */` 块 —— 行尾的 `//` 不动,因为正则/除法里的
+// `//` 需要完整的词法状态机才能区分,为几句注释不值得冒改坏代码的风险。
+export function stripComments(src) {
+  return String(src)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
 // 与 data-api/slug.mjs 的同名函数保持一致(databind.test.mjs 逐样本比对)。
 export const slugRuntimeSource = `function slugify(host) {
   return String(host || "")
@@ -26,7 +40,7 @@ const SLUG_SOURCE = slugRuntimeSource;
 
 // --- 浏览器运行时 ------------------------------------------------------------
 // 每页只注入一次。扫描 .databind,读 data-spec,渲染并接线。
-export const clientRuntime = `(function () {
+export const clientRuntime = stripComments(`(function () {
 "use strict";
 var API = window.__DATA_API__;
 
@@ -291,7 +305,7 @@ function boot() {
 }
 if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", boot); }
 else { boot(); }
-})();`;
+})();`);
 
 // --- 注入 -------------------------------------------------------------------
 

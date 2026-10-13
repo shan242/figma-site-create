@@ -87,6 +87,9 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 - 需要大改页面结构时,可以用 write_file 改写生成的 *.html(也可以写 data/ 下的页面数据)。改写 *.html 后,系统会在每次重新生成后把你改的内容自动套回去(记录在 file-locks.json),所以是持久的。
 - 注意:对同一个页面,要么用 edit_text / edit_node / apply_wordcloud 这类覆盖层工具改,要么用 write_file 整体改写 HTML,不要混用——整体改写会把该页覆盖层的改动盖掉。append_css 与 write_file 改 styles.css 同理。
 - 不要改写 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json(它们是构建元数据/覆盖层来源/设计报告,直接改会破坏一致性)。
+- **工具的返回值里出现 warnings 字段时,必须处理它,不能忽略。** 你**看不到页面**,而这些警告是程序代替你的眼睛算出来的:
+  · 改文字(edit_text)后如果估算会溢出节点框,警告会说明超多少、以及要不要用 edit_node 调大 height —— 节点若是 textAutoResize:"NONE"(固定高度),多出来的文字会**直接盖到相邻内容上**,用户看到的就是"文字叠在一起"。请缩短文字或调大 height,不要放着不管。
+  · 放词云 / 数据绑定时如果矩形和已有的覆盖层重叠,警告会列出撞上了谁、重叠多少。**同一个位置再绑一次通常是错的** —— 想改原来的那条就传它的 id 更新,想加新的就换一个没有内容的 rect。
 - 修改类工具成功后,系统会自动重新生成页面,你一般无需调用 run_build;如确需立即重建可调用。
 - 用中文回答;完成后的回复要简短说明改了什么。`;
 
@@ -548,6 +551,51 @@ const OVERLAY_HINT = {
   "file-locks.json": "改写 *.html / styles.css 时自动记录",
 };
 
+// 两个矩形重叠了多少(占较小者的比例)。浮点坐标先取整,免得 0.4px 的差被算成重叠。
+export function rectOverlap(a, b) {
+  const ox = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
+  const oy = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
+  if (ox <= 1 || oy <= 1) return 0;
+  const smaller = Math.min(a.width * a.height, b.width * b.height);
+  return smaller > 0 ? (ox * oy) / smaller : 0;
+}
+
+// 把一个新矩形和已有的覆盖层比一遍,返回会被压住的那些。
+//
+// 为什么需要:AI **看不见页面**,它判断"这块地方有没有东西"只能靠坐标;
+// 而覆盖层(wordclouds / databinds / videos)是它自己加的,**发布数据里没有**,
+// 所以它看不到上一轮自己放了什么,极容易在同一处叠第二个。
+// 实测(coco figma2):26 条 databind 里有两条 counter 的矩形**完全重叠**
+// (都是 400x26 @(502,6792)),页面上两行字叠在一起;用户的描述是
+// "词云生成之后提示内容不会消失" —— 其实是第二个 counter 的文字压在第一个上。
+export function overlayCollisions(rect, existing) {
+  const hits = [];
+  for (const it of existing || []) {
+    const r = it?.rect;
+    if (!r || !Number.isFinite(r.left) || !Number.isFinite(r.top)) continue;
+    const pct = rectOverlap(rect, r);
+    if (pct < 0.25) continue;
+    hits.push({ id: it.id, kind: it.kind || (it.spec && it.spec.kind) || "overlay", slug: it.slug, overlap: Math.round(pct * 100) });
+  }
+  return hits.sort((a, b) => b.overlap - a.overlap);
+}
+
+// 估算一段文字排进这个框需要多少高度 —— AI 改文字时它自己也算不出来,
+// 于是"改长了"就直接溢出;而 textAutoResize:"NONE" 的节点是**固定高度**,
+// 溢出部分会盖到相邻内容上(设计里 25px/33.7px 行高的正文,溢出 27px 就压到下一行标题)。
+// 用等宽近似:汉字按 1em、其余按 0.5em 累计,再做换行。
+export function estimateTextHeight(text, { width, fontSize, lineHeight, padding = 0 }) {
+  const usable = Math.max(1, width - padding);
+  const lines = String(text)
+    .split(/\r\n|\r|\n|\u2028|\u2029/)
+    .reduce((sum, line) => {
+      let w = 0;
+      for (const ch of line) w += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uffef]/.test(ch) ? 1 : 0.5;
+      return sum + Math.max(1, Math.ceil((w * fontSize) / usable));
+    }, 0);
+  return lines * lineHeight;
+}
+
 export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   const root = resolve(outDir);
   const assetDir = join(root, "assets");
@@ -914,10 +962,29 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       if (!(await confirm({ kind: "wordcloud", payload: { id: newId, slug, rect: r, spec: newSpec } }))) {
         return { error: "用户拒绝了这次词云放置" };
       }
-      const items = loadWordClouds().filter((i) => i.id !== newId);
+      const allClouds = loadWordClouds();
+      const collisions = overlayCollisions(r, [
+        ...allClouds.filter((i) => i.id !== newId),
+        ...loadDatabinds(),
+        ...loadVideos(),
+      ]);
+      const items = allClouds.filter((i) => i.id !== newId);
       items.push({ id: newId, slug, rect: r, spec: newSpec, createdAt: new Date().toISOString() });
       saveWordClouds(items);
-      return { id: newId, slug, rect: r, wordCount: newSpec.words.length };
+      return {
+        id: newId,
+        slug,
+        rect: r,
+        wordCount: newSpec.words.length,
+        ...(collisions.length
+          ? {
+              warnings: collisions.map(
+                (c) => `矩形和已有的「${c.id}」(${c.kind}, ${c.overlap}% 重叠)压在一起 —— 词云会盖住它、或者被它盖住。` +
+                  `确认是有意的;否则挪开,或者改用 id="${c.id}" 更新原来那条。`,
+              ),
+            }
+          : {}),
+      };
     },
 
     async delete_wordcloud({ id }) {
@@ -1005,7 +1072,11 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         createdAt: new Date().toISOString(),
       };
       if (!(await confirm({ kind: "databind", payload: item }))) return { error: "用户拒绝了这次数据绑定" };
-      const items = loadDatabinds().filter((i) => i.id !== newId);
+      const all = loadDatabinds();
+      // 和自己以外的所有覆盖层比一遍 —— AI 看不到页面,这是唯一能提醒它"这里已经有东西"的机会
+      const existing = [...all.filter((i) => i.id !== newId), ...loadWordClouds(), ...loadVideos()];
+      const collisions = overlayCollisions(r, existing);
+      const items = all.filter((i) => i.id !== newId);
       items.push(item);
       saveDatabinds(items);
       return {
@@ -1014,6 +1085,15 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         collection: item.collection,
         kind: k,
         mode: w ? (w.target ? `点击节点 ${w.target} 提交` : "访客输入后提交") : "只读",
+        ...(collisions.length
+          ? {
+              warnings: collisions.map(
+                (c) => `矩形和已有的「${c.id}」(${c.kind}, ${c.overlap}% 重叠)压在一起 —— 页面上会看到两段内容叠着。` +
+                  `请确认这是有意的;如果只是想给同一个位置再绑一次,应该用 id 更新原来那条(传 id="${c.id}"),` +
+                  `或者把 rect 挪到没有内容的位置。`,
+              ),
+            }
+          : {}),
       };
     },
 
@@ -1187,7 +1267,33 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       const kept = items.filter((i) => i.id !== newId);
       kept.push({ ...existing, id: newId, slug, nodeId, ...change, createdAt: new Date().toISOString() });
       saveEdits(kept);
-      return { id: newId, slug, nodeId, change };
+
+      // 文字改长了会不会溢出?AI 自己算不出来(它看不到页面),而
+      // textAutoResize:"NONE" 是**固定高度**,溢出部分会直接盖到相邻内容上 ——
+      // 用户看到的就是"AI 把文字放到别的文字上面"。所以在这里估算一次并明说。
+      const bb = node.absoluteBoundingBox || {};
+      const st = node.style || {};
+      const fs = change.fontSize ?? st.fontSize ?? 16;
+      const lh = st.lineHeightPx || fs * 1.3;
+      const finalText = change.text ?? String(node.characters || "");
+      const warnings = [];
+      if (bb.width > 0 && bb.height > 0) {
+        const need = estimateTextHeight(finalText, { width: bb.width, fontSize: fs, lineHeight: lh });
+        const before = estimateTextHeight(String(node.characters || ""), { width: bb.width, fontSize: fs, lineHeight: lh });
+        // 只在"明显放不下"或"比原来明显更高"时提醒,免得每改一次都刷一堆噪音
+        if (need > bb.height * 1.15) {
+          const fixed = st.textAutoResize === "NONE";
+          warnings.push(
+            `这段文字按 ${fs}px / 行高 ${lh.toFixed(1)}px 估算需要约 ${Math.round(need)}px,而节点框只有 ${Math.round(bb.height)}px` +
+              (fixed ? "(textAutoResize=NONE,固定高度 → 多出来的部分会溢出压到相邻内容上)" : "") +
+              `。要么把文字缩短,要么用 edit_node 把 height 调大到 ${Math.ceil(need)}px 以上。` +
+              (need > before * 1.2 ? `(原来约 ${Math.round(before)}px,这次明显变高了)` : ""),
+          );
+        } else if (need > bb.height) {
+          warnings.push(`估算需要约 ${Math.round(need)}px,略超节点框 ${Math.round(bb.height)}px —— 可能会压到下一行,注意检查。`);
+        }
+      }
+      return { id: newId, slug, nodeId, change, ...(warnings.length ? { warnings } : {}) };
     },
 
     async delete_edit({ id }) {

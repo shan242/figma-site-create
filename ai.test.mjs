@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight } from "./ai.mjs";
 import { buildSite } from "./build.mjs";
 
 // --- parseSSE -----------------------------------------------------------------
@@ -412,6 +412,46 @@ test("build re-applies only in-dir locks", async () => {
   await buildSite(dir);
   assert.equal(readFileSync(join(dir, "index.html"), "utf8"), "<html>ok</html>");
   assert.equal(existsSync(join(dir, "..", "evil.txt")), false);
+});
+
+// --- 重叠 / 溢出的提醒 ------------------------------------------------------
+// 实测事故(coco figma2):26 条 databind 里有两条 counter 的矩形完全重叠,
+// 页面上两行字叠着,用户的描述是"词云生成之后提示内容不会消失"。
+// AI 看不到页面,覆盖层又是它自己加的(发布数据里没有),所以必须由程序提醒。
+
+test("rectOverlap:完全重叠 = 100%,贴边不算", () => {
+  const a = { left: 0, top: 0, width: 400, height: 26 };
+  assert.equal(rectOverlap(a, { ...a }), 1);
+  assert.equal(rectOverlap(a, { left: 400, top: 0, width: 400, height: 26 }), 0, "紧挨着不算重叠");
+  assert.ok(rectOverlap(a, { left: 380, top: 0, width: 400, height: 26 }) < 0.06, "只擦到 20px 的边,比例很小");
+});
+
+test("overlayCollisions:同一位置的第二条绑定要被点名", () => {
+  const existing = [
+    { id: "db-1", kind: "counter", slug: "index", rect: { left: 502, top: 6792, width: 400, height: 26 } },
+    { id: "wc-1", kind: "wordcloud", slug: "index", rect: { left: 112, top: 6850, width: 1180, height: 440 } },
+  ];
+  const hits = overlayCollisions({ left: 502, top: 6792, width: 400, height: 26 }, existing);
+  assert.equal(hits.length, 1, "只有 db-1 重叠");
+  assert.equal(hits[0].id, "db-1");
+  assert.equal(hits[0].overlap, 100);
+  // 挪到没内容的地方就不该报
+  assert.deepEqual(overlayCollisions({ left: 100, top: 100, width: 200, height: 60 }, existing), []);
+});
+
+test("overlayCollisions:轻微擦边(低于 25%)不打扰用户", () => {
+  const existing = [{ id: "x", kind: "bar", rect: { left: 0, top: 0, width: 100, height: 100 } }];
+  // 重叠 10x10 = 10%
+  assert.deepEqual(overlayCollisions({ left: 90, top: 90, width: 100, height: 100 }, existing), []);
+});
+
+test("estimateTextHeight:汉字按 1em、拉丁按 0.5em 估算", () => {
+  // 宽度 100px、字号 10px:一行放 10 个汉字 或 20 个拉丁字母
+  assert.equal(estimateTextHeight("汉字十个字", { width: 100, fontSize: 10, lineHeight: 20 }), 20);
+  assert.equal(estimateTextHeight("a".repeat(20), { width: 100, fontSize: 10, lineHeight: 20 }), 20);
+  assert.equal(estimateTextHeight("a".repeat(40), { width: 100, fontSize: 10, lineHeight: 20 }), 40, "40 个字母 = 2 行");
+  // 换行符强制分行,空行也算一行
+  assert.equal(estimateTextHeight("a\n\nb", { width: 100, fontSize: 10, lineHeight: 20 }), 60);
 });
 
 test("read_file can read files inside the dir", async () => {
