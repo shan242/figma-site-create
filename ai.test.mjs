@@ -554,6 +554,51 @@ test("read_file:内容被截断时明确警告不要凭它整体覆写", async (
   assert.match(String(r.truncatedNote), /不要凭这份内容整体覆写/, "要明确警告,否则模型会把后半页弄丢");
 });
 
+test("restore_history:必须经用户确认 —— 它一次会覆盖 7 个文件", async () => {
+  // schema 一直写着"会请求用户确认",handler 里却**没有** confirm —— 说一套做一套。
+  // 回滚一次能把用户几十轮的改动一起抹掉,不给确认说不过去。
+  const dir = fixture();
+  const yes = makeTools({ outDir: dir, confirm: allowAll });
+  await yes.handlers.append_css({ id: "css-1", css: ".a{}" });
+  await yes.handlers.append_css({ id: "css-2", css: ".b{}" });
+  // 最新那份快照 = 加 css-2 **之前**的状态(只有 css-1)。
+  // 不用最早那份:那是"什么都没改"的空快照,回滚到它本来就会把 overrides.json 删掉,
+  // 拿它做断言会分不清"回滚成功"和"文件被误删"。
+  const step = (await yes.handlers.list_history({})).steps[0].id;
+
+  // 拒绝 → 覆盖层一动不动
+  const before = readFileSync(join(dir, "overrides.json"), "utf8");
+  const no = makeTools({ outDir: dir, confirm: denyAll });
+  const r = await no.handlers.restore_history({ id: step });
+  assert.match(String(r.error), /用户拒绝/);
+  assert.equal(readFileSync(join(dir, "overrides.json"), "utf8"), before, "拒绝之后必须原封不动");
+
+  // 同意 → 真的回滚到"只有 css-1"
+  const ok = await yes.handlers.restore_history({ id: step });
+  assert.ok(!ok.error, `同意后该成功: ${ok.error}`);
+  const items = JSON.parse(readFileSync(join(dir, "overrides.json"), "utf8")).items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, "css-1");
+});
+
+test("restore_history:和当前状态一样时不做任何事,也不打扰用户", async () => {
+  const dir = fixture();
+  let asked = 0;
+  const { handlers } = makeTools({ outDir: dir, confirm: async () => { asked++; return true; } });
+  await handlers.append_css({ id: "css-1", css: ".a{}" });
+  await handlers.append_css({ id: "css-2", css: ".b{}" });
+  const step = (await handlers.list_history({})).steps[0].id;
+  // 第一次回滚:真的会改东西(把 css-2 撤掉)
+  await handlers.restore_history({ id: step });
+  assert.equal(readFileSync(join(dir, "overrides.json"), "utf8").includes("css-2"), false, "第一次要撤掉 css-2");
+  // 第二次回滚到同一份:状态已经和它一样了 → 不该改动,也不该弹确认
+  asked = 0;
+  const r = await handlers.restore_history({ id: step });
+  assert.ok(!r.error, `不该报错: ${r.error}`);
+  assert.deepEqual(r.files, [], "没有需要改动的文件");
+  assert.equal(asked, 0, "没有实际改动就不该弹确认框");
+});
+
 test("buildSystemPrompt:关键规则一条都不能丢", () => {
   const p = buildSystemPrompt(null);
   // 每条都是"删掉了会出事故"的规则,列在这里防止重构时无声丢失

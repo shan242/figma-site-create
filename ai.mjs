@@ -624,9 +624,13 @@ export function createDeepSeekModel(config) {
       if (e.name === "AbortError") {
         if (abortReason === "user") throw new Error("已取消");
         if (abortReason === "timeout-first") {
+          // 这条以前让用户"去设置里调大「首字节超时」" —— 而设置面板里**根本没有
+          // 这个选项**(grep 超时/timeout 零命中),他永远是 300 秒默认值,去找只会白找。
+          // 现在只给真正能做的事:等,或者把任务拆小。
           throw new Error(
             `等待模型响应超过 ${Math.round(firstByteMs / 1000)} 秒仍未开始输出(已等待 ${secs} 秒)。` +
-              `上下文较长时首次响应会变慢 —— 可在设置里调大「首字节超时」,或把页面拆小一点再试`,
+              `上下文较长时首次响应会变慢,这是正常的 —— 可以再试一次(通常会快),` +
+              `或者把任务拆成几步、每次只改一个页面/一件事`,
           );
         }
         throw new Error(`模型输出中断超过 ${Math.round(idleMs / 1000)} 秒(已等待 ${secs} 秒),已停止`);
@@ -1872,6 +1876,22 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       // 回滚本身也要可逆:先把"当前状态"存一份
       snapshot("before-restore");
       lastSnapHash = "";
+      // **必须确认**。它是唯一一处不经确认就整目录覆盖 7 个覆盖层文件的写操作 ——
+      // 而它的 schema 一直写着"会请求用户确认",handler 里却没有,属于说一套做一套。
+      // 回滚一次能把用户几十轮的改动一起抹掉,不给确认说不过去。
+      let willChange = [];
+      for (const f of OVERLAY_FILES) {
+        const src = join(dir, f);
+        const dest = resolve(root, f);
+        if (existsSync(src)) { if (!existsSync(dest) || readFileSync(src, "utf8") !== readFileSync(dest, "utf8")) willChange.push(f); }
+        else if (existsSync(dest)) willChange.push(`${f}(将删除)`);
+      }
+      if (!willChange.length) {
+        return { restoredTo: id, files: [], note: "当前状态和这个快照完全一样,没有需要改动的" };
+      }
+      if (!(await confirm({ kind: "restore", payload: { id, files: willChange } }))) {
+        return { error: "用户拒绝了这次回滚" };
+      }
       const restored = [];
       for (const f of OVERLAY_FILES) {
         const src = join(dir, f);
