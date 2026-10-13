@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder, buildSystemPrompt, PROMPT_SECTIONS, fallbackDataCheck, wordcloudFitCheck, trimChatHistory, loadChatHistory, saveChatHistory, CHAT_HISTORY_FILE } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder, buildSystemPrompt, PROMPT_SECTIONS, fallbackDataCheck, wordcloudFitCheck, STANDARDS, trimChatHistory, loadChatHistory, saveChatHistory, CHAT_HISTORY_FILE } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -736,6 +736,40 @@ test("wordcloudFitCheck:用真实布局判断,而不是拍脑袋给公式", () =
   // 短词 + 合理配置 = 不打扰
   const good = wordcloudFitCheck({ labels: ["Food", "Routes", "Tickets"], rect: { width: 1180, height: 440 }, maxFont: 40, minFont: 12, maxWords: 3 });
   assert.deepEqual(good, [], `不该报警: ${JSON.stringify(good)}`);
+});
+
+test("wordcloud-poll 标准:把好例子里最容易做错的三件事写清楚了", () => {
+  // 起因:AI 反复做不好投票词云。与其只写"要注意什么",不如把**实测通过的完整配方**
+  // 做成一份可以逐字照搬的标准 —— 和 width-adaptive 同一套机制。
+  const w = STANDARDS["wordcloud-poll"];
+  assert.ok(w?.content, "标准要存在");
+  const c = w.content;
+  // ① 每个选项一条 action —— 漏了那个选项就点不动,词云永远是空的
+  assert.match(c, /kind="action"/);
+  assert.match(c, /每个选项各一条/, "要说清是每个选项一条,不是一条");
+  assert.match(c, /点的节点|write\.target/, "要说 action 必须给 target");
+  // ② 颜色必须从深到浅 —— 渲染器按票数排名取色
+  assert.match(c, /从深到浅/);
+  assert.match(c, /按票数排名取色|第 1 名用 colors\[0\]/, "要说清为什么顺序重要");
+  // ③ fallback 不许造假票数
+  assert.match(c, /count 一律写 0/);
+  assert.match(c, /编造的统计结果/);
+  // 字段名必须一致
+  assert.match(c, /read\.groupBy/);
+  // 按标签长度的字号表
+  assert.match(c, /整句/);
+  assert.match(c, /maxFont/);
+  // 完整可抄的示例 + 自查清单
+  assert.match(c, /fallback: \{ buckets:/, "要有完整示例");
+  assert.match(c, /做完自查|自查/, "要有自查清单");
+});
+
+test("get_standard 能拿到 wordcloud-poll", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.get_standard({ name: "wordcloud-poll" });
+  assert.ok(!r.error, `不该报错: ${r.error}`);
+  assert.match(String(r.content || r.text || JSON.stringify(r)), /每个选项各一条/);
 });
 
 test("buildSystemPrompt:关键规则一条都不能丢", () => {

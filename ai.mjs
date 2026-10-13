@@ -118,7 +118,8 @@ export const PROMPT_SECTIONS = [
     when: "apply_wordcloud",
     text:
       "## 词云\n" +
-      "- 放置词云:调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。**直接调用即可,不需要先读 wordclouds.json** —— 覆盖层文件(wordclouds/databinds/videos/edits/nodeStyles/overrides)由这些工具自己读写,第一次添加前它们并不存在,那是正常状态。\n" +
+      "- **要做\"选项点选后生成词云、票越多字号越大颜色越深\"这种(问卷式投票),先调 get_standard('wordcloud-poll') 读那份实测配方,照它做。** 它把三个最容易做错的地方写清楚了:①要 1 条 wordcloud + **每个选项各一条 action**(少一条那个选项就点不动,词云永远是空的);②`options.colors` 必须**从深到浅**(渲染器按票数排名取色,顺序反了就成了\"越多越浅\");③`fallback` 里每个 count 必须写 **0**。\n" +
+      "- 放置静态词云(不是投票,只是把关键词排成云):调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。**直接调用即可,不需要先读 wordclouds.json** —— 覆盖层文件(wordclouds/databinds/videos/edits/nodeStyles/overrides)由这些工具自己读写,第一次添加前它们并不存在,那是正常状态。\n" +
       "- **要让它看起来像\"云\",关键是字号和词数要匹配矩形的形状。** 词云的词是横向排的,所以:\n" +
       "  · 一行大约只放得下 `矩形宽 ÷ 最长词宽` 个词。词长(整句 vs 单个单词)决定了能放几个。\n" +
       "  · 需要的**行数 × 行高**必须明显小于矩形高度,否则只会挤成一条竖排 —— 那不是云。\n" +
@@ -134,7 +135,8 @@ export const PROMPT_SECTIONS = [
     when: "bind_data",
     text:
       "## 数据绑定(投票 / 词云 / 留言 / 计数)\n" +
-      "- 需要跨访客持久化的功能一律用 bind_data,不要自己写 <script> 去 fetch 后端:\n" +
+      "- **问卷式投票词云有现成的实测配方:先 get_standard('wordcloud-poll')**,里面有三条最关键的:每个选项各要一条 action、colors 必须从深到浅、fallback 的 count 必须全 0。\n" +
+      "- 其他跨访客持久化的功能一律用 bind_data,不要自己写 <script> 去 fetch 后端:\n" +
       "  · 投票:kind='bar',read.groupBy 填选项字段(如 choice),write.target 指向页面上的按钮节点、write.field 填同一字段;访客点按钮即投票。\n" +
       "  · 收集关键词做实时词云:kind='wordcloud',write.input=true(矩形内自动生成输入框+按钮),write.field 用 text。\n" +
       "  · 留言板:kind='list',write.input=true,field 用内容字段名。\n" +
@@ -424,6 +426,87 @@ body { overflow-x: hidden; }
 }
 @media (max-width: calc({W}px * 0.75)) { .grid-row { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: calc({W}px * 0.45)) { .grid-row { grid-template-columns: 1fr; } }`,
+  },
+  "wordcloud-poll": {
+    content: `投票词云标准 v1 —— 问卷式页面:一组选项让访客点选,点完看到词云;某个选项被选得越多,它在词云里字号越大、颜色越深。
+
+这是**经过实测的配方**(来自一个真实上线项目),照它做就不会出错。下面每条都写了"为什么",理解了再动手,别只抄数字。
+
+【一、必须三条同时成立,少一条就不工作】
+1. 一条 kind="wordcloud" 的绑定 —— 负责**读**并画词云。
+2. **每个选项各一条 kind="action" 的绑定** —— 负责**写**。
+   这是最容易漏的一条:只放 wordcloud 不放 action,访客点选项**什么都不会发生**,词云永远是空的。
+   action 不用 rect(它不画东西),但必须给 write.target(点哪个节点)。
+3. wordcloud 的 read.groupBy 必须与 action 的 write.field **是同一个字段名**。
+   对不上就各写各的,词云永远读不到票。
+
+【二、参数配方】
+· rect:宽度取"画布宽度 − 左右边距"(设计宽 1440 时用 1180~1200,即左右各留 120~130)。
+  高度按**标签长度**定,见下面的字号配方。可以放在页面内容下方(构建会自动把画布加高)。
+· read: { "groupBy": "<字段名>", "limit": <选项总数>, "refreshMs": 10000 }
+  limit 要 ≥ 选项数,否则排在后面的选项被截掉,永远不出现在词云里。
+· options.colors:**同一个色系的 5 阶,从深到浅排列**。
+  ⚠️ 渲染器是**按票数排名取色**的(第 1 名用 colors[0])。所以想要"选得越多颜色越深",
+  这个数组就**必须**从深到浅;写成浅到深,效果正好反过来。
+· options.maxFont / minFont / maxWords:见下面的字号配方。
+· options.empty:一句给访客的提示,例如"还没有人提交,选一选上面的选项吧"。
+· options.done:""(空串 = 提交后不显示任何提示;不写的话会冒出默认的"你已提交")。
+· options.perVisitor:"once"(每个访客每个选项一次;词云/投票场景就应该是 once)。
+· fallback.buckets:**每一个选项都要在列表里,count 一律写 0**;fallback.total: 0。
+  这是"还没有任何人投票"时的样子 —— 词云会按最小字号把全部选项铺开,
+  访客这才知道有哪些可以点。**绝对不要填非 0 的票数**:那等于给访客看编造的统计结果,
+  而且会让人以为已经有人投过了。
+
+【三、字号配方 —— 词云好不好看,全在这里】
+词云的词是**横向**排的,所以一行大约只放得下「矩形宽 ÷ 最长词宽」个词;
+需要的行数 × 行高又必须明显小于矩形高度,否则只会挤成一条竖排,那不是云。
+
+| 标签长什么样 | maxFont | 矩形高 | maxWords |
+|---|---|---|---|
+| 单个单词(Landmarks、Food、Routes) | 40~58 | 400~440 | 20~30 |
+| 短语,2~4 个词(Building Ancestral Halls) | 28~40 | 500 以上 | 12~18 |
+| 整句、带标点(After viewing this website, which of…) | 14~22 | 600 以上 | 6~10 |
+
+规律:**标签越长,字号越小、矩形越高、能放的词越少**。
+标签长的时候宁可少放几个,也不要硬塞 —— 塞进去只会互相压住,更难看。
+
+【四、完整的可用配置(实测通过,可直接改成你的字段名)】
+先做"读 + 画"的那条:
+  bind_data({
+    slug: "<页面 slug>",
+    rect: { left: 130, top: <内容下方的位置>, width: 1180, height: 440 },
+    collection: "voices",
+    kind: "wordcloud",
+    read: { groupBy: "text", limit: 8, refreshMs: 10000 },
+    options: {
+      colors: ["#15609e", "#2f6fc0", "#5789e5", "#8ab0ee", "#c3d6f7"],
+      maxFont: 40, minFont: 14, maxWords: 8,
+      empty: "还没有人提交,选一选上面的选项吧",
+      done: "", perVisitor: "once"
+    },
+    fallback: { buckets: [
+      { key: "选项一", count: 0 }, { key: "选项二", count: 0 },
+      { key: "选项三", count: 0 }, { key: "选项四", count: 0 }
+    ], total: 0 }
+  })
+
+再为**每一个选项**各做一条(同一个 collection,write.value 填那个选项的文字,
+write.target 填那个选项在页面上的节点 id,field 与上面 groupBy 一致):
+  bind_data({
+    slug: "<页面 slug>", collection: "voices", kind: "action",
+    write: { target: "<该选项的节点 id>", field: "text", value: "选项一" },
+    options: { perVisitor: "once" }
+  })
+
+选项的节点 id 从 read_page_text 拿(用 q 搜选项文字最快,例如 q:"Q1")。
+
+【五、做完自查】
+· 选项数 N 个 → 应该有 1 条 wordcloud + N 条 action,一共 N+1 条。
+· 所有 action 的 collection 与 wordcloud 的 collection 相同。
+· 所有 action 的 write.field 与 wordcloud 的 read.groupBy 相同。
+· fallback 里每个 count 都是 0。
+· colors 是从深到浅。
+工具返回的 warnings 会检查"字号配不配得上矩形"和"fallback 里有没有假票数",逐条改掉。`,
   },
 };
 
@@ -2762,7 +2845,18 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     async get_standard({ name }) {
       const standard = STANDARDS[name];
       if (!standard) return { error: `没有这个标准: ${name}。可用标准: ${Object.keys(STANDARDS).join(", ")}` };
-      return { name, content: standard.content, template: standard.template, chars: standard.content.length + standard.template.length };
+      // **不是每个标准都有 template** —— width-* 那两个有(那是一段可以逐字套用的 CSS),
+      // wordcloud-poll 只有 content(它是一份配置配方,没有要照抄的 CSS)。
+      // 早先这里直接读 standard.template.length,没有 template 的标准会当场 TypeError。
+      const content = standard.content || "";
+      const template = standard.template || null;
+      return {
+        name,
+        content,
+        ...(template ? { template } : {}),
+        chars: content.length + (template ? template.length : 0),
+        ...(template ? {} : { note: "这个标准没有 template(它不是一段逐字套用的 CSS),按 content 里的步骤与示例做即可。" }),
+      };
     },
 
     async run_build() {
@@ -3175,8 +3269,17 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       type: "function",
       function: {
         name: "get_standard",
-        description: "读取内置标准文本。width-adaptive(等比缩放)返回 content(步骤与禁用写法)和 template(唯一允许的 CSS,含 {W} 占位符),必须逐字照做;width-reflow(真正重排)返回的 template 只是参考骨架,按 content 步骤改写 styles.css。不要自行发明方案",
-        parameters: { type: "object", properties: { name: { type: "string", description: "标准名,如 width-adaptive / width-reflow" } }, required: ["name"] },
+        description:
+          "读取内置的**实测标准配方**,照它做就不会出错。三个标准:" +
+          "**wordcloud-poll**(投票词云 —— 一组选项点选后生成词云、票越多字号越大颜色越深。要放这类词云**先读它**;" +
+          "它讲清了 wordcloud + 每个选项一条 action 怎么配、颜色为什么必须从深到浅、按标签长度该用多大字号、fallback 为什么必须全 0);" +
+          "width-adaptive(等比缩放)返回 content(步骤与禁用写法)和 template(唯一允许的 CSS,含 {W} 占位符),必须逐字照做;" +
+          "width-reflow(真正重排)返回的 template 只是参考骨架,按 content 步骤改写 styles.css。不要自行发明方案。不消耗 API 额度",
+        parameters: {
+          type: "object",
+          properties: { name: { type: "string", description: "标准名:wordcloud-poll / width-adaptive / width-reflow" } },
+          required: ["name"],
+        },
       },
     },
     {
