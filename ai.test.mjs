@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -332,6 +332,70 @@ test("自检:重建失败要当成问题回灌,不能当成检查通过", async 
     config: {},
   });
   assert.ok(events.some((e) => e.type === "self_check_failed"), "重建失败也要报自检没过");
+});
+
+// --- 图片卸载 ------------------------------------------------------------------
+// view_image 的图只能作为 user 消息送达,而那条消息带着完整 base64 进 history 后
+// **本轮后续每一轮都重发**。剪枝对它无效(base64 在 image_url 块里,不是字符串字段)。
+
+const imgBlock = (label, kb) => ({ type: "image_url", image_url: { url: "data:image/png;base64," + "A".repeat(kb * 1024) }, __label: label });
+const imgHistory = (labels) => [{ role: "user", content: [{ type: "text", text: "看图" }, ...labels.map((l) => imgBlock(l, 1))] }];
+
+test("图片卸载:没超预算就完全不动", () => {
+  const h = imgHistory(["a.png", "b.png"]);
+  const before = JSON.stringify(h);
+  assert.equal(offloadOldImages(h), 0);
+  assert.equal(JSON.stringify(h), before, "不该改任何东西");
+});
+
+test("图片卸载:超张数时卸最老的,保留最新的", () => {
+  const h = imgHistory(["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"]);
+  const n = offloadOldImages(h);
+  assert.equal(n, 2, "6 张 → 卸 2 张 (上限 4)");
+  const blocks = h[0].content.slice(1);
+  assert.equal(blocks[0].type, "text", "最老的变成了占位符");
+  assert.match(blocks[0].text, /a\.png/, "占位符要说出是哪张图");
+  assert.match(blocks[0].text, /重新调用 view_image/, "要告诉模型怎么再看");
+  assert.equal(blocks[blocks.length - 1].type, "image_url", "最新的必须保留");
+  assert.equal(blocks[blocks.length - 1].__label, "f.png");
+});
+
+test("图片卸载:按字节数卸(一张巨图也能触发)", () => {
+  // 2 张各 5MB → 超 6MB 预算,但要保留最新的一张
+  const h = [{ role: "user", content: [{ type: "text", text: "看图" }, imgBlock("big1.png", 5120), imgBlock("big2.png", 5120)] }];
+  const n = offloadOldImages(h);
+  assert.equal(n, 1, "卸掉最老那张");
+  assert.equal(h[0].content[1].type, "text");
+  assert.equal(h[0].content[2].type, "image_url", "最新那张绝不能卸");
+});
+
+test("图片卸载:永远保留最后一张,哪怕只有它且它超预算", () => {
+  const h = [{ role: "user", content: [{ type: "text", text: "看图" }, imgBlock("huge.png", 20000)] }];
+  assert.equal(offloadOldImages(h), 0, "只剩一张时不许卸 —— 全卸等于让模型凭空回答");
+  assert.equal(h[0].content[1].type, "image_url");
+});
+
+test("图片卸载:runAgent 在发请求前会卸,并报出事件", async () => {
+  // 第一次请求后塞一堆图,模拟 view_image 的回灌
+  const events = [];
+  let turn = 0;
+  const model = async (history) => {
+    turn++;
+    if (turn === 1) {
+      // 手动往 history 里塞 6 张图(等价于 view_image 补的那条 user 消息)
+      history.push({ role: "user", content: [{ type: "text", text: "看图" }, ...["a", "b", "c", "d", "e", "f"].map((l) => imgBlock(l + ".png", 1))] });
+      return { content: "", toolCalls: [{ id: "c1", name: "list_pages", arguments: {} }] };
+    }
+    return { content: "好了", toolCalls: [] };
+  };
+  await runAgent({
+    messages: [{ role: "user", content: "看图" }],
+    model,
+    tools: toolsFixture,
+    onEvent: (e) => events.push(e),
+    config: {},
+  });
+  assert.ok(events.some((e) => e.type === "images_offloaded" && e.count === 2), `应卸载 2 张: ${JSON.stringify(events.filter((e) => e.type === "images_offloaded"))}`);
 });
 
 test("runAgent surfaces a model exception as an error event", async () => {  const events = [];

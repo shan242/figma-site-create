@@ -545,6 +545,58 @@ export function formatSelfCheck(reports) {
   );
 }
 
+// --- 图片卸载 ------------------------------------------------------------------
+//
+// 为什么需要:view_image 的图片只能作为一条 **user** 消息送达(工具结果不能带图)。
+// 那条消息带着完整 base64 进 history 之后,**本轮后续每一轮都会重发** ——
+// 看 4 张 1MB 的图 ≈ 5.3M 字符,一轮就把上下文吃干净,后面的工具结果全被挤掉。
+// 剪枝对它是无效的:base64 在一个 image_url 块里,不是字符串字段。
+//
+// 做法借鉴 DSH 的 compaction-image-offload:超出预算时,把**最老的**图片换成
+// 一句占位符(说明卸载了什么、怎么再看),最近几张保留 —— 模型当下正在看的多半是
+// 刚请求的那几张。
+export const IMAGE_BUDGET = Object.freeze({ maxImages: 4, maxBytes: 6 * 1024 * 1024 });
+
+/**
+ * 就地把 history 里最老的图片换成占位符。返回卸载了几张。
+ * 只在**超出预算**时动手,且**至少保留最新的一张** —— 全卸载等于让模型凭空回答。
+ */
+export function offloadOldImages(history, budget = {}) {
+  const b = { ...IMAGE_BUDGET, ...budget };
+  // 收集所有图片块的位置
+  const spots = [];
+  for (let mi = 0; mi < history.length; mi++) {
+    const m = history[mi];
+    if (!Array.isArray(m?.content)) continue;
+    for (let bi = 0; bi < m.content.length; bi++) {
+      const block = m.content[bi];
+      if (block?.type !== "image_url") continue;
+      const url = String(block.image_url?.url || "");
+      spots.push({ mi, bi, bytes: url.length, label: block.__label || "" });
+    }
+  }
+  if (spots.length <= 1) return 0;
+  const totalBytes = spots.reduce((n, s) => n + s.bytes, 0);
+  if (spots.length <= b.maxImages && totalBytes <= b.maxBytes) return 0;
+
+  // 从最老的开始卸,直到满足预算;但**永远保留最后一张**
+  let count = spots.length;
+  let bytes = totalBytes;
+  let dropped = 0;
+  for (let i = 0; i < spots.length - 1; i++) {
+    if (count <= b.maxImages && bytes <= b.maxBytes) break;
+    const s = spots[i];
+    history[s.mi].content[s.bi] = {
+      type: "text",
+      text: `[图片${s.label ? " " + s.label : ""} 已从上下文中卸载以节省空间。如果还需要看它,重新调用 view_image 即可。]`,
+    };
+    count--;
+    bytes -= s.bytes;
+    dropped++;
+  }
+  return dropped;
+}
+
 export async function runAgent({ messages, model, tools, onEvent, config, maxTurns }) {
   const history = [{ role: "system", content: SYSTEM_PROMPT }, ...messages];
   let finalText = "";
@@ -557,6 +609,10 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
   const selfCheckOn = config?.selfCheck !== false && typeof tools.handlers?.check_page === "function";
   for (let turn = 0; turn < limit; turn++) {
     onEvent?.({ type: "status", turn });
+    // 发请求之前先卸掉过期的图片 —— base64 每一轮都会重发,不卸的话
+    // 一次 view_image 就能把后面所有工具结果挤出上下文。
+    const offloaded = offloadOldImages(history);
+    if (offloaded) onEvent?.({ type: "images_offloaded", count: offloaded });
     let res;
     try {
       res = await model(history, tools.schemas, config.signal, onEvent);
@@ -646,7 +702,7 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
         role: "user",
         content: [
           { type: "text", text: `以下是你请求查看的图片(${imgs.map((i) => i.label).join("、")}),请据此回答:` },
-          ...imgs.map((i) => ({ type: "image_url", image_url: { url: i.dataUrl, detail: i.detail } })),
+          ...imgs.map((i) => ({ type: "image_url", image_url: { url: i.dataUrl, detail: i.detail }, __label: i.label })),
         ],
       });
       onEvent?.({ type: "images", count: imgs.length, labels: imgs.map((i) => i.label) });
