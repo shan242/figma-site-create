@@ -229,8 +229,16 @@ function renderWordcloud(root, spec, buckets) {
   if (window.renderWordCloud) { window.renderWordCloud(canvas, layout); }
 }
 
-function note(root, text, cls) {
-  var n = root.querySelector(".db-note");
+// "已提交"那行提示的文案。返回 null = **一句话都不显示**。
+// options.done 显式给空串就是"不要提示" —— 旧写法 done || "你已提交" 里空串是
+// falsy,想关掉的人反而会拿到默认文案(用户报的"已提交字样删不掉"就是这个)。
+function doneText(spec) {
+  var d = spec.options && spec.options.done;
+  if (d === undefined) { return "你已提交"; }
+  return d ? String(d) : null;
+}
+
+function note(root, text, cls) {  var n = root.querySelector(".db-note");
   if (!n) { n = document.createElement("div"); n.className = "db-note"; root.appendChild(n); }
   n.textContent = text || "";
   n.className = "db-note" + (cls ? " " + cls : "");
@@ -295,7 +303,10 @@ function initOne(root) {
 
   function afterSubmit() {
     submitted = true;
-    note(root, (spec.options && spec.options.done) || "已提交", "db-ok");
+    // options.done 显式给空串 = **不要任何提示**(不只是用默认值兜底)。
+    // 旧写法是 options.done || "你已提交",空串是 falsy,想关掉提示的人反而
+    // 会拿到默认文案 —— 用户报的"已提交字样删不掉"就是这个。
+    if (doneText(spec) !== null) { note(root, doneText(spec), "db-ok"); }
     refresh();
   }
 
@@ -344,7 +355,8 @@ function initOne(root) {
         .then(function (d) {
           if (d.items && d.items.length) {
             submitted = true;
-            note(root, (spec.options && spec.options.done) || "你已提交", "db-ok");
+            var t = doneText(spec);
+            if (t !== null) { note(root, t, "db-ok"); }
           }
         })
         .catch(function () {})
