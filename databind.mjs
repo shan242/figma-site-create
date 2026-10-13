@@ -505,7 +505,22 @@ function initOne(root) {
           var list = sel[spec.collection] || (sel[spec.collection] = []);
           var i = -1;
           for (var k = 0; k < list.length; k++) { if (list[k].el === target) { i = k; break; } }
-          if (i >= 0) { list.splice(i, 1); target.removeAttribute("data-db-selected"); target.style.removeProperty("filter"); }
+          if (i >= 0) {
+            list.splice(i, 1);
+            // 取消选中:把刚才打上的属性与内联 filter 全部抹掉
+            var marked = target.parentElement ? target.parentElement.querySelectorAll('[data-db-selected]') : [];
+            target.removeAttribute("data-db-selected");
+            target.style.removeProperty("filter");
+            for (var m2 = 0; m2 < marked.length; m2++) {
+              marked[m2].removeAttribute("data-db-selected");
+              marked[m2].style.removeProperty("filter");
+            }
+            var up2 = target.parentElement;
+            for (var u2 = 0; u2 < 4 && up2; u2++) {
+              if (up2.hasAttribute && up2.hasAttribute("data-db-selected")) { up2.removeAttribute("data-db-selected"); up2.style.removeProperty("filter"); }
+              up2 = up2.parentElement;
+            }
+          }
           else {
             // **连值一起存** —— 提交时直接用这个值。
             // 早先只存 DOM 元素、提交时读 el.textContent,而选项节点的文字往往在
@@ -513,12 +528,29 @@ function initOne(root) {
             // 页面上只显示"没有可提交的选项"。存值就没有这个猜测。
             list.push({ el: target, value: write.value !== undefined && write.value !== null ? write.value : (target.textContent || "").trim() });
             target.setAttribute("data-db-selected", "1");
-            // **选中变深也由运行时落笔。**
+            // **选中变深也由运行时落笔,而且要盖住"看得见的那一层"。**
             // 原来靠写一条 [data-db-selected] { filter: brightness(...) } 的 CSS,
-            // 而实测那种规则经常被后面的样式表压掉、或者选择器根本没命中 ——
-            // 用户看到的就是"点了之后颜色没变"。用带 important 的内联声明,
-            // 和揭示、可点击性是同一套做法:必须成立的事不交给样式表。
-            target.style.setProperty("filter", "brightness(0.45)", "important");
+            // 实测那种规则经常被后面的样式表压掉、或者选择器根本没命中 ——
+            // 用户看到的就是"点了之后颜色没变"。
+            // 更隐蔽的一层:能点的节点常常只是**文字**,而画面上那个胶囊/方框是
+            // **另一个节点**(祖先或兄弟)。只给文字加 filter,胶囊纹丝不动,
+            // 用户依然说"没有样式改变"。所以沿着祖先链往上找**第一个有底色或
+            // 边框**的那一层,连它一起变深;找不到就退回到节点自己。
+            var paint = [];
+            var walk = target;
+            for (var up = 0; up < 4 && walk; up++) {
+              var cs = window.getComputedStyle(walk);
+              var hasPaint = (cs.backgroundColor && cs.backgroundColor !== "rgba(0, 0, 0, 0)" && cs.backgroundColor !== "transparent") ||
+                             (cs.borderTopWidth && parseFloat(cs.borderTopWidth) > 0);
+              paint.push(walk);
+              if (hasPaint && up > 0) break;
+              walk = walk.parentElement;
+            }
+            for (var p2 = 0; p2 < paint.length; p2++) {
+              paint[p2].setAttribute("data-db-selected", "1");
+              paint[p2].style.setProperty("filter", "brightness(0.45)", "important");
+            }
+            target.setAttribute("data-db-selected", "1");
           }
           note(root, "");
         });
