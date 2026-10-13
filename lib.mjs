@@ -981,11 +981,23 @@ export function videoElement(node, canvas, ctx, spec) {
   //     2. 要自动播放 —— 浏览器一律拦住带声音的自动播放,不静音等于根本不播
   const autoplay = !!spec.autoplay;
   const muted = spec.muted === true || (autoplay && spec.muted !== false);
+  // controls: true(浏览器自带)/ false(完全没有)/ "custom"(自带太丑,用自己的按钮)
+  const custom = spec.controls === "custom";
+  const showNative = spec.controls !== false && !custom;
   const attrs =
     // controls 默认开:一个没法播放的视频不是好默认值。insert_video 也会显式存这个值。
-    `${spec.controls === false ? "" : " controls"}${autoplay ? " autoplay" : ""}${muted ? " muted" : ""}${flag("loop")} playsinline preload="metadata"` +
+    `${showNative ? " controls" : ""}${autoplay ? " autoplay" : ""}${muted ? " muted" : ""}${flag("loop")} playsinline preload="metadata"` +
     (spec.poster ? ` poster="${escapeHtml(String(spec.poster))}"` : "");
-  return `  <video class="replica-video" src="${escapeHtml(String(spec.src))}"${attrs} style="${cssText(st)}" data-node-id="${node.id}" data-video-id="${escapeHtml(String(spec.id || ""))}"></video>`;
+  const vid = `  <video class="replica-video" src="${escapeHtml(String(spec.src))}"${attrs} style="${cssText(st)}" data-node-id="${node.id}" data-video-id="${escapeHtml(String(spec.id || ""))}"></video>`;
+  if (!custom) return vid;
+  // 自定义控件:一个跟着视频走的按钮。位置用的是节点的盒子(和视频同一套定位),
+  // 所以 CENTER/SCALE 的规则自动一致。
+  const btn = { position: "absolute", top: st.top, left: st.left, width: "48px", height: "48px",
+    transform: "translate(16px, -64px)", "border-radius": "50%", border: "0",
+    background: "rgba(0,0,0,.45)", color: "#fff", "font-size": "16px", "line-height": "1",
+    display: "flex", "align-items": "center", "justify-content": "center", cursor: "pointer",
+    "backdrop-filter": "blur(2px)", "z-index": "2" };
+  return `${vid}\n  <button type="button" class="replica-video-toggle" data-video-toggle="${escapeHtml(String(spec.id || ""))}" aria-label="Play with sound" style="${cssText(btn)}">▶</button>`;
 }
 
 export function escapeHtml(s) {
@@ -1028,12 +1040,17 @@ export function videoOptionsFrom(fill, node) {
   const base = { muted: fill?.muted !== false, controls: fill?.showControls === true, autoplay: fill?.autoplay === true, loop: fill?.mediaLoop === true };
   const ov = node?.__videoOptions;
   if (!ov) return base;
-  for (const k of ["muted", "controls", "autoplay", "loop"]) {
+  for (const k of ["muted", "autoplay", "loop"]) {
     if (typeof ov[k] === "boolean") base[k] = ov[k];
   }
+  // controls 可以是布尔,也可以是 "custom"(用自带的播放按钮,不要浏览器那套 UI)
+  if (ov.controls === "custom") base.controls = "custom";
+  else if (typeof ov.controls === "boolean") base.controls = ov.controls;
   // 想有声音就不能自动播放 —— 浏览器一律拦住带声音的自动播放,
   // 硬要两者兼得的结果是**根本不播**(比静音自动播放更糟)。
   if (base.muted === false && base.autoplay) { base.autoplay = false; base.__autoplayDropped = true; }
+  // 有声音却完全没有控件 = 访客没法播。要么给浏览器控件,要么给自定义按钮。
+  if (base.muted === false && base.controls === false) { base.controls = true; base.__controlsForced = true; }
   return base;
 }
 
@@ -1230,6 +1247,45 @@ export const swapRuntime = `(function () {
     apply(group, to);
   });
 })();`;
+
+// --- 自定义视频控件 ------------------------------------------------------------
+//
+// 为什么需要:浏览器自带的控件是一整套亮色 UI,常常和设计完全不搭;
+// 但**完全不给控件**又等于访客没法播 —— 实测那个视频既静音、又没控件、又不自动播放,
+// 页面上它就是一张不会动的图。
+// 折中:不要浏览器控件,只叠一个跟设计同色的播放/暂停按钮,点了才出声。
+// 只在 `controls: "custom"` 时才注入这段脚本,普通视频一个字节都不多。
+export const videoRuntime = `(function () {
+  document.addEventListener('click', function (e) {
+    var el = e.target && e.target.closest ? e.target.closest('[data-video-toggle]') : null;
+    if (!el) return;
+    var id = el.getAttribute('data-video-toggle');
+    var v = document.querySelector('video[data-video-id="' + id + '"]');
+    if (!v) return;
+    e.preventDefault();
+    // 第一次点:解除静音并播放(浏览器要求由用户手势触发声音)
+    if (v.paused || v.muted) { v.muted = false; var p = v.play(); if (p && p.catch) p.catch(function () {}); }
+    else { v.pause(); }
+  });
+  function sync() {
+    var btns = document.querySelectorAll('[data-video-toggle]');
+    for (var i = 0; i < btns.length; i++) {
+      var id = btns[i].getAttribute('data-video-toggle');
+      var v = document.querySelector('video[data-video-id="' + id + '"]');
+      if (!v) continue;
+      var playing = !v.paused && !v.muted;
+      btns[i].setAttribute('data-video-state', playing ? 'playing' : 'paused');
+      btns[i].textContent = playing ? '❙❙' : '▶';
+      btns[i].setAttribute('aria-label', playing ? 'Pause' : 'Play with sound');
+    }
+  }
+  document.addEventListener('play', sync, true);
+  document.addEventListener('pause', sync, true);
+  document.addEventListener('volumechange', sync, true);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', sync);
+  else sync();
+})();`;
+
 
 // The page's canvas frame (FRAME, falling back to WEBPAGE). Shared by the
 // build pipeline and the AI's apply_wordcloud (which clamps placement rects

@@ -1631,10 +1631,12 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         };
       }
 
+      // controls 除了 true/false 还接受 "custom"(用自带的播放按钮,不要浏览器那套 UI)
+      const pickCtl = (v, cur) => (v === "custom" ? "custom" : typeof v === "boolean" ? v : cur);
       const pick = (v, cur) => (typeof v === "boolean" ? v : cur);
       let next;
       if (existing) {
-        next = { ...existing, muted: pick(muted, existing.muted), controls: pick(controls, existing.controls), autoplay: pick(autoplay, existing.autoplay), loop: pick(loop, existing.loop) };
+        next = { ...existing, muted: pick(muted, existing.muted), controls: pickCtl(controls, existing.controls), autoplay: pick(autoplay, existing.autoplay), loop: pick(loop, existing.loop) };
         if (src) next.src = String(src);
       } else {
         // 设计自带的 VIDEO 填充:基底是 Figma 的默认值(永远静音、永远没控件)
@@ -1646,7 +1648,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
           nodeId,
           src: `assets/${fill.videoRef}.mp4`,
           muted: pick(muted, base.muted),
-          controls: pick(controls, base.controls),
+          controls: pickCtl(controls, base.controls),
           autoplay: pick(autoplay, base.autoplay),
           loop: pick(loop, base.loop),
         };
@@ -1661,6 +1663,9 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       if (next.muted === false && next.controls === false) {
         next.controls = true;
         notes.push("开了声音但没给控件,已把 controls 打开 —— 否则访客没法自己点播放");
+      }
+      if (next.muted === false && next.controls === "custom") {
+        notes.push("用的是自定义播放按钮(controls:custom)—— 按钮只在访客点它之后才有声音,这是浏览器的要求");
       }
       const local = next.src && !/^https?:\/\//i.test(next.src) ? join(root, next.src) : null;
       const tracks = local ? videoTracks(local) : null;
@@ -2041,7 +2046,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
             slug: { type: "string", description: "页面 slug" },
             nodeId: { type: "string", description: "视频所在节点(insert_video 用的那个,或设计里带 VIDEO 填充的节点)" },
             muted: { type: "boolean", description: "是否静音。想让访客听到声音就传 false" },
-            controls: { type: "boolean", description: "是否显示浏览器播放控件。有声音时强制为 true" },
+            controls: { type: "string", enum: ["true", "false", "custom"], description: "播放控件:true=浏览器自带;false=完全不显示(有声音时会强制打开);custom=只给一个跟设计同色的播放按钮,不要浏览器那套亮色 UI" },
             autoplay: { type: "boolean", description: "是否自动播放。有声音时会被关掉(浏览器拦截)" },
             loop: { type: "boolean", description: "是否循环" },
             src: { type: "string", description: "可选;顺便换掉视频文件" },

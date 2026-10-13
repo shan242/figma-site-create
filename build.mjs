@@ -8,7 +8,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, basename, resolve, sep } from "node:path";
-import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime, videoElement } from "./lib.mjs";
+import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime, videoRuntime, videoElement } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
 import { databindInjection, databindHead } from "./databind.mjs";
 import { httpFetch } from "./netfetch.mjs";
@@ -313,6 +313,8 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
 
   // 组件变体轮播:只有真的展开了多个变体才需要这段运行时。
   if (all.some((n) => n.__swap)) out.push(`<script>${swapRuntime}</script>`);
+  // 有自定义控件的视频才注入这段 —— 普通视频一个字节都不多。
+  if (all.some((n) => n.__videoOptions && n.__videoOptions.controls === "custom")) out.push(`<script>${videoRuntime}</script>`);
 
   // A word cloud may sit below the design canvas bottom (the AI places it in
   // canvas coordinates with top > canvas height); grow the canvas to cover it

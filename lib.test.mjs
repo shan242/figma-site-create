@@ -6,7 +6,7 @@
 // 一个子节点都取不到。这里的用例把这个还原逻辑钉死。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement, textRuns, videoSpecFromFill, videoTracks, videoOptionsFrom } from "./lib.mjs";
+import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement, textRuns, videoSpecFromFill, videoTracks, videoOptionsFrom, videoRuntime } from "./lib.mjs";
 
 // --- 插入视频(videoElement) --------------------------------------------------
 // 把某个节点整体换成 <video>,位置尺寸沿用该节点。之前工具集里没有「插入媒体」,
@@ -66,6 +66,36 @@ test("videoElement:没传 muted 时**不**默认静音(2026101203 的教训)", (
   const manual = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", autoplay: false, muted: false });
   assert.equal(/ autoplay/.test(manual), false);
   assert.equal(/ muted/.test(manual), false, "muted:false 应当尊重");
+});
+
+test("videoElement:controls:'custom' 用自带按钮,不要浏览器那套 UI", () => {
+  // 浏览器自带控件是亮色 UI,常常和设计完全不搭;但完全不给控件又等于访客没法播
+  // (实测那个视频既静音、没控件、又不自动播放 —— 页面上就是一张不会动的图)。
+  const html = videoElement(vnode(), vcanvas, vctx(), { id: "vid-x", src: "a.mp4", controls: "custom", muted: false });
+  assert.equal(/ controls\b/.test(html), false, "不要浏览器自带控件");
+  assert.match(html, /data-video-toggle="vid-x"/, "要有自己的按钮");
+  assert.match(html, /data-video-id="vid-x"/, "按钮要能对上视频");
+  assert.equal(/ muted\b/.test(html), false, "要声音就别静音");
+  // 普通 controls 一个字节都不该多
+  const plain = videoElement(vnode(), vcanvas, vctx(), { id: "vid-x", src: "a.mp4" });
+  assert.equal(/video-toggle/.test(plain), false, "默认不该有自定义按钮");
+});
+
+test("videoRuntime:自定义按钮切换播放/静音,并且带状态同步", () => {
+  assert.match(videoRuntime, /data-video-toggle/);
+  assert.match(videoRuntime, /v\.muted = false/, "第一次点要解除静音(浏览器要求用户手势)");
+  assert.match(videoRuntime, /play\(\)/, "要真的播放");
+  assert.match(videoRuntime, /volumechange|pause/, "状态变化要同步按钮外观");
+});
+
+test("videoOptionsFrom:controls 支持 custom,并且有声音时不会放任无控件", () => {
+  const figma = { muted: true, showControls: false, autoplay: false, mediaLoop: false };
+  // custom 透传
+  assert.equal(videoOptionsFrom(figma, { __videoOptions: { controls: "custom" } }).controls, "custom");
+  // 有声音却没控件 → 强制打开,并且标记(不能悄悄改)
+  const forced = videoOptionsFrom(figma, { __videoOptions: { muted: false, controls: false } });
+  assert.equal(forced.controls, true, "有声音就有控件");
+  assert.equal(forced.__controlsForced, true, "要告诉调用方被改过");
 });
 
 test("videoTracks / videoOptionsFrom:认出音轨,且声音与自动播放不可兼得", () => {
