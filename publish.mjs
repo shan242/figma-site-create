@@ -13,9 +13,10 @@
 // overlay json) is deliberately excluded — it is build input, not served files.
 
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, sep, basename } from "node:path";
 import { join as posixJoin } from "node:path/posix";
+import { httpFetch } from "./netfetch.mjs";
 
 const UPLOAD_CONCURRENCY = 4;
 
@@ -216,6 +217,42 @@ export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, grou
   });
   await Promise.all(workers);
   log(`✅ 发布完成,共上传 ${uploaded} 个文件`);
+
+  // **发布后验证**:文件传上去了 ≠ 访客看到的是新的。
+  // 这一轮踩过两次同类问题 —— 静态托管的 max-age 很长,CDN 还按 Accept-Encoding
+  // 分开缓存,于是"服务器上是新文件、浏览器拿到的是旧的"。所以传完立刻回读一次,
+  // 核对版本串是否与刚构建的一致。不一致不要当成失败(缓存要时间),但要**说出来**,
+  // 否则用户只会看到"改了没生效"而不知道该等或该清缓存。
+  let verify = null;
+  try {
+    const localIdx = join(outDir, "index.html");
+    if (existsSync(localIdx)) {
+      const localHtml = readFileSync(localIdx, "utf8");
+      const wantVer = (/styles\.css\?v=([a-f0-9]+)/.exec(localHtml) || [])[1] || null;
+      const origin = `https://${domain}`;
+      const res = await httpFetch(`${origin}/?t=${Date.now()}`, { redirect: "follow" });
+      if (!res.ok) {
+        verify = { ok: false, reason: `线上返回 HTTP ${res.status}` };
+      } else {
+        const live = await res.text();
+        const gotVer = (/styles\.css\?v=([a-f0-9]+)/.exec(live) || [])[1] || null;
+        if (wantVer && gotVer && wantVer !== gotVer) {
+          verify = { ok: false, want: wantVer, got: gotVer, reason: "线上还是旧版本" };
+        } else {
+          // 再确认样式表本身真的取得到(曾经出现 HTML 是新的、CSS 命中旧缓存)
+          const cssRes = await httpFetch(`${origin}/styles.css?v=${gotVer || ""}&t=${Date.now()}`, { redirect: "follow" });
+          verify = cssRes.ok ? { ok: true, version: gotVer } : { ok: false, reason: `styles.css 返回 HTTP ${cssRes.status}` };
+        }
+      }
+    }
+  } catch (e) {
+    verify = { ok: false, reason: e.message };
+  }
+  if (verify) {
+    if (verify.ok) log(`✅ 线上验证通过(index.html 与 styles.css 都是刚发布的那份,版本 ${verify.version || "(无版本串)"})`);
+    else if (verify.want && verify.got) log(`⚠ 线上还是旧版本(线上 ${verify.got},刚发布的是 ${verify.want})——多半是 CDN 缓存,清一次缓存或等几分钟。`);
+    else log(`⚠ 发布后验证没通过: ${verify.reason}。静态文件已经传上去了,如果浏览器看着不对,先强刷(Ctrl+Shift+R)或清一次 CDN 缓存。`);
+  }
   // Optional second phase: make https://<domain> work. Reuses the certificate
   // and accounts already configured in the panel (see ensureHttps).
   let httpsResult = null;
