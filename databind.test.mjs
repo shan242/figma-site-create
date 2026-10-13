@@ -81,18 +81,20 @@ test("运行时必须内联 window.renderWordCloud,否则画布永远是空的",
   assert.match(clientRuntime, /window\.renderWordCloud\s*=/, "运行时里必须定义 renderWordCloud");
 });
 
-test("离线(没后端 / file:// 预览)时也要画 fallback,不能提前 return", () => {
-  // 旧代码 `if (!Site) return;` 在画 fallback 之前就退出 —— file:// 下
-  // location.hostname 是空的,于是整块是空的。优雅降级的要求是"绝不白屏",
-  // 不是"绝不联网":联网与否只该关掉请求,不该关掉渲染。
-  assert.match(clientRuntime, /var ONLINE = !!\(API && Site\)/, "用开关而不是提前 return");
-  assert.equal(/if \(!Site\) \{ return; \}/.test(clientRuntime), false, "不能再提前 return");
-  // 用真实代码定位(注释会被 stripComments 剥掉,不能拿注释当锚点)
+test("本地(file://)走完整模拟,发布后自动切后端", () => {
+  // 用户的要求:本地要能完整走一遍词云/投票,但用本地模拟数据;发布后自动切到真后端。
+  // 做法是运行时判断,不靠构建开关 —— 同一份产物两处都能用。
+  assert.match(clientRuntime, /var LOCAL = !ONLINE;/, "要有本地开关");
+  assert.match(clientRuntime, /function localApi\(/, "要有本地模拟实现");
+  assert.match(clientRuntime, /if \(LOCAL\) \{ return localApi\(path, opts\); \}/, "api() 要分流");
+  assert.match(clientRuntime, /localStorage\.setItem\(localKey\(path\)/, "写入落到 localStorage");
+  // 关键:**不能再提前 return** —— 提前退出的话本地就只剩一张 fallback,点不动
   const paintIdx = clientRuntime.indexOf("paint((spec.fallback");
-  const gateIdx = clientRuntime.indexOf("if (!ONLINE) {");
-  assert.ok(paintIdx >= 0 && gateIdx >= 0, `两处都要在 (paint=${paintIdx} gate=${gateIdx})`);
-  assert.ok(paintIdx < gateIdx, "必须先画 fallback,再判断要不要联网");
-  assert.match(clientRuntime, /classList\.add\("db-offline"\)/, "离线要标 db-offline,让用户知道为什么点了没反应");
+  assert.ok(paintIdx >= 0, "要先画 fallback");
+  assert.equal(/if \(!ONLINE\) \{\s*return;\s*\}/.test(clientRuntime), false, "不能因为离线就退出");
+  assert.match(clientRuntime, /classList\.add\("db-local"\)/, "本地只标一个类,不写提示文案");
+  // 本地模拟不能出现在"预览"字样里 —— 本地和线上要长得一样
+  assert.equal(/本地预览/.test(clientRuntime), false, "运行时里不该有'本地预览'字样");
 });
 
 test("词云布局:权重全为 0 也要铺出全部选项(不是空布局)", () => {

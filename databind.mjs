@@ -78,18 +78,75 @@ function newClientId() {
   } catch (e) {}
   return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
 }
-var LS = "__dc_" + Site, client = null;
-// 没联网时不碰 localStorage(file:// 下有些浏览器直接抛异常)
-if (ONLINE) {
-  try { client = localStorage.getItem(LS); } catch (e) { client = null; }
-  if (!client) {
-    client = newClientId();
-    try { localStorage.setItem(LS, client); } catch (e) {}
+var LS = "__dc_" + (Site || "local"), client = null;
+try { client = localStorage.getItem(LS); } catch (e) { client = null; }
+if (!client) {
+  client = newClientId();
+  try { localStorage.setItem(LS, client); } catch (e) {}
+}
+
+/* ---------- 本地模拟 ----------
+   用 file:// 打开(或没配后端)时,不联网,改用 localStorage 当后端:
+   同样的路径、同样的读写语义,所以上面所有渲染/提交代码一行都不用改。
+   这样**本地能完整走一遍词云/投票/留言**,发布到域名后自动切到真后端 ——
+   同一份产物、同一个 path,判断只看 location.protocol,构建时不需要任何开关。
+   数据存在 __dl__<path> 下,清掉 localStorage 就等于重置模拟数据。 */
+var LOCAL = !ONLINE;
+function localKey(path) { return "__dl__" + path; }
+function localLoad(path) {
+  try { var raw = localStorage.getItem(localKey(path)); return raw ? JSON.parse(raw) : []; }
+  catch (e) { return []; }
+}
+function localSave(path, rows) {
+  try { localStorage.setItem(localKey(path), JSON.stringify(rows)); } catch (e) {}
+}
+function localApi(path, opts) {
+  var method = (opts && opts.method) || "GET";
+  try {
+    if (method === "POST") {
+      var rows = localLoad(path);
+      var d = (opts.body && opts.body.data) || {};
+      d.__client = (opts.body && opts.body.client) || "local";
+      d.__at = Date.now();
+      rows.push(d);
+      localSave(path, rows);
+      return Promise.resolve({ ok: true });
+    }
+    if (path.indexOf("/mine") >= 0) {
+      var m = /client=([^&]+)/.exec(path);
+      var want = m ? decodeURIComponent(m[1]) : "";
+      var mine = localLoad(path.split("/mine")[0]).filter(function (r) { return r.__client === want; });
+      return Promise.resolve({ ok: true, items: mine.map(function (r) { return { data: r }; }) });
+    }
+    if (path.indexOf("/stats") >= 0) {
+      var base = path.split("/stats")[0];
+      var fld = /field=([^&]+)/.exec(path);
+      var field = fld ? decodeURIComponent(fld[1]) : "value";
+      var lim = /limit=(\d+)/.exec(path);
+      var limit = lim ? Number(lim[1]) : 10;
+      var counts = {};
+      var all = localLoad(base);
+      for (var i = 0; i < all.length; i++) {
+        var k = String(all[i][field] === undefined || all[i][field] === null ? "" : all[i][field]);
+        if (!k) { continue; }
+        counts[k] = (counts[k] || 0) + 1;
+      }
+      var buckets = Object.keys(counts).map(function (k) { return { key: k, count: counts[k] }; })
+        .sort(function (a, b) { return b.count - a.count; }).slice(0, limit);
+      return Promise.resolve({ ok: true, field: field, total: all.length, buckets: buckets });
+    }
+    // 计数:任何字段的条数
+    var f2 = /field=([^&]+)/.exec(path);
+    var rows2 = localLoad(path.split("?")[0]);
+    return Promise.resolve({ ok: true, total: rows2.length, field: f2 ? decodeURIComponent(f2[1]) : "id" });
+  } catch (e) {
+    return Promise.reject(new Error("本地模拟失败:" + e.message));
   }
 }
 
 /* ---------- HTTP ---------- */
 function api(path, opts) {
+  if (LOCAL) { return localApi(path, opts); }
   var init = { method: (opts && opts.method) || "GET", headers: {} };
   if (opts && opts.body !== undefined) {
     init.headers["Content-Type"] = "application/json";
@@ -193,16 +250,11 @@ function initOne(root) {
   // 1) 先画 fallback —— 首屏立刻有内容,后端挂了也不白屏
   paint((spec.fallback && spec.fallback.data) || spec.fallback || null);
 
-  // 没联网(没配后端,或是 file:// 本地预览)就到此为止:
-  // fallback 已经画出来了,后面的读/写都需要后端。
-  // 但**要把原因挂到元素上**,否则用户看到"点了没反应"完全无从判断 ——
-  // 实测 coco figma2 的 AI 只能自己写一条 content:'...the voting script only
-  // runs there' 的 CSS 来代偿。加上 db-offline 类,样式就能有一处统一的口径。
-  if (!ONLINE) {
-    root.classList.add("db-offline");
-    if (write) { note(root, spec.options && spec.options.offline || "本地预览:发布后这里才能记录", "db-off"); }
-    return;
-  }
+  // 本地(file://)时 ONLINE 是 false,但**不退出** —— api() 会走 localApi(),
+  // 用 localStorage 当后端,读写语义完全一样,所以本地能走一遍完整流程
+  // (投票 → 词云长大 → 留言),发布后同一份产物自动切到真后端。
+  // 只标一个类供样式区分,不再写"本地预览"之类的话 —— 本地和线上应当长得一样。
+  if (LOCAL) { root.classList.add("db-local"); }
 
   function paint(data) {
     if (!data) { return; }
