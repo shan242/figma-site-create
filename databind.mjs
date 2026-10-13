@@ -368,7 +368,9 @@ function initOne(root) {
     // (实测反馈:"有些提交并没有成功提交")。现在明确说明,并且把"还没发完"
     // 和"已经投过"分开报 —— 前者是等待,后者是规则。
     if (busy) { note(root, (spec.options && spec.options.sending) || "发送中…", "db-wait"); return; }
-    if (submitted) { note(root, (spec.options && spec.options.done) !== "" ? ((spec.options && spec.options.already) || "这一项你已经投过了") : "", "db-ok"); return; }
+    // 每个访客能投几次:once(默认,每项一次)/ many(可重复投)/ single(可改主意,后写覆盖前写)
+    var per = (spec.options && spec.options.perVisitor) || "once";
+    if (submitted && per === "once") { note(root, (spec.options && spec.options.already) || "这一项你已经投过了", "db-ok"); return; }
     busy = true;
     var body2 = { data: value !== undefined ? value : payload(el), client: client };
     api(path, { method: "POST", body: body2 })

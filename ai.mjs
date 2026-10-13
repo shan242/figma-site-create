@@ -90,7 +90,9 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 - 需要大改页面结构时,可以用 write_file 改写生成的 *.html(也可以写 data/ 下的页面数据)。改写 *.html 后,系统会在每次重新生成后把你改的内容自动套回去(记录在 file-locks.json),所以是持久的。
 - 注意:对同一个页面,要么用 edit_text / edit_node / apply_wordcloud 这类覆盖层工具改,要么用 write_file 整体改写 HTML,不要混用——整体改写会把该页覆盖层的改动盖掉。append_css 与 write_file 改 styles.css 同理。
 - 不要改写 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json(它们是构建元数据/覆盖层来源/设计报告,直接改会破坏一致性)。
-- **改坏了可以回退**:每次改动覆盖层(文字/样式/词云/绑定/视频)之前程序都会自动存一份快照。如果用户说"还是刚才那样好"、或者你发现把样式改烂了,用 list_history 找到那一步、再 restore_history 回去 —— **不要靠自己凭记忆反着改**,那几乎一定改不回来。回滚本身也是可逆的。
+- **加任何覆盖层之前先 list_overlays(slug)**。你看不到页面,而词云/绑定/视频是你自己加的、发布数据里没有 —— 只靠记忆很容易在同一处叠第二个(实测:25 条绑定全绑同一个 collection,其中两条的矩形完全重叠,页面上两行字叠着)。它还会直接告诉你哪些已经重叠了。
+- **改坏了可以回退**:每次改动覆盖层(文字/样式/词云/绑定/视频)之前程序都会自动存一份快照。如果用户说"还是刚才那样好"、或者你发现把样式改烂了,用 list_history 找到那一步、再 restore_history 回去 —— **不要靠自己凭记忆反着改**,那几乎一定改不回来。回滚本身也是可逆的。:每次改动覆盖层(文字/样式/词云/绑定/视频)之前程序都会自动存一份快照。如果用户说"还是刚才那样好"、或者你发现把样式改烂了,用 list_history 找到那一步、再 restore_history 回去 —— **不要靠自己凭记忆反着改**,那几乎一定改不回来。回滚本身也是可逆的。
+- **工具的返回值里出现 warnings 或 problems 时,必须逐条处理,不能只记下来。** 你**看不到页面**,这些是程序代替你的眼睛算出来的:文字会溢出框、覆盖层会叠在一起、样式里有让功能失效的写法、页面渲染后某块是空的。忽略它们等于把问题留给用户去发现。
 - **写 CSS 前先看这几条硬规矩**(违反时工具会返回 warnings,必须改掉而不是忽略):
   · **不要用 [style*="6850"] 这种按内联样式字符串匹配的选择器** —— 那等于把坐标写死,元素一挪就全失效,而且没人知道那个数字指哪里。用 [data-node-id="..."] 这种稳定标识。
   · **少用 !important** —— 数量一多就互相打架,出问题时无法判断哪条生效。要覆盖就提高选择器特异性,而不是无脑加 !important。
@@ -1153,6 +1155,49 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       return { path, bytes: Buffer.byteLength(content), locked, ...(cssWarnings.length ? { warnings: cssWarnings } : {}) };
     },
 
+    // 列出某个页面上**已经放过的覆盖层**。AI 看不到页面,而覆盖层是它自己加的、
+    // 发布数据里没有 —— 没有这张表,它只能靠记忆,于是同一个地方叠第二个
+    // (实测:25 条 databind 全绑同一个 collection,其中两条矩形完全重叠)。
+    async list_overlays({ slug }) {
+      const page = loadPages().find((p) => p.slug === slug);
+      if (!page) return { error: `没有这个页面: ${slug}` };
+      const onPage = (i) => i.slug === slug;
+      const clouds = loadWordClouds().filter(onPage).map((i) => ({ id: i.id, rect: i.rect, words: (i.spec?.words || []).length }));
+      const binds = loadDatabinds().filter(onPage).map((i) => ({
+        id: i.id, kind: i.kind, collection: i.collection, rect: i.rect,
+        ...(i.write?.target ? { clicksOn: i.write.target, writes: `${i.write.field}=${i.write.value ?? "(节点文字)"}` } : {}),
+        ...(i.read?.groupBy ? { reads: i.read.groupBy } : {}),
+      }));
+      const videos = loadVideos().filter(onPage).map((i) => ({
+        nodeId: i.nodeId, src: i.src, kind: i.kind || "insert",
+        muted: i.muted, controls: i.controls, autoplay: i.autoplay,
+      }));
+      const edits = loadEdits().filter(onPage).map((i) => ({ id: i.id, nodeId: i.nodeId, fields: Object.keys(i).filter((k) => !["id", "slug", "nodeId", "createdAt"].includes(k)) }));
+      const styles = loadNodeStyles().filter(onPage).map((i) => ({ nodeId: i.nodeId, props: Object.keys(i.style || {}) }));
+      const css = loadOverrides().map((i) => ({ id: i.id, chars: (i.css || "").length }));
+      // 重叠检查也顺便做掉 —— 这是 AI 最容易犯又最难自查的错
+      const boxes = [...clouds.map((c) => ({ id: c.id, kind: "wordcloud", rect: c.rect })), ...binds.map((b) => ({ id: b.id, kind: b.kind, rect: b.rect }))]
+        .filter((b) => b.rect && b.rect.width > 2 && b.rect.height > 2);
+      const overlaps = [];
+      for (let a = 0; a < boxes.length; a++) {
+        for (let b = a + 1; b < boxes.length; b++) {
+          const pct = rectOverlap(boxes[a].rect, boxes[b].rect);
+          if (pct >= 0.25) overlaps.push(`${boxes[a].id} 与 ${boxes[b].id} 重叠 ${Math.round(pct * 100)}%`);
+        }
+      }
+      return {
+        slug,
+        wordclouds: clouds,
+        databinds: binds,
+        videos,
+        textEdits: edits,
+        nodeStyles: styles,
+        globalCss: css,
+        ...(overlaps.length ? { overlaps, warn: "这些覆盖层互相压着 —— 页面上会看到内容叠在一起。除非有意的,否则应该合并(用同一个 id 更新)或挪开。" } : {}),
+        ...(clouds.length + binds.length + videos.length + edits.length + styles.length + css.length === 0 ? { note: "这个页面上还没有任何覆盖层(还没有 AI 改动)" } : {}),
+      };
+    },
+
     // 列出覆盖层快照 —— 每次 AI 改动覆盖层之前都会自动存一份。
     // 用它是为了"改坏了能回去":覆盖层是唯一的事实来源,一次写坏就没有退路。
     async list_history({ limit }) {
@@ -1381,6 +1426,10 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       // 集合模式:投票/词云这类"每次提交都是一条"用 append(默认,不去重);
       // "每个人的个人内容"(资料、个人留言)用 single —— 同一访客后写覆盖前写。
       const mode = options?.mode === "single" ? "single" : "append";
+      // 每个访客能投几次。默认 once(每一项一次,防刷票),但用户经常需要
+      // "同一项也能再投"或"改主意"。以前只有 once 一种行为,而且被拒绝时**不吭声**
+      // (用户报"有些提交没成功",其实是重复点同一个标签)。
+      const perVisitor = ["once", "many", "single"].includes(options?.perVisitor) ? options.perVisitor : "once";
       const item = {
         id: newId,
         slug,
@@ -1391,7 +1440,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         read: rd,
         write: w,
         fallback: fallback || null,
-        options: options || {},
+        options: { ...(options || {}), perVisitor },
         createdAt: new Date().toISOString(),
       };
       if (!(await confirm({ kind: "databind", payload: item }))) return { error: "用户拒绝了这次数据绑定" };
@@ -1901,6 +1950,16 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     {
       type: "function",
       function: {
+        name: "list_overlays",
+        description:
+          "列出这个页面上**已经放过的**覆盖层:词云、数据绑定(含点哪个节点写什么字段)、视频、文字改动、节点样式、全局 CSS。还会指出互相重叠的那些。" +
+          "**加任何新东西之前先看它** —— 你看不到页面,而覆盖层是你自己加的、发布数据里没有,只靠记忆很容易在同一处叠第二个。不消耗 API 额度",
+        parameters: { type: "object", properties: { slug: { type: "string", description: "页面 slug" } }, required: ["slug"] },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "list_history",
         description:
           "列出覆盖层的自动快照(每次你改动 edits/nodeStyles/overrides/wordclouds/databinds/videos 之前都会自动存一份)。" +
@@ -2026,7 +2085,15 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
                 maxWords: { type: "number" },
                 unit: { type: "string", description: "counter 的后缀,如「人已参与」" },
                 empty: { type: "string", description: "无数据时的提示文字" },
-                done: { type: "string", description: "已提交后的提示文字,默认「已提交」" },
+                done: { type: "string", description: "已提交后的提示文字,默认「已提交」;传空串表示提交后不显示任何提示" },
+                perVisitor: {
+                  type: "string",
+                  enum: ["once", "many", "single"],
+                  description:
+                    "每个访客能投几次。once(默认)=每一项一次,再点会提示「你已经投过了」——防刷票;" +
+                    "many=同一项可以重复投(累加);single=可以改主意,后端后写覆盖前写。" +
+                    "注意 once 是**每一项一次**:24 个选项就是最多 24 票,不是总共一票。",
+                },
                 mode: {
                   type: "string",
                   enum: ["append", "single"],

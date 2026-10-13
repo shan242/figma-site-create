@@ -419,6 +419,38 @@ test("build re-applies only in-dir locks", async () => {
   assert.equal(existsSync(join(dir, "..", "evil.txt")), false);
 });
 
+// --- list_overlays / 投票规则 --------------------------------------------------
+
+test("list_overlays:列出这页已放过什么,并指出重叠", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  assert.deepEqual((await handlers.list_overlays({ slug: "index" })).databinds, [], "一开始什么都没有");
+  // 放两条**完全重叠**的绑定 —— 这正是真实事故里的样子
+  const rect = { left: 50, top: 6850, width: 1180, height: 440 };
+  await handlers.bind_data({ slug: "index", rect, collection: "voices", kind: "wordcloud", read: { groupBy: "text" }, fallback: { buckets: [] } });
+  await handlers.bind_data({ slug: "index", rect, collection: "votes", kind: "bar", read: { groupBy: "choice" }, fallback: { buckets: [] } });
+  const r = await handlers.list_overlays({ slug: "index" });
+  assert.equal(r.databinds.length, 2);
+  assert.ok(Array.isArray(r.overlaps) && r.overlaps.length === 1, `应指出重叠: ${JSON.stringify(r.overlaps)}`);
+  assert.match(r.warn, /叠在一起/);
+});
+
+test("bind_data:perVisitor 落到 spec 里,默认 once", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const rect = { left: 0, top: 0, width: 100, height: 40 };
+  const a = await handlers.bind_data({ slug: "index", rect, collection: "votes", kind: "counter", fallback: { total: 0 } });
+  const bs = JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8")).items;
+  assert.equal(bs.find((i) => i.id === a.id).options.perVisitor, "once", "默认每一项一次");
+  const b = await handlers.bind_data({ slug: "index", rect, collection: "words", kind: "counter", fallback: { total: 0 }, options: { perVisitor: "many" } });
+  const bs2 = JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8")).items;
+  assert.equal(bs2.find((i) => i.id === b.id).options.perVisitor, "many");
+  // 非法值退回 once,不要写个奇怪的进去
+  const c = await handlers.bind_data({ slug: "index", rect, collection: "x", kind: "counter", fallback: { total: 0 }, options: { perVisitor: "whatever" } });
+  const bs3 = JSON.parse(readFileSync(join(dir, "databinds.json"), "utf8")).items;
+  assert.equal(bs3.find((i) => i.id === c.id).options.perVisitor, "once");
+});
+
 // --- 覆盖层快照 / 回滚 --------------------------------------------------------
 // 覆盖层是 AI 改动的唯一事实来源,一次写坏就没有退路。这一轮我用脚本清 CSS 时
 // 按 } 切块删规则,把按钮样式整块删掉了,最后靠文件旁边的 .bak 才救回来 ——
