@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -167,8 +167,174 @@ test("runAgent stops at maxTurns when the model never finishes", async () => {
   assert.equal(r.turnCount, 3);
 });
 
-test("runAgent surfaces a model exception as an error event", async () => {
+// --- 强制自检 ------------------------------------------------------------------
+// 模型说"改好了"就结束 —— 而页面上是什么样它并不知道。check_page 明明查得出来,
+// 却从来没被自动调用过。现在:改过东西就必须过一遍它,有问题不许结束。
+
+const checkTools = (problemsByCall) => {
+  let call = 0;
+  return {
+    schemas: [],
+    handlers: {
+      list_pages: async () => ({ pages: [{ slug: "index" }] }),
+      write_file: async () => ({ path: "index.html", slug: "index", locked: true }),
+      check_page: async () => ({ slug: "index", ok: false, problems: problemsByCall[Math.min(call++, problemsByCall.length - 1)] }),
+    },
+  };
+};
+
+test("自检:改过东西且有 problems → 不许结束,把问题回灌给模型", async () => {
   const events = [];
+  const seen = [];
+  const model = async (history) => {
+    seen.push(history.length);
+    // 第 1 轮:模型要求写文件;之后每一轮都说"我做完了"
+    return seen.length === 1
+      ? { content: "", toolCalls: [{ id: "c1", name: "write_file", arguments: { path: "index.html", content: "x" } }] }
+      : { content: "改好了", toolCalls: [] };
+  };
+  const r = await runAgent({
+    messages: [{ role: "user", content: "改一下" }],
+    model,
+    tools: checkTools([["词云一个像素都没画"], []]), // 第一次有问题,第二次干净
+    onEvent: (e) => events.push(e),
+    config: {},
+  });
+  // selfChecks 数的是**检查次数**:第一次不合格 + 回轮后第二次通过 = 2
+  assert.equal(r.selfChecks, 2, "第一次不合格,回轮后第二次通过");
+  assert.ok(events.some((e) => e.type === "self_check_failed"), "要报出自检没过");
+  assert.ok(events.some((e) => e.type === "self_check_passed"), "第二次要报过");
+  assert.equal(r.text, "改好了");
+});
+
+test("自检:页面干净就直接结束,不多跑一轮", async () => {
+  const events = [];
+  let calls = 0;
+  const model = async () =>
+    (++calls === 1
+      ? { content: "", toolCalls: [{ id: "c1", name: "write_file", arguments: { path: "index.html", content: "x" } }] }
+      : { content: "done", toolCalls: [] });
+  const r = await runAgent({
+    messages: [{ role: "user", content: "改一下" }],
+    model,
+    tools: checkTools([[]]),
+    onEvent: (e) => events.push(e),
+    config: {},
+  });
+  assert.equal(r.selfChecks, 1);
+  assert.equal(events.some((e) => e.type === "self_check_failed"), false, "干净就不该报失败");
+});
+
+test("自检:只是读文件就不要自检(省掉一次浏览器渲染)", async () => {
+  const events = [];
+  let calls = 0;
+  const model = async () =>
+    (++calls === 1
+      ? { content: "", toolCalls: [{ id: "c1", name: "list_pages", arguments: {} }] }
+      : { content: "看完了", toolCalls: [] });
+  const r = await runAgent({
+    messages: [{ role: "user", content: "看看" }],
+    model,
+    tools: checkTools([["不该被看到"]]),
+    onEvent: (e) => events.push(e),
+    config: {},
+  });
+  assert.equal(r.selfChecks || 0, 0, "没写过东西就不自检");
+  assert.equal(events.some((e) => e.type === "self_check"), false);
+});
+
+test("自检:一直不干净也会停,不会无限打转", async () => {
+  const events = [];
+  const model = async (history) => {
+    // 第一次写,之后永远说做完;check_page 永远有问题
+    const wrote = history.some((m) => m.role === "tool");
+    return wrote ? { content: "做完了", toolCalls: [] } : { content: "", toolCalls: [{ id: "c1", name: "write_file", arguments: { path: "index.html", content: "x" } }] };
+  };
+  const r = await runAgent({
+    messages: [{ role: "user", content: "改" }],
+    model,
+    tools: checkTools([["永远的毛病"]]),
+    onEvent: (e) => events.push(e),
+    config: {},
+  });
+  assert.equal(r.selfChecks, SELF_CHECK_MAX, `最多自检 ${SELF_CHECK_MAX} 次`);
+  assert.equal(r.text, "做完了", "到上限后允许结束,不能把用户卡死");
+});
+
+test("自检:config.selfCheck=false 可以关掉", async () => {
+  let calls = 0;
+  const model = async () =>
+    (++calls === 1
+      ? { content: "", toolCalls: [{ id: "c1", name: "write_file", arguments: { path: "index.html", content: "x" } }] }
+      : { content: "done", toolCalls: [] });
+  const r = await runAgent({
+    messages: [{ role: "user", content: "改" }],
+    model,
+    tools: checkTools([["毛病"]]),
+    config: { selfCheck: false },
+  });
+  assert.equal(r.selfChecks || 0, 0);
+});
+
+test("formatSelfCheck:说清是程序渲染后看到的,并允许模型说明误报", () => {
+  const msg = formatSelfCheck([{ slug: "index", problems: ["词云没画", "opacity 是 0"] }]);
+  assert.match(msg, /【index】/);
+  assert.match(msg, /词云没画/);
+  assert.match(msg, /opacity 是 0/);
+  assert.match(msg, /有意为之/, "要允许模型判定某条是误报,否则会把有意的设计也判成错");
+});
+
+test("自检:必须先重建再检查(否则看到的是上一次的页面)", async () => {
+  // check_page 渲染的是**构建产物**,而模型改的是覆盖层 JSON。
+  // 不先重建就检查,"还没生效"会被误判成"没问题" —— 那一轮自检就白做了。
+  const order = [];
+  let calls = 0;
+  const model = async () =>
+    (++calls === 1
+      ? { content: "", toolCalls: [{ id: "c1", name: "write_file", arguments: { path: "index.html", content: "x" } }] }
+      : { content: "done", toolCalls: [] });
+  const r = await runAgent({
+    messages: [{ role: "user", content: "改" }],
+    model,
+    tools: {
+      schemas: [],
+      handlers: {
+        write_file: async () => ({ path: "index.html", slug: "index" }),
+        check_page: async () => { order.push("check"); return { slug: "index", ok: true, problems: [] }; },
+      },
+      build: async () => { order.push("build"); },
+    },
+    config: {},
+  });
+  assert.deepEqual(order, ["build", "check"], `顺序必须是先构建后检查,实际: ${JSON.stringify(order)}`);
+  assert.equal(r.selfChecks, 1);
+});
+
+test("自检:重建失败要当成问题回灌,不能当成检查通过", async () => {
+  let calls = 0;
+  const model = async () =>
+    (++calls === 1
+      ? { content: "", toolCalls: [{ id: "c1", name: "write_file", arguments: { path: "index.html", content: "x" } }] }
+      : { content: "done", toolCalls: [] });
+  const events = [];
+  await runAgent({
+    messages: [{ role: "user", content: "改" }],
+    model,
+    tools: {
+      schemas: [],
+      handlers: {
+        write_file: async () => ({ path: "index.html", slug: "index" }),
+        check_page: async () => ({ slug: "index", ok: true, problems: [] }),
+      },
+      build: async () => { throw new Error("磁盘满了"); },
+    },
+    onEvent: (e) => events.push(e),
+    config: {},
+  });
+  assert.ok(events.some((e) => e.type === "self_check_failed"), "重建失败也要报自检没过");
+});
+
+test("runAgent surfaces a model exception as an error event", async () => {  const events = [];
   const r = await runAgent({
     messages: [{ role: "user", content: "hi" }],
     model: async () => {

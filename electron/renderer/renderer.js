@@ -231,6 +231,31 @@ function handleChatEvent(evt) {
       lastToolEl = null;
       chatEl.scrollTop = chatEl.scrollHeight;
       break;
+    case "self_check": {
+      // 模型说做完了,程序正在**实际渲染页面**再检查一遍。
+      // 这一步要起浏览器,可能几秒到十几秒 —— 不显示的话界面看起来就是卡住了,
+      // 用户会去点取消,自检就白做了。
+      clearThinking();
+      assistantEl = null;
+      const el = chatBubble("tool");
+      el.textContent = `🔍 自检第 ${evt.round} 轮:正在重新生成并渲染 ${(evt.slugs || []).join("、")} 检查页面…`;
+      chatEl.scrollTop = chatEl.scrollHeight;
+      break;
+    }
+    case "self_check_failed": {
+      const el = chatBubble("tool");
+      el.textContent = `⚠ 自检发现 ${evt.count} 个问题 —— 已把问题交回给 AI 继续处理`;
+      el.classList.add("err");
+      chatEl.scrollTop = chatEl.scrollHeight;
+      break;
+    }
+    case "self_check_passed": {
+      const el = chatBubble("tool");
+      el.textContent = `✅ 自检通过:页面渲染后没有发现问题`;
+      el.classList.add("ok");
+      chatEl.scrollTop = chatEl.scrollHeight;
+      break;
+    }
     case "images": {
       // view_image 把图片作为一条 user 消息发给模型(工具结果不能带图)
       const el = chatBubble("tool");

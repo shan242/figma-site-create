@@ -514,12 +514,47 @@ export function pruneToolResult(result, cfg = {}) {
   return pruned;
 }
 
+// --- 强制自检 ------------------------------------------------------------------
+//
+// 为什么需要:这一整轮所有"DOM 全对但页面不对"的问题,模型**一个都发现不了** ——
+// 词云 canvas 在、尺寸对、一个像素没画;面板带着 submitted 却 opacity 0.0003;
+// 控件在 HTML 里却被 pointer-events 挡住。而 check_page 明明能查出来,却**从来没被
+// 自动调用过**:模型说一句"改好了"就结束了,页面上是什么样它并不知道。
+//
+// 做法:模型不再请求工具(= 它认为做完了)时,**如果这一轮真的写过东西**,
+// 程序先自己跑一遍 check_page。有问题就把问题作为一条 user 消息回灌,强制它继续。
+// 借鉴 DSH 的 repair.js:把"某件事的状态"翻译成"唯一正确的下一步"。
+//
+// 两道闸:最多自检 SELF_CHECK_MAX 轮(防止来回打转),且**允许模型说明某条是误报**
+// —— 硬性"不许结束"会把有意的设计(比如"提交前就该藏着")也判成错。
+export const SELF_CHECK_WRITE_TOOLS = new Set([
+  "write_file", "append_css", "apply_wordcloud", "bind_data", "insert_video", "set_video_options",
+  "edit_text", "edit_node", "clear_css", "restore_history",
+  "delete_wordcloud", "delete_databind", "delete_video", "delete_edit", "delete_node_style",
+]);
+export const SELF_CHECK_MAX = 3;
+
+/** 把 check_page 的问题整理成一条给模型的消息。 */
+export function formatSelfCheck(reports) {
+  const blocks = reports.map((r) => `【${r.slug}】\n${r.problems.map((p) => " · " + p).join("\n")}`);
+  return (
+    "你说做完了,但程序替你**实际渲染了页面**并检查过,发现还有问题:\n\n" +
+    blocks.join("\n\n") +
+    "\n\n浏览器控制台一条都不会报这些 —— 你看不到页面,所以只能靠这一步。请逐条处理,处理完我会再检查一次。\n" +
+    "如果某一条是**有意为之**(比如面板本来就要在提交前藏着、过渡慢是设计要的效果),就直接说明理由,不用改。"
+  );
+}
+
 export async function runAgent({ messages, model, tools, onEvent, config, maxTurns }) {
   const history = [{ role: "system", content: SYSTEM_PROMPT }, ...messages];
   let finalText = "";
   // No turn cap by default — the GUI's abort button (config.signal) is the
   // escape hatch. Explicit maxTurns is still honored for tests.
   const limit = maxTurns == null ? Infinity : maxTurns;
+  // 本轮改过哪些页面 —— 自检只查这些,不去渲染没动过的页(每次要起一次浏览器)。
+  const touched = new Set();
+  let selfChecks = 0;
+  const selfCheckOn = config?.selfCheck !== false && typeof tools.handlers?.check_page === "function";
   for (let turn = 0; turn < limit; turn++) {
     onEvent?.({ type: "status", turn });
     let res;
@@ -532,9 +567,46 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
     history.push({ role: "assistant", content: res.content, tool_calls: res.toolCalls.length ? res.toolCalls.map((t) => ({ id: t.id, type: "function", function: { name: t.name, arguments: JSON.stringify(t.arguments ?? {}) } })) : undefined });
 
     if (!res.toolCalls.length) {
+      // 模型认为做完了。如果这一轮真的改过东西,先**替它看一眼页面**。
+      if (selfCheckOn && touched.size && selfChecks < SELF_CHECK_MAX) {
+        selfChecks++;
+        onEvent?.({ type: "self_check", round: selfChecks, slugs: [...touched] });
+        // **先重建再检查**。check_page 渲染的是构建产物,而模型改的是覆盖层 JSON ——
+        // 不重建的话看到的是上一次的页面,"还没生效"会被误判成"没问题"。
+        let buildError = null;
+        if (typeof tools.build === "function") {
+          try {
+            await tools.build();
+          } catch (e) {
+            buildError = e.message;
+          }
+        }
+        const reports = [];
+        if (buildError) {
+          reports.push({ slug: [...touched].join("、"), problems: [`重新生成页面失败: ${buildError}`] });
+        } else {
+          for (const slug of touched) {
+            let r;
+            try {
+              r = await tools.handlers.check_page({ slug });
+            } catch (e) {
+              r = { error: e.message };
+            }
+            // 查不了就说查不了(比如产物还没生成),不要当成"检查通过"
+            if (r?.error) reports.push({ slug, problems: [`检查没能进行: ${r.error}`] });
+            else if (r?.problems?.length) reports.push({ slug, problems: r.problems });
+          }
+        }
+        if (reports.length) {
+          history.push({ role: "user", content: formatSelfCheck(reports) });
+          onEvent?.({ type: "self_check_failed", round: selfChecks, count: reports.reduce((n, r) => n + r.problems.length, 0) });
+          continue; // ← 不许结束,回轮
+        }
+        onEvent?.({ type: "self_check_passed", round: selfChecks });
+      }
       finalText = res.content;
       onEvent?.({ type: "done", text: finalText, turnCount: turn + 1 });
-      return { text: finalText, turnCount: turn + 1 };
+      return { text: finalText, turnCount: turn + 1, selfChecks };
     }
 
     for (const tc of res.toolCalls) {
@@ -555,6 +627,11 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
       }
       const ok = !result?.error;
       onEvent?.({ type: "tool_end", tool: tc.name, ok, summary: summarize(tc.name, result) });
+      // 记下改过哪些页面(自检只查这些)
+      if (ok && SELF_CHECK_WRITE_TOOLS.has(tc.name)) {
+        const slug = result?.slug || tc.arguments?.slug || null;
+        if (slug) touched.add(slug);
+      }
       // 进 history 之前先剪 —— 见 pruneToolResult 的说明。
       // 结果一旦进 history 就永不清理,不剪的话长任务必然撑爆上下文。
       history.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(pruneToolResult(result)) });
@@ -2458,6 +2535,11 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     handlers,
     schemas,
     root,
+    // 自检前必须先重建 —— check_page 渲染的是**构建产物**。
+    // 模型改的是覆盖层(JSON),产物 HTML 要重新生成才会反映出来;
+    // 不重建就自检,看到的是上一次的页面,会把"还没生效"误判成"没问题"。
+    // (GUI 本来就有自动重建,但它在 runAgent 返回之后才跑 —— 对自检来说太晚了。)
+    build: () => buildFn(root),
     // 取走待发图片(取走即清空,避免重复发送同一张图浪费 token)
     takePendingImages() {
       return pendingImages.splice(0, pendingImages.length);
