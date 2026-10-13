@@ -345,17 +345,18 @@ function initOne(root) {
   // 现在 data-db-state="submitted" 由运行时保证设置,与要不要显示提示无关。
   function markSubmitted(instant) {
     root.setAttribute("data-db-state", "submitted");
-    // **同时把 body 直接内联成可见。** 只靠 CSS 类不够:样式里带
-    // transition: opacity .45s ease,而页面上这部分在视口外 —— 过渡启动了却
-    // 跑不完,opacity 停在 0.0003 这种中途值(实测线上就是这个数),
-    // 用户看到的是"刷新后词云不显示,得再点一次 Submit 才出来"。
-    // instant=true(刷新时恢复)连过渡一起关掉;首次提交时不关,保留淡入。
-    // (这个函数的注释里别写反引号 —— 会截断外层模板,模块直接 import 失败。)
+    // **必须用 setProperty(..., "important")。**
+    // 线上实测:AI 给这个词云面板写了"松手后极慢回退"的动画,过渡时长是
+    // **100000s(27 小时)** —— 揭示用的透明度变化要跑 27 小时才能到 1,所以
+    // 刷新后看到的是 opacity 0.0003 这种中途值,点一下 Submit 触发重绘才跳到 1。
+    // 普通内联样式(style.opacity = "1")会被带 !important 的样式表规则压过去,
+    // 只有带 important 的内联声明才能稳赢 —— 这也是排查时最容易漏的一点:
+    // "内联样式优先级最高"只在对方没有 !important 时才成立。
     var b = root.querySelector(".db-body");
     if (b) {
-      if (instant) { b.style.transition = "none"; }
-      b.style.opacity = "1";
-      b.style.transform = "none";
+      b.style.setProperty("opacity", "1", "important");
+      b.style.setProperty("transform", "none", "important");
+      if (instant) { b.style.setProperty("transition", "none", "important"); }
     }
     var host = root.closest(".canvas") || document;
     host.setAttribute("data-db-any-submitted", "1");
