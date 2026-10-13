@@ -59,7 +59,7 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 
 你可以调用工具。规则:
 - 站点输出目录里的文件是唯一可写范围;不要在对话里编造文件名,先 list_pages / read_file / read_page_text 再动手。
-- 放置词云:调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。
+- 放置词云:调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。**直接调用即可,不需要先读 wordclouds.json** —— 覆盖层文件(wordclouds/databinds/videos/edits/nodeStyles/overrides)由这些工具自己读写,第一次添加前它们并不存在,那是正常状态。
 - 需要跨访客持久化的功能一律用 bind_data,不要自己写 <script> 去 fetch 后端:
   · 投票:kind='bar',read.groupBy 填选项字段(如 choice),write.target 指向页面上的按钮节点、write.field 填同一字段;访客点按钮即投票,已经投过的人不会再被要求投。
   · 收集关键词做实时词云:kind='wordcloud',write.input=true(矩形内自动生成输入框+按钮),write.field 用 text。
@@ -522,6 +522,32 @@ function summarize(name, result) {
 // writable.
 const WRITE_DENY = ["manifest.json", "wordclouds.json", "databinds.json", "videos.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"];
 
+// 覆盖层文件的「空」状态。这些文件由 AI 的声明式工具按需创建,**还没有任何一条
+// 记录时它们根本不存在** —— 那是正常的初始状态,不是错误。
+// 但 AI 动手前习惯先 read_file 看一眼现状,拿到 error 就会以为出了问题:
+// 实际事故是加词云时反复收到「read_file 失败: 文件不存在: wordclouds.json」,
+// 然后回头问用户 / 反复重试,词云一直没加上。对这几个已知文件返回空结构 +
+// 一句说明,既保留了"路径写错要报错"的保护(其它路径照旧报错),又不把
+// "还没添加过" 当成故障。
+const OVERLAY_EMPTY = {
+  "wordclouds.json": { version: 1, items: [] },
+  "databinds.json": { version: 1, items: [] },
+  "edits.json": { version: 1, items: [] },
+  "nodeStyles.json": { version: 1, items: [] },
+  "overrides.json": { version: 1, items: [] },
+  "videos.json": { version: 1, items: [] },
+  "file-locks.json": {},
+};
+const OVERLAY_HINT = {
+  "wordclouds.json": "词云用 apply_wordcloud 添加",
+  "databinds.json": "数据绑定用 bind_data 添加",
+  "videos.json": "视频用 insert_video 添加",
+  "edits.json": "文字改动用 edit_text 添加",
+  "nodeStyles.json": "样式改动用 edit_node 添加",
+  "overrides.json": "节点覆盖用 edit_node 添加",
+  "file-locks.json": "改写 *.html / styles.css 时自动记录",
+};
+
 export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   const root = resolve(outDir);
   const assetDir = join(root, "assets");
@@ -814,7 +840,20 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       } catch (e) {
         return { error: e.message };
       }
-      if (!existsSync(p)) return { error: `文件不存在: ${path}` };
+      if (!existsSync(p)) {
+        // 已知的覆盖层文件"还不存在"= 还没有添加过任何一条,是正常初始状态。
+        // 返回空结构而不是 error,避免 AI 把"还没添加过"当成故障去问用户或重试。
+        const rel = norm(path);
+        if (rel in OVERLAY_EMPTY) {
+          return {
+            path: rel,
+            content: `${JSON.stringify(OVERLAY_EMPTY[rel], null, 2)}\n`,
+            missing: true,
+            note: `该文件尚不存在,说明这个目录里还没有任何记录(${OVERLAY_HINT[rel]})。这是正常的初始状态,**不是错误** —— 直接用对应工具添加第一条即可,不需要先创建它。`,
+          };
+        }
+        return { error: `文件不存在: ${path}` };
+      }
       let content = readFileSync(p, "utf8");
       const truncated = content.length > 50000;
       if (truncated) content = content.slice(0, 50000) + "\n…(truncated)";

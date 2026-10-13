@@ -421,6 +421,27 @@ test("read_file can read files inside the dir", async () => {
   assert.ok(r.content.includes("Test"));
 });
 
+test("read_file:还没有词云时读 wordclouds.json 返回空,不是错误", async () => {
+  // 实际事故:加词云时 AI 先 read_file('wordclouds.json') 探现状,拿到的却是
+  // 「文件不存在」,于是以为出了问题、回头问用户或反复重试,词云一直没加上。
+  // 覆盖层文件在"还没添加过"时本来就不存在 —— 这是初始状态,不是故障。
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.read_file({ path: "wordclouds.json" });
+  assert.equal(r.error, undefined, "不该报错");
+  assert.equal(r.missing, true, "要标明文件还不存在");
+  assert.deepEqual(JSON.parse(r.content), { version: 1, items: [] }, "给出空结构");
+  assert.match(r.note, /不是错误/, "要说明这是正常初始状态");
+  assert.match(r.note, /apply_wordcloud/, "要指出该用哪个工具添加");
+});
+
+test("read_file:路径确实写错时仍然报错(保护不能一起丢掉)", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.read_file({ path: "not-a-real-file.json" });
+  assert.match(String(r.error), /文件不存在/);
+});
+
 test("get_standard returns the width-adaptive standard", async () => {
   const dir = fixture();
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
