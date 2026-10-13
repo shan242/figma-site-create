@@ -187,6 +187,15 @@ export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, grou
   if (!baseUrl || !apiKey) throw new Error("请先在发布设置里填写服务器地址与 API Key");
   if (!domain) throw new Error("请填写要发布到的域名");
   const log = onLog || (() => {});
+  // **前置提醒**:页面用了数据后端却没配后端地址。必须在**上传之前**说,
+  // 否则一旦静态上传先失败,这条提示根本跑不到,用户什么也看不到。
+  // 后端对没注册过的站点一律回 SITE_NOT_FOUND("站点未注册,请先在软件中发布一次"),
+  // 而页面上只表现为"投票点了没反应" —— 实测用户就是这么卡住的。
+  if (!dataApi && outDir && Object.keys(collectionsFromDatabinds(outDir)).length) {
+    log("⚠ 这个页面对接了数据后端(bind_data),但发布设置里没填「数据后端地址」——");
+    log("   站点不会注册到后端,投票/词云/留言会全部失败(后端返回 SITE_NOT_FOUND)。");
+    log("   请到「发布设置 → 数据后端」填地址与 Admin Token 后重新发布。");
+  }
   const base = await detectApiBase(baseUrl, apiKey, signal);
   log(`已连接 ${baseUrl}(1Panel API ${base})`);
   const { site, created, root } = await ensureSite(base, apiKey, { domain, alias, groupID }, signal);
@@ -230,6 +239,15 @@ export async function publishSite({ baseUrl, apiKey, outDir, domain, alias, grou
       dataResult = { error: e.message };
       log(`⚠ 数据后端注册失败: ${e.message}(静态站点已发布,可稍后重试)`);
     }
+  } else if (outDir && Object.keys(collectionsFromDatabinds(outDir)).length) {
+    // **页面用了 bind_data,但没配数据后端** —— 这时候必须说话。
+    // 后端对没注册过的站点一律回 SITE_NOT_FOUND("站点未注册,请先在软件中发布一次"),
+    // 而页面上只会看到投票点了没反应。实测用户就是这么卡住的:站点没注册,
+    // 他以为是词云坏了,查了很久才发现要在发布流程里带上后端配置。
+    dataResult = { error: "未配置数据后端" };
+    log("⚠ 这个页面对接了数据后端(bind_data),但发布设置里没填「数据后端地址」——");
+    log("   站点不会注册到后端,页面上的投票/词云/留言会全部失败(后端返回 SITE_NOT_FOUND)。");
+    log("   请在「发布设置 → 数据后端」填写地址与 Admin Token 后重新发布。");
   }
   return { uploaded, root, created, https: httpsResult, data: dataResult };
 }
