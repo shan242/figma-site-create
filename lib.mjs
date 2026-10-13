@@ -301,21 +301,53 @@ export function textRuns(node) {
 // the ancestor chain. A node that has interactions of its own owns its click:
 // even if none navigate, we don't fall through to an ancestor's.
 // parentOf maps childId -> parent node; pathToFile maps live paths to local files.
-export function linkHref(node, pathToFile, parentOf) {
+// 一个节点点击后要做什么。三种,都必须支持 —— 少一种就是"按钮点了没反应":
+//   · INTERNAL_NODE + NAVIGATE + connectionURL  → 跳到站内另一个页面(href)
+//   · INTERNAL_NODE + SCROLL_TO + transitionNodeID → **滚到本页某个节点**
+//   · connectionType "URL"                      → 跳到**外部网址**(href,新标签打开)
+// 实测(care-royal):页头 5 个导航项全是 SCROLL_TO,而旧代码只认 NAVIGATE →
+// 它们全被丢掉、渲染成没有行为的 <div>,用户看到的就是"页头链接失效"。
+// 同一个站点的 "start game" 按钮是 connectionType:"URL" 指向
+// https://game.wherethetidesforget.day/,同样只认 INTERNAL_NODE 就被丢掉了。
+export function linkInfo(node, pathToFile, parentOf) {
   let cur = node;
   while (cur) {
+    let owned = false;
     for (const it of cur.interactions || []) {
       if (it.event?.interactionType !== "ON_CLICK") continue;
       for (const a of it.actions || []) {
-        if (a.connectionType === "INTERNAL_NODE" && a.navigationType === "NAVIGATE" && a.connectionURL) {
-          return pathToFile[a.connectionURL] || null;
+        // 外部网址:URL/mailto/tel 之类,直接用,不查 pathToFile
+        if (a.connectionURL && (a.connectionType === "URL" || /^(https?:|mailto:|tel:)/i.test(String(a.connectionURL)))) {
+          owned = true;
+          return { href: String(a.connectionURL), external: true };
         }
+        if (a.connectionType === "INTERNAL_NODE" && a.connectionURL) {
+          if (a.navigationType === "NAVIGATE") {
+            const local = pathToFile[a.connectionURL];
+            // 站内路径映射不到本地文件时,不要把 "/foo" 原样写进 href ——
+            // 那会让本地产物跳到一个不存在的地址。当作"没链接"更诚实。
+            if (local) { owned = true; return { href: local }; }
+          }
+        }
+        // 滚到本页的某个节点:transitionNodeID 是 {sessionID, localID}
+        const t = a.transitionNodeID;
+        if (a.navigationType === "SCROLL_TO" && t && t.sessionID != null && t.localID != null) {
+          owned = true;
+          return { scrollTo: `${t.sessionID}:${t.localID}` };
+        }
+        // 有自己的点击行为就算"拥有这次点击",不再往上找祖先的链接
+        if (a.navigationType || a.connectionURL) owned = true;
       }
     }
-    if (cur.interactions?.length) break;
+    if (owned) break;
     cur = parentOf ? parentOf.get(cur.id) : null;
   }
   return null;
+}
+
+export function linkHref(node, pathToFile, parentOf) {
+  const info = linkInfo(node, pathToFile, parentOf);
+  return info && info.href ? info.href : null;
 }
 
 // Apply a persisted text edit ({text, fontSize, fontWeight, color}) onto a
@@ -591,7 +623,10 @@ function applyScaleH(node, st, canvas, ctx) {
 //   data-swap-to      : 点了要切到哪个变体(只出现在 SWAP_STATE 箭头上)
 const nodeAttr = (node) => {
   if (!node?.id) return "";
-  let s = ` data-node-id="${node.id}"`;
+  // **同时给一个真正的 id**。锚点跳转(#<nodeId>)用的是 id,不是 data-*;
+  // 页头的 SCROLL_TO 导航就靠它 —— 纯 HTML + 浏览器原生滚动,不需要任何脚本,
+  // 也就不存在"脚本没注入导致点了没反应"。id 里带冒号在 HTML5 是合法的。
+  let s = ` id="${node.id}" data-node-id="${node.id}"`;
   const sw = node.__swap;
   if (sw) {
     s += ` data-swap-group="${sw.group}" data-swap-variant="${sw.variant}"`;
@@ -612,9 +647,14 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // AI node-style overlay (edit_node): raw CSS props merged after the computed
   // style so they override whatever the renderer derived, for any node type.
   const overlay = ctx.nodeStyles?.get(node.id);
-  // Click target for this node: its own NAVIGATE interaction, or the nearest
-  // ancestor GROUP's (buttons are groups whose interaction lives on the group).
-  const href = linkHref(node, pathToFile, ctx.parentOf);
+  // 点击行为:自己的,或最近祖先 GROUP 的(按钮是 group,交互在 group 上)。
+  const link = linkInfo(node, pathToFile, ctx.parentOf);
+  const scrollTo = link && link.scrollTo ? link.scrollTo : null;
+  // 滚到本页节点用 "#id";没有本地页面可跳时不要写死 "/foo"
+  const href = link && link.href ? link.href : scrollTo ? `#${scrollTo}` : null;
+  const linkAttrs = link
+    ? `${link.external ? ' target="_blank" rel="noopener noreferrer"' : ""}${scrollTo ? ` data-scroll-to="${scrollTo}"` : ""}`
+    : "";
   // 跟随画布中心的两种来源:
   //   1. 祖先链里有 CENTER 约束的框 —— 整棵子树随视口中心移动(见 hasCenteredAncestor);
   //   2. SCALE 约束 —— 但它**只有真的处在可缩放上下文里**才走百分比那条路
@@ -662,7 +702,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     }
     applyScaleH(node, st, canvas, ctx);
     const line = `  <div class="line" style="${cssText(st)}"${nodeAttr(node)}></div>`;
-    out.push(href ? `  <a href="${href}"${nodeAttr(node)}>${line}</a>` : line);
+    out.push(href ? `  <a href="${href}"${linkAttrs}${nodeAttr(node)}>${line}</a>` : line);
     return;
   }
 
@@ -758,7 +798,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       delete st["background-image"];
       applyScaleH(node, st, canvas, ctx);
       const img = `<img src="${assetUrl(node.hash)}" alt="" style="${cssText(st)}"${nodeAttr(node)} />`;
-      out.push(href ? `  <a href="${href}"${nodeAttr(node)}>${img}</a>` : img);
+      out.push(href ? `  <a href="${href}"${linkAttrs}${nodeAttr(node)}>${img}</a>` : img);
     }
     return;
   }
@@ -813,7 +853,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     // not from which page we are on.
     const isActive = node.style?.textDecoration === "UNDERLINE";
     const wrapOpen = href
-      ? `  <a href="${href}" class="nav-link" style="${cssText(st)}"${nodeAttr(node)}>`
+      ? `  <a href="${href}"${linkAttrs} class="nav-link" style="${cssText(st)}"${nodeAttr(node)}>`
       : `  <div${isActive ? ' class="nav-active"' : ""} style="${cssText(st)}"${nodeAttr(node)}>`;
     // No leading whitespace on the closing tag: single-line text is emitted
     // directly between open and close, and with white-space:pre-wrap those two
