@@ -52,6 +52,12 @@ const readVideos = (dir) => readItems(join(dir, "videos.json"));
 // after the build regenerates them. file-locks.json is owned by ai.mjs; the
 // build only reads it. Keys are normalized relative paths; anything that would
 // resolve outside the out dir is skipped.
+//
+// **底稿校验**:锁里同时记着"AI 改之前那份生成物"的哈希。重新拉取设计后,
+// 构建产出的新底稿哈希会变 —— 这时**绝不能**拿 AI 的旧副本盖回去,否则
+// 用户在 Figma 里的改动会**静默消失**(旧实现就是这样:无条件覆盖,还打印
+// "✓ re-applied locked file",看起来像成功)。
+// 借鉴 DSH 的 FS_STALE_VERSION:写工具不信任自己上一次的读。
 function applyFileLocks(dir) {
   let locks;
   try {
@@ -62,11 +68,29 @@ function applyFileLocks(dir) {
   const files = locks?.files;
   if (!files || typeof files !== "object") return;
   const dirNorm = dir.endsWith(sep) ? dir : dir + sep;
-  for (const [rel, content] of Object.entries(files)) {
+  const stale = [];
+  for (const [rel, entry] of Object.entries(files)) {
     const dest = resolve(dir, rel);
-    if (!dest.startsWith(dirNorm) || typeof content !== "string") {
+    if (!dest.startsWith(dirNorm)) {
       console.warn(`  ⚠ skipping unsafe locked path: ${rel}`);
       continue;
+    }
+    // version 1 是纯字符串(没有底稿哈希)——老格式仍按原样套回,
+    // 但要提示一次,让用户知道这个文件没受底稿保护。
+    const isOld = typeof entry === "string";
+    const content = isOld ? entry : entry?.content;
+    const baseHash = isOld ? null : entry?.baseHash;
+    if (typeof content !== "string") {
+      console.warn(`  ⚠ skipping locked entry with no content: ${rel}`);
+      continue;
+    }
+    // 底稿校验:只对 .html / styles.css 这种"构建会重新生成"的文件有意义
+    if (!isOld && baseHash && existsSync(dest)) {
+      const nowHash = createHash("sha1").update(readFileSync(dest)).digest("hex").slice(0, 12);
+      if (nowHash !== baseHash) {
+        stale.push(rel);
+        continue; // **不覆盖** —— 保住新设计
+      }
     }
     try {
       writeFileSync(dest, content);
@@ -74,6 +98,15 @@ function applyFileLocks(dir) {
     } catch (e) {
       console.warn(`  ⚠ could not re-apply locked file ${rel}: ${e.message}`);
     }
+  }
+  if (stale.length) {
+    console.warn("");
+    console.warn(`  ⚠ 有 ${stale.length} 个 AI 改动**没有**套回,因为设计已经更新了:`);
+    for (const rel of stale) console.warn(`      · ${rel}`);
+    console.warn("    原因是这些文件基于旧版本(多半是重新拉取过设计)。直接套回会把新设计盖掉,");
+    console.warn("    所以这里保留了新生成的内容。你的改动仍然完整存在 file-locks.json 里;");
+    console.warn("    要保留它,让 AI 用 write_file / append_css 在新版本上重新应用一次即可。");
+    console.warn("");
   }
 }
 

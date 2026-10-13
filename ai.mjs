@@ -1017,7 +1017,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   const saveFileLocks = (files) => {
     snapshot("filelock");
     const file = resolve(root, "file-locks.json");
-    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, files }, null, 2));
+    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 2, files }, null, 2));
     renameSync(`${file}.tmp`, file);
   };
 
@@ -1212,12 +1212,21 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       if (!(await confirm({ kind: "write", payload: { path, content: content.slice(0, 2000), fullLength: content.length } }))) {
         return { error: "用户拒绝了这次修改" };
       }
+      // 记下**改之前**的内容 —— 那是构建生成的底稿。
+      // 存它有什么用:构建时如果发现"现在的底稿"和"当初记的底稿"不一样,
+      // 就说明**设计被重新拉取过**,不能拿 AI 的旧副本盖掉新设计。
+      // 借鉴 DSH 的 FS_STALE_VERSION:写工具不信任自己上一次的读。
+      const baseBefore = existsSync(p) ? readFileSync(p, "utf8") : null;
       writeFileSync(p, content);
       const rel = norm(p.slice(root.length + 1));
       const locked = isGeneratedProduct(rel);
       if (locked) {
         const locks = loadFileLocks();
-        locks[rel] = content;
+        locks[rel] = {
+          content,
+          baseHash: baseBefore == null ? null : createHash("sha1").update(baseBefore).digest("hex").slice(0, 12),
+          at: new Date().toISOString(),
+        };
         saveFileLocks(locks);
       }
       // 写 styles.css 时也体检 —— 这是 AI 手写 CSS 的另一条路径,

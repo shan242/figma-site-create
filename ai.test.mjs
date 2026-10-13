@@ -400,9 +400,41 @@ test("write_file allows generated html / styles.css / data and locks products", 
   const data = await handlers.write_file({ path: "data/index.json", content: JSON.stringify({ hello: 1 }) });
   assert.equal(data.locked, false);
   const locks = JSON.parse(readFileSync(join(dir, "file-locks.json"), "utf8"));
-  assert.equal(locks.files["styles.css"], "body { color: red }");
-  assert.equal(locks.files["index.html"], "<html><body>AI 版</body></html>");
+  // 锁里存的是对象:内容 + **改动前那份生成物的哈希**。
+  // 存哈希是为了重新拉取设计后能发现"底稿变了",不再拿旧副本静默盖掉新设计。
+  assert.equal(locks.files["styles.css"].content, "body { color: red }");
+  assert.equal(locks.files["index.html"].content, "<html><body>AI 版</body></html>");
+  // fixture 里一开始没有 index.html,所以改动前是"不存在"
+  assert.equal(locks.files["index.html"].baseHash, null, "文件原本不存在时没有底稿可对");
   assert.ok(!("data/index.json" in locks.files));
+});
+
+test("锁:设计重新拉取后**不能**用旧副本盖掉新设计(问题 4)", async () => {
+  // 这是用户报的"设计改了拉取后无法更新":旧实现无条件把 AI 的整份文件写回,
+  // 还打印 ✓ re-applied,看起来像成功 —— 新设计**静默消失**。
+  // 真实时序:构建产出底稿 → AI 改它(记下底稿哈希)→ 再构建比对哈希。
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  await buildSite(dir); // 产出底稿 G
+  const G = readFileSync(join(dir, "index.html"), "utf8");
+  await handlers.write_file({ path: "index.html", content: G.replace("hello world", "AI 改过的") + "<!--ai-->" });
+  const locks0 = JSON.parse(readFileSync(join(dir, "file-locks.json"), "utf8"));
+  assert.ok(locks0.files["index.html"].baseHash, "要记下底稿哈希");
+
+  // 设计没变 → 重新构建产出的还是 G → 套回
+  await buildSite(dir);
+  assert.equal(readFileSync(join(dir, "index.html"), "utf8").includes("<!--ai-->"), true, "底稿没变就该套回 AI 的改动");
+
+  // 模拟"重新拉取了设计":底稿变了 → **不能覆盖**
+  const data = JSON.parse(readFileSync(join(dir, "data", "index.json"), "utf8"));
+  data.nodeById["1:2"].characters = "全新拉取的设计文本";
+  writeFileSync(join(dir, "data", "index.json"), JSON.stringify(data));
+  await buildSite(dir);
+  const after = readFileSync(join(dir, "index.html"), "utf8");
+  assert.equal(after.includes("全新拉取的设计文本"), true, `新设计必须保住,实际: ${after.slice(0, 200)}`);
+  // AI 的改动不能丢 —— 还在锁里,等它重新应用
+  const locks1 = JSON.parse(readFileSync(join(dir, "file-locks.json"), "utf8"));
+  assert.equal(locks1.files["index.html"].content.includes("<!--ai-->"), true, "AI 的改动仍完整保留");
 });
 
 test("locked generated files survive a rebuild", async () => {
