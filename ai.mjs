@@ -450,6 +450,70 @@ export function createDeepSeekModel(config) {
 
 // --- Agent loop --------------------------------------------------------------
 
+// --- 工具结果剪枝 --------------------------------------------------------------
+//
+// 为什么需要:工具结果一旦进 history 就**永不清理** —— 单条 `read_page_text`
+// 可以返回 20000 字符,`read_file` 50000,`get_standard` 是整份 template,
+// 而 `view_image` 的 base64 会在本轮后续每一轮里重发。长任务里上下文就是这么炸的
+// (实测:模型跑到一半开始"忘记"前面看过的内容,然后重复做已经做过的事)。
+//
+// 做法借鉴 DSH 的 compaction-tool-result-pruner:纯函数、零模型调用、
+// 保留**头 + 尾**、中段换成显式标记。两个细节照抄:
+//   · 按 **Unicode code point** 切,不劈开代理对(否则 emoji/生僻字会变成乱码);
+//   · 剪完**再验一次确实变小了**,不然宁可不动。
+//
+// 与 DSH 的差别:它剪的是渲染后的整段文本,而我们返回的是 JSON ——
+// 直接砍字符串会得到非法 JSON,模型想按字段读就废了。所以这里**按字段递归剪**:
+// 长字符串各自保留头尾,超长数组保留前若干项,结构始终是合法 JSON。
+export const PRUNE_MARKER = "\n\n[... 中间内容已裁剪 ...]\n\n";
+export const PRUNE_DEFAULTS = Object.freeze({ thresholdChars: 8192, headChars: 4096, tailChars: 1024, maxItems: 80, keepItems: 40, maxDepth: 6 });
+
+/** 按 code point 切,避免劈开代理对。 */
+function slicePoints(s, start, end) {
+  const pts = Array.from(s);
+  return pts.slice(start, end).join("");
+}
+
+/**
+ * 递归剪枝一个工具结果。返回新对象,不修改入参。
+ * 只在确实变短时才替换,否则原样返回(照抄 DSH 的自检)。
+ */
+export function pruneToolResult(result, cfg = {}) {
+  const c = { ...PRUNE_DEFAULTS, ...cfg };
+  const pruneString = (s) => {
+    // 按 code point 数,不是 .length —— 汉字/emoji 的 .length 会偏大
+    const n = Array.from(s).length;
+    if (n <= c.thresholdChars) return s;
+    return slicePoints(s, 0, c.headChars) + PRUNE_MARKER + slicePoints(s, n - c.tailChars, n);
+  };
+  const walk = (v, depth) => {
+    if (typeof v === "string") return pruneString(v);
+    if (depth >= c.maxDepth) return v;
+    if (Array.isArray(v)) {
+      const mapped = v.map((x) => walk(x, depth + 1));
+      if (mapped.length <= c.maxItems) return mapped;
+      return [
+        ...mapped.slice(0, c.keepItems),
+        `[... 省略 ${mapped.length - c.keepItems} 项,共 ${mapped.length} 项。需要更多就缩小范围再查一次 ...]`,
+      ];
+    }
+    if (v && typeof v === "object") {
+      const out = {};
+      for (const [k, val] of Object.entries(v)) out[k] = walk(val, depth + 1);
+      return out;
+    }
+    return v;
+  };
+  const pruned = walk(result, 0);
+  // 自检:没变小就别动(照抄 DSH 的 "must be smaller" 断言思路,只是这里降级为不动)
+  try {
+    if (JSON.stringify(pruned).length >= JSON.stringify(result).length) return result;
+  } catch {
+    return result;
+  }
+  return pruned;
+}
+
 export async function runAgent({ messages, model, tools, onEvent, config, maxTurns }) {
   const history = [{ role: "system", content: SYSTEM_PROMPT }, ...messages];
   let finalText = "";
@@ -491,7 +555,9 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
       }
       const ok = !result?.error;
       onEvent?.({ type: "tool_end", tool: tc.name, ok, summary: summarize(tc.name, result) });
-      history.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result) });
+      // 进 history 之前先剪 —— 见 pruneToolResult 的说明。
+      // 结果一旦进 history 就永不清理,不剪的话长任务必然撑爆上下文。
+      history.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(pruneToolResult(result)) });
     }
 
     // view_image 请求的图片只能以 **user** 消息送达 —— DeepSeek 的图像理解

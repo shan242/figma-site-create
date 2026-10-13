@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -631,6 +631,58 @@ test("list_images:必须把视频也列出来,并带上 nodeId", async () => {
   assert.match(String(r.videoNote || ""), /不要按节点名字猜/, "要明确警告别靠名字猜");
   // 幽灵节点(组件定义区的原件)不该出现
   assert.equal(r.videos.some((v) => v.nodeId === "9:9"), false, "幽灵节点不该被列出");
+});
+
+// --- 工具结果剪枝 --------------------------------------------------------------
+// 工具结果进 history 后永不清理,不剪的话长任务必然撑爆上下文。
+// 借鉴 DSH 的 compaction-tool-result-pruner,但按字段剪 —— 砍断 JSON 字符串
+// 会得到非法 JSON,模型想按字段读就废了。
+
+test("pruneToolResult:短内容原样不动", () => {
+  const r = { id: "a", slug: "index", count: 3 };
+  assert.deepEqual(pruneToolResult(r), r);
+  assert.equal(pruneToolResult("短"), "短");
+});
+
+test("pruneToolResult:长字符串保留头尾,总量显著变小,且仍是合法 JSON", () => {
+  const long = "A".repeat(5000) + "中间会被裁掉" + "B".repeat(5000);
+  const r = pruneToolResult({ text: long, keep: "ok" });
+  assert.ok(r.text.length < long.length, "要变小");
+  assert.match(r.text, /中间内容已裁剪/, "要有显式标记");
+  assert.equal(r.text.startsWith("A".repeat(100)), true, "头部保留");
+  assert.equal(r.text.endsWith("B".repeat(100)), true, "尾部保留");
+  assert.equal(r.keep, "ok", "短字段不许动");
+  // **仍然是合法 JSON** —— 这是与 DSH 做法不同的地方,也是最关键的一条
+  const round = JSON.parse(JSON.stringify(r));
+  assert.equal(typeof round.text, "string");
+});
+
+test("pruneToolResult:按 code point 切,不劈开代理对/不撕裂汉字", () => {
+  // 每个 emoji 是 2 个 UTF-16 code unit,.slice 会把它们劈成乱码。
+  // 4000 个 emoji ≈ 8000 code unit ≈ 4000 code point,要跨过 4096 的头界。
+  const s = "🎓".repeat(3000) + "x" + "🌏".repeat(3000);
+  const r = pruneToolResult({ text: s });
+  // 剪完不该出现替换字符(劈开代理对的典型症状)
+  assert.equal(r.text.includes("\uFFFD"), false, "不能出现乱码");
+  // 头尾都该是完整的 emoji
+  assert.equal(r.text.startsWith("🎓"), true);
+  assert.equal(r.text.endsWith("🌏"), true);
+});
+
+test("pruneToolResult:超长数组保留前若干项并说明省略了多少", () => {
+  const r = pruneToolResult({ all: Array.from({ length: 200 }, (_, i) => ({ id: `${i}`, type: "TEXT" })) });
+  assert.ok(r.all.length < 200, "要变短");
+  assert.equal(r.all.length, 41, "保留 40 项 + 1 条说明");
+  assert.match(String(r.all[40]), /省略 160 项,共 200 项/);
+  assert.equal(r.all[0].id, "0", "顺序不能变");
+});
+
+test("pruneToolResult:剪完没变小就宁可不动", () => {
+  const r = { a: 1, b: "x" };
+  assert.deepEqual(pruneToolResult(r), r);
+  // 恰好卡在阈值上的不剪
+  const exact = "z".repeat(PRUNE_DEFAULTS.thresholdChars);
+  assert.equal(pruneToolResult({ t: exact }).t, exact, "等于阈值不剪");
 });
 
 // --- 覆盖层快照 / 回滚 --------------------------------------------------------
