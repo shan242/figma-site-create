@@ -343,8 +343,20 @@ function initOne(root) {
   // 那个类就不再出现,依赖它的 reveal 规则永远不触发 —— 结果就是
   // "Answer the three questions above…" 提交后也不消失。
   // 现在 data-db-state="submitted" 由运行时保证设置,与要不要显示提示无关。
-  function markSubmitted() {
+  function markSubmitted(instant) {
     root.setAttribute("data-db-state", "submitted");
+    // **同时把 body 直接内联成可见。** 只靠 CSS 类不够:样式里带
+    // transition: opacity .45s ease,而页面上这部分在视口外 —— 过渡启动了却
+    // 跑不完,opacity 停在 0.0003 这种中途值(实测线上就是这个数),
+    // 用户看到的是"刷新后词云不显示,得再点一次 Submit 才出来"。
+    // instant=true(刷新时恢复)连过渡一起关掉;首次提交时不关,保留淡入。
+    // (这个函数的注释里别写反引号 —— 会截断外层模板,模块直接 import 失败。)
+    var b = root.querySelector(".db-body");
+    if (b) {
+      if (instant) { b.style.transition = "none"; }
+      b.style.opacity = "1";
+      b.style.transform = "none";
+    }
     var host = root.closest(".canvas") || document;
     host.setAttribute("data-db-any-submitted", "1");
   }
@@ -400,7 +412,9 @@ function initOne(root) {
         .then(function (d) {
           if (d.items && d.items.length) {
             submitted = true;
-            markSubmitted();
+            // instant=true:这是"刷新后恢复",要立刻可见,不走过渡
+            // (视口外的过渡跑不完,会停在 0.0003 那种中途值)
+            markSubmitted(true);
             var t = doneText(spec);
             if (t !== null) { note(root, t, "db-ok"); }
           }
