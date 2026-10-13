@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder, buildSystemPrompt, PROMPT_SECTIONS } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -474,6 +474,76 @@ test("循环检测:不同参数不算重复", async () => {
     maxTurns: 6,
   });
   assert.equal(events.some((e) => e.type === "repeat_detected"), false, "参数各不相同就不该报循环");
+});
+
+test("buildSystemPrompt:关键规则一条都不能丢", () => {
+  const p = buildSystemPrompt(null);
+  // 每条都是"删掉了会出事故"的规则,列在这里防止重构时无声丢失
+  const must = [
+    "apply_wordcloud", "bind_data", "list_images", "insert_video", "set_video_options",
+    "edit_text", "edit_node", "append_css", "get_standard", "design-report.md", "write_file",
+    "manifest.json", "不要靠节点名字猜", "list_overlays", "list_history", "warnings 或 problems",
+    "6850", "!important", "过渡时长不超过", "pointer-events", "data-*", "run_build", "用中文回答",
+  ];
+  const missing = must.filter((k) => !p.includes(k));
+  assert.deepEqual(missing, [], `这些规则丢了: ${missing.join(", ")}`);
+});
+
+test("buildSystemPrompt:有小标题,模型能按标题跳读", () => {
+  const p = buildSystemPrompt(null);
+  for (const h of ["## 基本规则", "## 词云", "## 数据绑定", "## 看图", "## 插入视频", "## CSS 硬规矩", "## 警告必须处理"]) {
+    assert.equal(p.includes(h), true, `缺小标题: ${h}`);
+  }
+});
+
+test("buildSystemPrompt:工具不存在时它那一节不出现", () => {
+  const few = buildSystemPrompt(new Set(["read_file", "list_pages"]));
+  assert.equal(few.includes("apply_wordcloud"), false, "没有 apply_wordcloud 就不该提它");
+  assert.equal(few.includes("insert_video"), false);
+  assert.equal(few.includes("## 宽度自适应"), false, "get_standard 不在,那节也不该出现");
+  assert.equal(few.includes("## 基本规则"), true, "通用规则仍在");
+  assert.equal(few.includes("用中文回答"), true);
+  assert.ok(few.length < buildSystemPrompt(null).length, "少了工具就该更短");
+});
+
+test("buildSystemPrompt:CSS 规矩那节不许混进 warnings 的文字(曾经粘连过)", () => {
+  // 真实事故:一次编辑把"warnings 必须处理"的续行粘到了 CSS 规矩最后一条后面,
+  // 于是那条规则后半截变成了讲警告的话 —— 模型读到的是残缺规则。
+  const p = buildSystemPrompt(null);
+  const cssStart = p.indexOf("## CSS 硬规矩");
+  const warnStart = p.indexOf("## 警告必须处理");
+  assert.ok(cssStart > 0 && warnStart > 0, "两节都要在");
+  const cssSection = p.slice(cssStart, warnStart > cssStart ? warnStart : undefined);
+  assert.equal(cssSection.includes("程序代替你的眼睛"), false, "CSS 节里不该有 warnings 的说明");
+  assert.match(cssSection, /状态用 data-\* 属性表达[\s\S]*整个状态机就断了/, "data-* 那条要完整");
+});
+
+test("buildSystemPrompt:顺序由 order 决定,id 唯一", () => {
+  const p = buildSystemPrompt(null);
+  const at = (h) => p.indexOf(h);
+  assert.ok(at("## 基本规则") < at("## 词云"), "基本规则在最前");
+  assert.ok(at("## 词云") < at("## 数据绑定"));
+  assert.ok(at("## CSS 硬规矩") < at("## 回复"), "回复永远在最后");
+  const orders = PROMPT_SECTIONS.map((s) => s.order);
+  assert.deepEqual(orders, [...orders].sort((a, b) => a - b), "PROMPT_SECTIONS 必须按 order 声明");
+  const ids = PROMPT_SECTIONS.map((s) => s.id);
+  assert.equal(new Set(ids).size, ids.length, "id 不能重复");
+});
+
+test("runAgent:schema 里没有的工具,提示词里也不提它", async () => {
+  let seen = null;
+  const r = await runAgent({
+    messages: [{ role: "user", content: "hi" }],
+    model: async (history) => {
+      seen = history[0].content;
+      return { content: "好", toolCalls: [] };
+    },
+    tools: { schemas: [{ function: { name: "read_file" } }], handlers: {} },
+    config: {},
+  });
+  assert.equal(r.text, "好");
+  assert.equal(seen.includes("read_file"), true, "存在的工具要提");
+  assert.equal(seen.includes("apply_wordcloud"), false, "不存在的工具不要提");
 });
 
 test("runAgent surfaces a model exception as an error event", async () => {  const events = [];
