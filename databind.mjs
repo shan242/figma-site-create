@@ -459,11 +459,16 @@ function initOne(root) {
   // 选项的"胶囊"是**另一个平级节点**,不是祖先。
   // 实测:这个页面的所有节点都平铺在 .canvas 里,选项文字的 parentElement
   // 直接就是画布 —— 所以"往上找有背景的那层"会命中画布、把整页压暗。
-  // 唯一的正确做法是由数据说明是哪个节点:options.highlight = "<节点 id>"。
+  // 唯一的正确做法是由数据说明:options.highlight = 要变样式的节点 id(或数组),
+  // options.selectedStyle = 选中的那套 CSS(键值都按 CSS 写)。
+  // **不要用 filter 表达"选中"** —— filter 会连文字一起压暗,而按钮要的是
+  // **背景色**变成实心深色(像 Submit 那样)。曾用 brightness 代替,用户看到的
+  // 是"文字变暗了、按钮底色没变",等于没改。
   function markHighlight(spec, target, on) {
     var ids = spec.options && spec.options.highlight;
     if (!ids) return;
     if (typeof ids === "string") ids = [ids];
+    var style = (spec.options && spec.options.selectedStyle) || null;
     var list = [];
     for (var a = 0; a < ids.length; a++) { if (ids[a]) list.push(ids[a]); }
     if (!list.length) return;
@@ -472,7 +477,6 @@ function initOne(root) {
       if (!el) continue;
       var stillOn = false;
       if (!on) {
-        // 取消时:还有别的选项选着同一个胶囊就别恢复
         var sel = (window.__dbSel && window.__dbSel[spec.collection]) || [];
         for (var s = 0; s < sel.length; s++) {
           var oh = sel[s] && sel[s].highlight;
@@ -481,14 +485,22 @@ function initOne(root) {
           for (var q = 0; q < olist.length; q++) { if (olist[q] === list[i]) stillOn = true; }
         }
       }
-      if (on || !stillOn) {
-        if (on) {
-          el.setAttribute("data-db-selected", "1");
-          el.style.setProperty("filter", "brightness(0.45)", "important");
-        } else {
-          el.removeAttribute("data-db-selected");
-          el.style.removeProperty("filter");
-        }
+      if (on) {
+        el.setAttribute("data-db-selected", "1");
+        // **层叠顺序**:胶囊和标签在 .canvas 里是**平级**的,胶囊在 DOM 里靠后,
+        // 所以它一旦变成实心底色,就把**文字整个盖住**(实测:选中后按钮成了一个
+        // 没有字的深色块)。给胶囊低一层、给标签高一层 —— highlight 的顺序就是
+        // "从底到顶",最后一个必须是文字。
+        el.style.setProperty("position", "relative", "important");
+        el.style.setProperty("z-index", String(i === list.length - 1 ? 6 : 5), "important");
+        if (style) { for (var k in style) { if (Object.prototype.hasOwnProperty.call(style, k)) el.style.setProperty(k, style[k], "important"); } }
+        else { el.style.setProperty("filter", "brightness(0.45)", "important"); }
+      } else if (!stillOn) {
+        el.removeAttribute("data-db-selected");
+        el.style.removeProperty("position");
+        el.style.removeProperty("z-index");
+        if (style) { for (var k2 in style) { if (Object.prototype.hasOwnProperty.call(style, k2)) el.style.removeProperty(k2); } }
+        else { el.style.removeProperty("filter"); }
       }
     }
   }
@@ -545,7 +557,9 @@ function initOne(root) {
           if (i >= 0) {
             list.splice(i, 1);
             target.removeAttribute("data-db-selected");
-            target.style.removeProperty("filter");
+            var selfStyle2 = (spec.options && spec.options.selectedStyle) || null;
+            if (selfStyle2) { for (var sk2 in selfStyle2) { if (Object.prototype.hasOwnProperty.call(selfStyle2, sk2)) target.style.removeProperty(sk2); } }
+            else { target.style.removeProperty("filter"); }
             markHighlight(spec, target, false);
           }
           else {
@@ -555,15 +569,19 @@ function initOne(root) {
             // 页面上只显示"没有可提交的选项"。存值就没有这个猜测。
             list.push({ el: target, value: write.value !== undefined && write.value !== null ? write.value : (target.textContent || "").trim(), highlight: (spec.options && spec.options.highlight) || null });
             target.setAttribute("data-db-selected", "1");
-            // **只给这个节点自己加 filter,绝不往上爬。**
+            // **只给这个节点自己加样式,绝不往上爬。**
             // 实测踩坑:这个页面里所有节点都是**平铺在 .canvas 里**的,
             // 选项文字的 parentElement 直接就是 .canvas(1440x5800、带底色)。
             // 早先"顺着祖先找有背景的那层"于是第一层就爬到了画布,
-            // 给 .canvas 加 filter: brightness → **整个页面变暗**。
-            // filter 会作用到整棵子树,所以"往上找一层"在这套平铺结构里永远不安全。
-            // 要变深的**另一个元素**(胶囊)必须由数据指明 —— 那是 options.highlight 的事。
+            // 把整页压暗了。filter 会作用到整棵子树,所以在这套平铺结构里
+            // "往上找一层"永远不安全。要变样式的**另一个元素**(胶囊)由数据指明。
             target.setAttribute("data-db-selected", "1");
-            target.style.setProperty("filter", "brightness(0.45)", "important");
+            var selfStyle = (spec.options && spec.options.selectedStyle) || null;
+            if (selfStyle) {
+              for (var sk in selfStyle) { if (Object.prototype.hasOwnProperty.call(selfStyle, sk)) target.style.setProperty(sk, selfStyle[sk], "important"); }
+            } else {
+              target.style.setProperty("filter", "brightness(0.45)", "important");
+            }
             markHighlight(spec, target, true);
           }
           note(root, "");
