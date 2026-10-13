@@ -385,6 +385,8 @@ body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
 .databind .db-note { font-size: 12px; margin-top: 4px; color: #64748b; }
 .databind .db-note.db-ok { color: #16a34a; }
 .databind .db-note.db-err { color: #b91c1c; }
+.databind .db-note.db-wait { color: #64748b; }
+.databind .db-note.db-ok { color: #16a34a; }
 /* 只写入不渲染(action):容器不该占位,也不该挡到下面的 Figma 元素 */
 .databind[data-spec*='"kind":"action"'] { width: 0 !important; height: 0 !important; overflow: visible; pointer-events: none; }
 .databind .db-form { display: flex; gap: 6px; margin-top: 8px; pointer-events: auto; }

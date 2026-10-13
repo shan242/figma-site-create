@@ -350,7 +350,12 @@ function initOne(root) {
   }
 
   function submit(el, value) {
-    if (busy || submitted) { return; }
+    // **拒绝的时候必须说话**。旧代码是 if (busy || submitted) return; —— 静默的。
+    // 每条绑定只允许投一次,再点就毫无反应,用户看到的是"点了没提交成功"
+    // (实测反馈:"有些提交并没有成功提交")。现在明确说明,并且把"还没发完"
+    // 和"已经投过"分开报 —— 前者是等待,后者是规则。
+    if (busy) { note(root, (spec.options && spec.options.sending) || "发送中…", "db-wait"); return; }
+    if (submitted) { note(root, (spec.options && spec.options.done) !== "" ? ((spec.options && spec.options.already) || "这一项你已经投过了") : "", "db-ok"); return; }
     busy = true;
     var body2 = { data: value !== undefined ? value : payload(el), client: client };
     api(path, { method: "POST", body: body2 })

@@ -81,6 +81,12 @@ test("运行时必须内联 window.renderWordCloud,否则画布永远是空的",
   assert.match(clientRuntime, /window\.renderWordCloud\s*=/, "运行时里必须定义 renderWordCloud");
 });
 
+// 注:clientRuntime 模板里混进反引号会把模板截断,模块直接 import 失败
+// (实测报错是 "SyntaxError: missing ) after argument list",指向模板末尾,
+// 离真正的问题很远)。这种情况**所有测试都会挂**,本身就是最强的守卫 ——
+// 不需要再写一个"数反引号"的测试(尝试过,切片定界符比问题本身还容易出错)。
+// 唯一要记住的:运行时函数的注释里别写反引号,用单引号。
+
 test("同 collection 的多条绑定只发一次请求(否则 25 条打 25 次 /mine)", () => {
   // 实测 kulangsu.site:一个页面 25 条 databind 全绑 voices,每条启动都发一次
   // /mine?client=...,再加上 /stats 轮询 —— 请求刷屏而且可能触发后端限速。
