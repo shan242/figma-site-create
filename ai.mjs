@@ -252,6 +252,13 @@ export const PROMPT_SECTIONS = [
       "- **绝不要靠节点名字猜 id,也不要一个个试。** 名字里有\"视频\"/\"图片\"/\"按钮\"的节点不一定真是那个东西。要拿 nodeId 就用对应的列举工具:图片和**视频**用 list_images(它同时列出设计自带的 VIDEO 填充和 insert_video 插入的),文字的节点清单用 read_page_text,页面上有什么问题用 check_page(check_page 报视频时会带上 nodeId)。实测有一次 AI 因为找不到视频节点,连猜了 20 多个 id 才放弃 —— 那些调用全是白费的。\n" +
       "- **页面节点很多、清单看起来不全时,用 read_page_text 自带的过滤翻页** —— `under`(只看某棵子树)、`type`、`q`(文字包含)、`limit` + `offset`。返回里的 `totalNodes` / `more` 会告诉你总共多少、还有多少。\n" +
       "- **不要拿别的工具当探针。** 实测有一次 AI 找不到节点 id,于是:用 apply_wordcloud 放一个临时词云、指望重叠检查顺带报出坐标,再用 append_css + check_page 探一遍,最后用一个**故意不存在的视频路径**去骗出媒体文件列表 —— 十几轮全是白费的。正确的做法只有一个:用上面那些**列举工具**拿 id。\n" +
+      "- **你说不了\"我这边点不了 / 看不到线上\"** —— 这两件事你都能做:\n" +
+      "  · `check_page({slug, clicks:[\"<nodeId>\", ...]})` **真的会去点**那些节点(按顺序,每步自动等待异步写入)。" +
+      "像\"选两个选项再点 submit,词云到底展不展开\"这种只能靠点一次确认的事,自己验,不要让用户代劳。\n" +
+      "  · `check_page({slug, url:\"https://…\"})` 能**检查任意网址** —— 发布后的页面你自己就能看。\n" +
+      "  · ⚠️ **不要以为 `file://` 打开时\"写不了、所以点了没反应\"** —— 那是错的。本地打开时页面里**有**后端地址," +
+      "写入会落到 localStorage(模拟数据),投票、提交、词云展开**全都能跑通**;发布到域名后同一份产物自动改用真后端。" +
+      "本地看着没反应,那是真 bug,不是环境限制 —— 用 clicks 点一次就知道卡在哪。\n" +
       "- **不要发明工具参数。** read_page_text 只有 slug / under / type / q / limit / offset。参数名不在工具说明里的就是不存在 —— 工具会报错并把合法参数名列给你。\n" +
       "- **改从来不会渲染的节点是白费的。** 发布数据里有一大块组件定义区的原件:在数据里有坐标、看着正常,但页面上永远不出现。工具会拒绝这种 id 并列出一个可用的;遇到就直接改用列出来的那些。",
   },
@@ -2206,20 +2213,57 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
 
     // 把产物页面真的打开看一眼 —— 代替 AI 的眼睛。
     // 这一轮所有"DOM 全对但页面不对"的问题都只能靠它发现。
-    async check_page({ slug, waitMs }) {
+    async check_page({ slug, waitMs, url, clicks }) {
       const page = loadPages().find((p) => p.slug === slug);
       if (!page) return { error: `没有这个页面: ${slug}` };
       const file = resolve(root, page.file);
-      if (!existsSync(file)) return { error: `产物还没生成: ${page.file}。先 regenerate 再检查` };
-      if (waitMs) process.env.REPLICA_PROBE_WAIT = String(Math.max(1000, Math.min(20000, waitMs)));
+      // url 给了就查那个网址(发布后的域名 ✓),否则查本地产物。
+      // 这让 AI 能自己确认"线上到底对不对",而不是只能说"我这边看不到"。
+      let target;
+      if (url) {
+        if (!/^https?:\/\//i.test(String(url))) return { error: "url 需要是 http(s) 开头的完整网址" };
+        target = String(url);
+      } else {
+        if (!existsSync(file)) return { error: `产物还没生成: ${page.file}。先 regenerate 再检查` };
+        target = pathToFileURL(file).href;
+      }
+      const wait = waitMs ? String(Math.max(1000, Math.min(20000, waitMs))) : null;
+      if (wait) process.env.REPLICA_PROBE_WAIT = wait;
+
+      // **模拟点击**。AI 自己点不了页面,而"提交之后词云会不会展开"这种事
+      // 只能真的点一次才知道。clicks 是一串 nodeId(按顺序点),每步之间等一会儿,
+      // 因为写入是异步的(POST 要走一个来回)。
+      const steps = (Array.isArray(clicks) ? clicks : []).filter(Boolean).map(String);
+      const script = steps.length
+        ? `(async function () {
+            var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+            var log = [];
+            var ids = ${JSON.stringify(steps)};
+            for (var i = 0; i < ids.length; i++) {
+              var el = document.querySelector('[data-node-id="' + ids[i] + '"]');
+              if (!el) { log.push(ids[i] + ": 页面上找不到这个节点"); continue; }
+              el.click();
+              log.push(ids[i] + ": 已点击");
+              await sleep(1400);
+            }
+            await sleep(1200);
+            var out = (${PAGE_PROBE});
+            out.clickLog = log;
+            return out;
+          })()`
+        : PAGE_PROBE;
       let r;
       try {
-        r = await pageProbe(pathToFileURL(file).href, PAGE_PROBE);
+        r = await pageProbe(target, script);
       } catch (e) {
         return { error: `打不开页面做检查: ${e.message}` };
       }
       const v = r?.value || {};
       const problems = [];
+      // 点不到节点是最该说的 —— 它意味着 target 填错了,或者那个节点根本不存在
+      for (const line of v.clickLog || []) {
+        if (/找不到/.test(String(line))) problems.push(`模拟点击失败 —— ${line}(write.target 要填**页面上真实存在**的节点 id;用 read_page_text 确认)`);
+      }
       for (const c of v.clouds || []) {
         // 只在**容器可见**时判定"画没画" —— 还没提交时面板本来就 opacity:0 藏着,
         // 那时候 canvas 里是 fallback,报"一个像素没画"是误报,只会让 AI 白忙。
@@ -2258,11 +2302,14 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       }
       return {
         slug,
+        ...(url ? { checkedUrl: String(url) } : {}),
         ok: problems.length === 0,
         databinds: v.databinds,
         states: v.states,
         clouds: (v.clouds || []).length,
         videos: v.blocked || [],
+        // 点了哪些、点到了没有 —— 让 AI 知道"这次检查真的动了手",而不是干看
+        ...(steps.length ? { clicked: v.clickLog || [], submitState: v.states || {} } : {}),
         problems,
         ...(problems.length ? { hint: "这些问题浏览器控制台一条都不会报,只能靠这个检查发现。请逐条处理。" } : {}),
       };
@@ -3059,14 +3106,22 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       function: {
         name: "check_page",
         description:
-          "把生成好的页面真的打开渲染一遍,报告**只有渲染后才发现得了**的问题:词云 canvas 是不是真的画了像素、有内容的容器是不是几乎透明(opacity 接近 0)、过渡时长是否长得离谱、" +
+          "把页面真的打开渲染一遍,报告**只有渲染后才发现得了**的问题:词云 canvas 是不是真的画了像素、有内容的容器是不是几乎透明(opacity 接近 0)、过渡时长是否长得离谱、" +
           "video 是否被 pointer-events 挡住/既静音又没控件、文字是否互相压住、页面有没有抛 JS 异常。" +
-          "这些问题浏览器控制台一条都不会报,而你**看不到页面** —— 改完样式、放完词云、插完视频后都应该调一次。返回 problems 数组时逐条处理。不消耗 API 额度",
+          "这些问题浏览器控制台一条都不会报,而你**看不到页面** —— 改完样式、放完词云、插完视频后都应该调一次。返回 problems 数组时逐条处理。" +
+          "**你不需要说'我这边点不了/看不到'**:①传 clicks 就能**真的模拟点击**(一串 nodeId,按顺序点,每步自动等异步写入完成)—— 像\"选几个选项再点 submit,词云会不会展开\"这种只能靠点一次确认的事,你自己就能验;" +
+          "②传 url 就能**查任意网址**(比如发布后的域名),不必只查本地文件。不消耗 API 额度",
         parameters: {
           type: "object",
           properties: {
-            slug: { type: "string", description: "页面 slug" },
+            slug: { type: "string", description: "页面 slug(用来定位本地产物;传了 url 时只是个名字)" },
             waitMs: { type: "number", description: "可选;等页面渲染多久再检查,默认 6000 毫秒(有轮询/动画时可以调大)" },
+            url: { type: "string", description: "可选;要检查的完整网址(如发布后的 https://example.com/chapter-4.html)。不传就查本地生成的文件" },
+            clicks: {
+              type: "array",
+              items: { type: "string" },
+              description: "可选;要按顺序点击的 nodeId 列表(每步之间会自动等待写入完成)。用来验证\"点了选项/点了 submit 之后到底会发生什么\"",
+            },
           },
           required: ["slug"],
         },
