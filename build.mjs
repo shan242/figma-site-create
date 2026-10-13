@@ -6,6 +6,7 @@
 // <slug>.html + styles.css into the same directory. Rendering rules live in
 // lib.mjs; this file decides fonts + page wiring.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, basename, resolve, sep } from "node:path";
 import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime, videoElement } from "./lib.mjs";
 import { cloudInjection } from "./wordcloud.mjs";
@@ -234,7 +235,7 @@ const fontStack = (family) =>
     ? `'${family}', 'Noto Sans SC', 'Noto Sans JP', system-ui, sans-serif`
     : `'${family}', system-ui, sans-serif`;
 
-function buildPage(page, pathToFile, googleLink, hasCjk) {
+function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
   const d = loadData(page.json);
   // INSTANCE 的子树在发布数据里是复合 id,nodeById 中没有对应项 ——
   // 不展开的话实例内容整块不渲染(画廊轮播只剩卡片底色)。幂等。
@@ -325,7 +326,7 @@ function buildPage(page, pathToFile, googleLink, hasCjk) {
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="${googleLink}" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=${cssVer}" />
   <style>body { background-color: ${bodyBg}; overflow-x: hidden; }</style>
 ${dataHead}
 </head>
@@ -401,9 +402,17 @@ body { background: #fff; font-family: "Inter", system-ui, sans-serif; }
   // AI global CSS (append_css) goes last so its rules take precedence over the
   // shared stylesheet (still below per-element inline styles, by CSS rules).
   const overrideCss = readOverrides(outDir).map((i) => i.css).join("\n");
-  writeFileSync(join(outDir, "styles.css"), `${sharedCss}${extraCss ? `\n${extraCss}\n` : ""}${overrideCss ? `\n${overrideCss}\n` : ""}`);
+  const cssText2 = `${sharedCss}${extraCss ? `\n${extraCss}\n` : ""}${overrideCss ? `\n${overrideCss}\n` : ""}`;
+  writeFileSync(join(outDir, "styles.css"), cssText2);
+  // 给 styles.css 加内容哈希查询串。
+  // 为什么必须:静态托管/CDN 会给 css 一个很长的 max-age(实测 kulangsu.site 上
+  // 是 `Cache-Control: max-age=14400`,还按 `vary: Accept-Encoding` 分压缩副本缓存)。
+  // 于是发布后浏览器仍然拿旧缓存 —— 用户看到的是"文件明明更新了,样式却不生效",
+  // 而且压缩副本和未压缩副本可能一个是新的、一个是旧的,连 curl 都验证不出来。
+  // 内容一变哈希就变 → URL 就变 → 任何缓存自动失效,不需要手动清 CDN。
+  const cssVer = createHash("sha1").update(cssText2).digest("hex").slice(0, 8);
 
-  for (const p of manifest.pages) buildPage(p, pathToFile, googleLink, hasCJK);
+  for (const p of manifest.pages) buildPage(p, pathToFile, googleLink, hasCJK, cssVer);
   applyFileLocks(outDir);
   console.log("✅ Build complete.");
 }
