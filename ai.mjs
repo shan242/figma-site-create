@@ -87,7 +87,12 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 - 需要大改页面结构时,可以用 write_file 改写生成的 *.html(也可以写 data/ 下的页面数据)。改写 *.html 后,系统会在每次重新生成后把你改的内容自动套回去(记录在 file-locks.json),所以是持久的。
 - 注意:对同一个页面,要么用 edit_text / edit_node / apply_wordcloud 这类覆盖层工具改,要么用 write_file 整体改写 HTML,不要混用——整体改写会把该页覆盖层的改动盖掉。append_css 与 write_file 改 styles.css 同理。
 - 不要改写 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json(它们是构建元数据/覆盖层来源/设计报告,直接改会破坏一致性)。
-- **工具的返回值里出现 warnings 字段时,必须处理它,不能忽略。** 你**看不到页面**,而这些警告是程序代替你的眼睛算出来的:
+- **写 CSS 前先看这几条硬规矩**(违反时工具会返回 warnings,必须改掉而不是忽略):
+  · **不要用 `[style*="6850"]` 这种按内联样式字符串匹配的选择器** —— 那等于把坐标写死,元素一挪就全失效,而且没人知道那个数字指哪里。用 `[data-node-id="..."]`(稳定标识)。
+  · **少用 `!important`** —— 数量一多就互相打架,出问题时无法判断哪条生效。要覆盖就提高选择器特异性,而不是无脑加 `!important`。
+  · **过渡时长不超过 5 秒** —— 长过渡会让"状态切换"看起来像"没反应"。曾经有人写了 `transition: 100000s`,结果刷新后词云永远不显示,必须再点一次才出来。
+  · **不要给 `video` 或播放控件加 `pointer-events: none`** —— 控件会显示但点不动。
+  · **状态用 `data-*` 属性表达,不要靠某段提示文字或 `.db-ok` 之类的类名** —— 文案可以被关掉,状态不行(关掉文案时整个状态机就断了)。 你**看不到页面**,而这些警告是程序代替你的眼睛算出来的:
   · 改文字(edit_text)后如果估算会溢出节点框,警告会说明超多少、以及要不要用 edit_node 调大 height —— 节点若是 textAutoResize:"NONE"(固定高度),多出来的文字会**直接盖到相邻内容上**,用户看到的就是"文字叠在一起"。请缩短文字或调大 height,不要放着不管。
   · 放词云 / 数据绑定时如果矩形和已有的覆盖层重叠,警告会列出撞上了谁、重叠多少。**同一个位置再绑一次通常是错的** —— 想改原来的那条就传它的 id 更新,想加新的就换一个没有内容的 rect。
 - 修改类工具成功后,系统会自动重新生成页面,你一般无需调用 run_build;如确需立即重建可调用。
@@ -525,6 +530,71 @@ function summarize(name, result) {
 // writable.
 const WRITE_DENY = ["manifest.json", "wordclouds.json", "databinds.json", "videos.json", "edits.json", "file-locks.json", "nodeStyles.json", "overrides.json", "design-report.md", "design-report.json"];
 
+// --- CSS 体检 -----------------------------------------------------------------
+// 为什么需要:这一整轮排查下来,页面上"样式不生效 / 看不见 / 点不动"的问题**全部**
+// 出在 AI 手写的 CSS 上,而且是它自己看不出来的那种:
+//   · `[style*="6850"]` 按坐标字符串匹配元素 —— 实测 65 处。位置一改全失效,
+//     而且读的人完全不知道 6850 指哪里;
+//   · `!important` 137 个,互相打架 —— 排查揭示失败时就是被更特异的规则盖住;
+//   · `transition: 100000s`(27 小时)—— 揭示动画永远跑不完,刷新后词云不显示,
+//     用户报"得再点一次 Submit 才出来";
+//   · `pointer-events: none` 落在 video 上 —— 控件看得见点不动。
+// 这些都不是语法错误,浏览器不会报任何东西,所以必须由程序指出来。
+const CSS_LIMITS = { important: 25, transitionSec: 5 };
+
+export function auditCss(css) {
+  const out = [];
+  const text = String(css || "");
+  const add = (level, rule, message, sample) => out.push({ level, rule, message, ...(sample ? { sample: String(sample).trim().slice(0, 90) } : {}) });
+
+  // 1) 按坐标/尺寸字符串匹配内联样式
+  const styleAttr = [...text.matchAll(/\[style\*=\s*["'][^"']*["']\s*\]/g)];
+  if (styleAttr.length) {
+    add("warn", "style-attr-match",
+      `用 [style*="..."] 按内联样式字符串匹配元素,共 ${styleAttr.length} 处。这等于把坐标/尺寸写死在选择器里 —— 元素位置一改就全部失效,而且读代码的人不知道那个数字指哪里。**改用 [data-node-id="..."]**(它是稳定标识)。`,
+      styleAttr[0][0]);
+  }
+
+  // 2) !important 数量
+  const bangs = (text.match(/!important/g) || []).length;
+  if (bangs > CSS_LIMITS.important) {
+    add("warn", "important-count",
+      `!important 用了 ${bangs} 个(建议不超过 ${CSS_LIMITS.important})。数量一多就会互相打架,而且排查问题时无法判断是哪条在生效 —— 这一轮就踩过:揭示规则被更特异的 !important 盖住,页面看着"没反应"。优先提高选择器特异性,而不是加 !important。`);
+  }
+
+  // 3) 过渡/动画时长异常
+  // 注意 `\d*\.?\d+` —— 不能写成 `\d+(\.\d+)?`,否则 `.45s` 会被当成 `45s`
+  // (小数点被跳过),正常时长全变成误报。
+  for (const m of text.matchAll(/(?:transition|animation)(?:-duration)?\s*:[^;}]*?(\d*\.?\d+)(ms|s)\b/gi)) {
+    const sec = m[2].toLowerCase() === "ms" ? Number(m[1]) / 1000 : Number(m[1]);
+    if (sec > CSS_LIMITS.transitionSec) {
+      add("error", "transition-too-long",
+        `过渡时长 ${m[1]}${m[2]} 太长(上限建议 ${CSS_LIMITS.transitionSec}s)。长过渡会让"切换状态"看起来像"没反应" —— 实测 100000s 的过渡导致刷新后词云不显示,必须再点一次才出来。`,
+        m[0]);
+      break;
+    }
+  }
+
+  // 4) video / 控件被禁用交互
+  if (/pointer-events\s*:\s*none/i.test(text) && /video|\[controls\]|::-webkit-media-controls/i.test(text)) {
+    add("error", "video-pointer-events",
+      `有 pointer-events: none 落在 video / 播放控件上 —— 控件会显示但点不动。这是"控件没成功"的典型原因。`,
+      (text.match(/[^{}]*video[^{}]*\{[^}]*pointer-events[^}]*\}/i) || [])[0]);
+  }
+
+  // 5) 硬编码坐标定位到具体节点
+  const hardPos = [...text.matchAll(/\[data-node-id=[^\]]+\][^{]*\{[^}]*(?:left|top)\s*:\s*-?\d+(?:\.\d+)?px[^}]*!important/gi)];
+  if (hardPos.length >= 3) {
+    add("warn", "hardcoded-position",
+      `有 ${hardPos.length} 处把 left/top 用固定 px 钉在具体节点上(还带 !important)。这些坐标是设计稿里的绝对值,页面一改版就全错位。要调整位置优先用节点自身的约束/样式,实在需要覆盖时集中写在一处并注明原因。`,
+      hardPos[0][0]);
+  }
+
+  return out;
+}
+
+
+
 // 覆盖层文件的「空」状态。这些文件由 AI 的声明式工具按需创建,**还没有任何一条
 // 记录时它们根本不存在** —— 那是正常的初始状态,不是错误。
 // 但 AI 动手前习惯先 read_file 看一眼现状,拿到 error 就会以为出了问题:
@@ -928,7 +998,13 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         locks[rel] = content;
         saveFileLocks(locks);
       }
-      return { path, bytes: Buffer.byteLength(content), locked };
+      // 写 styles.css 时也体检 —— 这是 AI 手写 CSS 的另一条路径,
+      // append_css 那份是覆盖层,这份是整体替换,两边都得看。
+      let cssWarnings = [];
+      if (rel === "styles.css") {
+        cssWarnings = auditCss(content).map((w) => `[${w.rule}] ${w.message}${w.sample ? `  例: ${w.sample}` : ""}`);
+      }
+      return { path, bytes: Buffer.byteLength(content), locked, ...(cssWarnings.length ? { warnings: cssWarnings } : {}) };
     },
 
     async apply_wordcloud({ id, slug, rect, spec }) {
@@ -1452,7 +1528,11 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       const kept = items.filter((i) => i.id !== newId);
       kept.push({ ...existing, id: newId, css, createdAt: new Date().toISOString() });
       saveOverrides(kept);
-      return { id: newId, chars: css.length };
+      // 体检整份覆盖 CSS(不只是这次新增的):!important 会跨条累积打架,
+      // 只看这一条发现不了。要跟已有的合起来看。
+      const all = kept.map((i) => i.css).join("\n");
+      const warnings = auditCss(all).map((w) => `[${w.rule}] ${w.message}${w.sample ? `  例: ${w.sample}` : ""}`);
+      return { id: newId, chars: css.length, ...(warnings.length ? { warnings } : {}) };
     },
 
     async clear_css({ id }) {

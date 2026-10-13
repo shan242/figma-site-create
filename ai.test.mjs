@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss } from "./ai.mjs";
 import { buildSite } from "./build.mjs";
 
 // --- parseSSE -----------------------------------------------------------------
@@ -417,6 +417,67 @@ test("build re-applies only in-dir locks", async () => {
   await buildSite(dir);
   assert.equal(readFileSync(join(dir, "index.html"), "utf8"), "<html>ok</html>");
   assert.equal(existsSync(join(dir, "..", "evil.txt")), false);
+});
+
+// --- CSS 体检 -----------------------------------------------------------------
+// 这一整轮"样式不生效/看不见/点不动"的问题**全部**出在 AI 手写的 CSS 上,
+// 而且都是浏览器不报错的那些。下面每条都对应一个真实事故。
+
+test("auditCss:坐标字符串匹配要被点名", () => {
+  const r = auditCss('.canvas .databind[style*="6850"] .db-body { opacity: 1; }');
+  assert.equal(r.length, 1);
+  assert.equal(r[0].rule, "style-attr-match");
+  assert.match(r[0].message, /data-node-id/, "要给出替代方案,不能只说不行");
+});
+
+test("auditCss:!important 过量要报警,少量不报", () => {
+  assert.deepEqual(auditCss(".a { color: red !important; }"), [], "一两个是正常的");
+  const many = Array.from({ length: 30 }, (_, i) => `.a${i} { color: red !important; }`).join("\n");
+  const r = auditCss(many);
+  assert.equal(r.length, 1);
+  assert.equal(r[0].rule, "important-count");
+});
+
+test("auditCss:超长 transition 是 error(100000s 那次事故)", () => {
+  // 实测:AI 写了 transition: opacity 100000s —— 27 小时。揭示动画永远跑不完,
+  // 刷新后词云不显示,用户报"得再点一次 Submit 才出来"。
+  const r = auditCss(".db-body { opacity: 0; transition: opacity 100000s ease; }");
+  assert.equal(r.length, 1);
+  assert.equal(r[0].rule, "transition-too-long");
+  assert.equal(r[0].level, "error", "这条会让功能看起来坏掉,必须是 error");
+  assert.deepEqual(auditCss(".x { transition: opacity .45s ease; }"), [], "正常时长不该报");
+});
+
+test("auditCss:video 上的 pointer-events:none 是 error(控件点不动)", () => {
+  const r = auditCss(".replica-video { pointer-events: none; }");
+  assert.equal(r.length, 1);
+  assert.equal(r[0].rule, "video-pointer-events");
+  assert.equal(r[0].level, "error");
+  // 不碰 video 的 pointer-events 是正常的
+  assert.deepEqual(auditCss(".databind { pointer-events: none; }"), []);
+});
+
+test("auditCss:真实那份 AI CSS 的每一类问题都能认出来", () => {
+  const css = [
+    '.canvas [style*="6850"] { opacity: 1 !important; }',
+    ...Array.from({ length: 30 }, (_, i) => `.n${i} { left: 100px !important; }`),
+    ".v { pointer-events: none; }",
+    "@media all { .v { transition: opacity 45s; } }",
+    ".v { } /* video 相关 */",
+  ].join("\n");
+  const rules = auditCss(css).map((w) => w.rule).sort();
+  assert.ok(rules.includes("style-attr-match"));
+  assert.ok(rules.includes("important-count"));
+  assert.ok(rules.includes("transition-too-long"));
+});
+
+test("append_css 会返回体检结果", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.append_css({ css: '.x[style*="6850"] { opacity: 1 !important; }' });
+  assert.ok(!r.error, `不该报错: ${r.error}`);
+  assert.ok(Array.isArray(r.warnings) && r.warnings.length, "要给出 warnings");
+  assert.ok(r.warnings.some((w) => w.includes("style-attr-match")), JSON.stringify(r.warnings));
 });
 
 // --- 重叠 / 溢出的提醒 ------------------------------------------------------
