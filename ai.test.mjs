@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, rename
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss } from "./ai.mjs";
+import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
 // --- parseSSE -----------------------------------------------------------------
@@ -519,6 +520,63 @@ test("bind_data:点击目标指向幽灵节点要拦住", async () => {
   const r = await handlers.bind_data({ slug: "index", rect: { left: 0, top: 0, width: 10, height: 10 }, collection: "v", kind: "action", write: { target: "9:9", field: "text" } });
   assert.ok(r.error, "必须报错");
   assert.match(r.error, /不在页面上/);
+});
+
+// --- check_page ----------------------------------------------------------------
+// 这个工具的价值全在"把渲染结果翻译成问题"这一步。真浏览器由 pageprobe 提供,
+// 测试里换成一个假探针 —— 测的是翻译逻辑,不是浏览器。
+
+test("check_page:把渲染结果里的问题逐条翻译出来", async () => {
+  const dir = fixture();
+  writeFileSync(join(dir, "index.html"), "<html></html>");
+  setPageProbe(async () => ({
+    value: {
+      url: "file:///x",
+      databinds: 25,
+      states: { "(无)": 25 },
+      // 一个像素没画 + 容器可见 → 是问题
+      clouds: [
+        { box: "1180x440", y: 6856, painted: 0, samples: 100, pct: 0, visible: true, opacity: 1 },
+        // 容器不可见 → 这是揭示面板,不是问题(误报防护)
+        { box: "400x200", y: 10, painted: 0, samples: 50, pct: 0, visible: false, opacity: 0 },
+      ],
+      hidden: [{ sel: "db-body", opacity: "0", node: "2157:500" }],
+      slowTransition: [{ sel: "DIV", duration: "100000s" }, { sel: "DIV", duration: "100000s" }],
+      blocked: [
+        { tag: "video", muted: true, controls: false, autoplay: false, src: "a.mp4", pointerEvents: "none" },
+      ],
+      overlaps: [{ a: "1:2 hi", b: "1:3 yo", pct: 100 }],
+    },
+    errors: ["TypeError: x is not a function"],
+  }));
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.check_page({ slug: "index" });
+  assert.equal(r.ok, false);
+  assert.equal(r.databinds, 25);
+  const all = r.problems.join("\n");
+  assert.match(all, /一个像素都没画/, "可见的空 canvas 要报");
+  assert.match(all, /opacity 是 0/, "几乎透明的容器要报");
+  assert.match(all, /100000s/, "超长过渡要报");
+  assert.match(all, /pointer-events: none/, "控件被挡住要报");
+  assert.match(all, /既静音、又没控件、又不自动播放/, "播不了的视频要报");
+  assert.match(all, /文字叠在一起/, "文字重叠要报");
+  assert.match(all, /JS 异常/, "页面抛错要报");
+  // 同一条时长只报一次(几十个元素共用一条规则时,逐条列会把真问题淹掉)
+  assert.equal(r.problems.filter((p) => /100000s/.test(p)).length, 1, "重复时长要去重");
+  // 不可见的 canvas 只给"当前是隐藏的",不能说成"没画像素"
+  assert.equal(r.problems.filter((p) => /400x200/.test(p) && /一个像素都没画/.test(p)).length, 0, "隐藏面板不该误报");
+  setPageProbe(null);
+});
+
+test("check_page:没问题时 ok=true,并且不编造问题", async () => {
+  const dir = fixture();
+  writeFileSync(join(dir, "index.html"), "<html></html>");
+  setPageProbe(async () => ({ value: { url: "file:///x", databinds: 3, states: { submitted: 3 }, clouds: [], hidden: [], slowTransition: [], blocked: [], overlaps: [] }, errors: [] }));
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.check_page({ slug: "index" });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.problems, []);
+  setPageProbe(null);
 });
 
 // --- 覆盖层快照 / 回滚 --------------------------------------------------------

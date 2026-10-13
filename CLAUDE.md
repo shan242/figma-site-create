@@ -477,6 +477,81 @@ AI: bind_data(...)  →  databinds.json  →  build.mjs  →  databind.mjs 注�
 `databind-e2e.mjs` 用 headless Chrome 打真实后端跑通读/写/去重全链路
 (需要 `DA_TOKEN`,依赖外网与本机 Chrome,所以不进 CI)。
 
+## 让 AI 看得见页面(这一整轮的教训)
+
+AI **看不到页面**。这一轮所有"DOM 全对但页面不对"的问题,它一个都发现不了 ——
+词云 canvas 在、尺寸对、一个像素没画;面板带着 `data-db-state="submitted"` 却
+`opacity: 0.0003`;控件在 HTML 里却被 `pointer-events` 挡住。**必须由程序代替它的眼睛。**
+
+- **`check_page(slug)`** —— 真的把产物渲染一遍,报告:canvas 有没有画像素(读像素,
+  不是看 DOM)、有内容的容器是不是几乎透明、过渡时长是否长得离谱、`video` 是否
+  被挡住或既静音又无控件、文字是否互相压住、页面有没有抛异常。
+  实现走 `pageprobe.mjs`,和 `netfetch.mjs` 同样的两层:Electron 注入一个隐藏
+  `offscreen` BrowserWindow(打包后不需要用户装浏览器),CLI 找本机 Chrome/Edge 用 CDP。
+  ⚠️ 判定"canvas 没画"前要看**容器可不可见** —— 揭示面板本来就 `opacity:0` 藏着,那是误报。
+- **`auditCss()`** —— AI 手写的 CSS 是这一轮所有视觉故障的来源,而且浏览器一条都不报:
+  `[style*="6850"]` 按坐标字符串匹配(实测 84 处)、`!important` 137 个互相打架、
+  `transition: 100000s`(27 小时,揭示永远跑不完)、`video` 上的 `pointer-events: none`。
+  接在 `append_css` 和 `write_file(styles.css)` 两条写入路径上;
+  `append_css` 体检的是**合并后的全部覆盖 CSS** —— `!important` 会跨条累积,单看一条永远不超标。
+- **`list_overlays(slug)`** —— AI 加覆盖层前应当先看它。覆盖层是它自己加的、发布数据里
+  没有,只靠记忆就会在同一处叠第二个(实测 25 条绑定,两条矩形完全重叠)。
+- **`requireRenderable(slug, nodeId)`** —— **只查 `nodeById` 不够**。发布数据里有一大块
+  组件定义区的原件:存在、有坐标、**永远不渲染**。只查 `nodeById` 的工具会"成功"返回而
+  页面毫无变化(用户看到的是"AI 说改了但页面没变")。所有收 `nodeId` 的工具都必须走这个。
+- **`estimateTextHeight()`** —— `edit_text` 改长了会溢出,而 `textAutoResize:"NONE"` 是
+  **固定高度**,多出来的文字直接盖到相邻内容上。汉字按 1em、拉丁按 0.5em 估算换行。
+  配套:`edit_node({height})` 接受纯数字(自动补 px),改完还会核对放不放得下。
+- **覆盖层快照** —— 每次 `save*` 前把整套覆盖层拷到 `.history/<时间>-<谁>/`,留最近 40 份;
+  `list_history` / `restore_history` 回滚。**按内容去重,不是按时间**(同一秒内连着改两次
+  是两件事);**空快照要留**(回到"什么都没改"是最常见用途);**回滚本身可逆**。
+  这一轮真的发生过:用脚本按 `}` 切块清 CSS,把紧跟注释后面的按钮样式整块删了,
+  靠 `.bak` 才救回来 —— 那不该靠运气。
+- **失败必须说话**。静默返回 `return` 等于"点了没反应",用户会当成功能坏了:
+  `read_file` 读不存在的覆盖层返回空结构而不是报错;`submit()` 被规则拒绝时说明原因;
+  `apply_wordcloud` 的矩形被夹取时列出改了哪几个字段。
+
+## 发布链路
+
+- **静态资源版本串**:`styles.css?v=<内容哈希>` + `@font-face` 的 `?v=<字体文件哈希>`。
+  `assets/*` **不需要** —— Figma 给的文件名本身就是内容哈希。
+  为什么必须:静态托管给 css 的 `max-age` 很长(实测 4 小时),Cloudflare 还按
+  `vary: Accept-Encoding` **分开缓存压缩与未压缩副本** —— 于是"服务器上是新文件、
+  浏览器拿到的是旧的",连 `curl` 都验证不出来(它拿未压缩那份)。
+- **发布后验证**:传完立刻回读一次,核对版本串、并确认 `styles.css` 取得到。
+  不一致不当失败(缓存会自己过期),但**要说出来** —— 否则唯一症状是"改了没生效"。
+- **数据后端**:`publishSite` 会调 `registerSite` 注册站点(域名白名单 + 集合声明);
+  **没配 `dataApi` 时要在上传之前就提醒** —— 后端对未注册站点一律回 `SITE_NOT_FOUND`,
+  而页面上只表现为"投票点了没反应"。
+
+## 视频
+
+- **`VIDEO` 填充的静音默认值踩过坑**:`spec.muted !== false` 在没传时是 `true`
+  → **默认静音**。实测那个文件有音轨(`["vide","soun"]`,93 秒)却一声不响,而没人要求过。
+  静音必须是**显式选择**:`muted === true`,或者要自动播放(浏览器一律拦截带声音的自动播放)。
+- **自动播放与声音不可兼得**:两者都要的结果是**根本不播**(比静音自动播放更糟)。
+  `videoOptionsFrom` 会摘掉 `autoplay` 并标记 `__autoplayDropped`,不悄悄改。
+- **有声音就必须有控件**(`__controlsForced`),否则访客没法播。
+- **`videoTracks(file)`** 扫 MP4 box 认音轨 —— "有音轨却被静音"是用户只能靠耳朵发现的事,
+  程序应当主动说。
+- **`set_video_options`** 补上 **Figma 给不了的选项**:VIDEO 填充永远 `muted:true` /
+  `showControls:false`,Figma 里**没有开关可改**。`controls:"custom"` 用一个跟设计同色的
+  播放按钮代替浏览器那套亮色 UI(脚本只在有这类视频时才注入)。
+
+## 数据绑定补充
+
+- **`options.perVisitor`**:`once`(默认,每一项一次,拒绝时说明原因)/ `many`(可重复)/
+  `single`(可改主意,后端后写覆盖前写)。注意 `once` 是**每一项一次**,不是总共一票。
+- **请求去重**:同页多条绑定指向同一 collection 时,`/mine` 和 `/stats` 按 URL 共享
+  (并发合并 + 结果 TTL 复用)。实测 25 条绑定会在加载时打 25 个 `/mine` —— 会被限速。
+  **写操作绝不合并**。
+- **`kind: "action"`** —— 只写入、不渲染。缺了它,"点标签投票"只能靠 `kind:wordcloud`
+  + 1×1 矩形硬凑,再写 CSS 把 23 个假词云藏起来(实测 65 处 `[style*=]`、137 个 `!important`)。
+- **本地模拟**:`file://` 下 `api()` 走 `localApi()`,用 localStorage 当后端,
+  读写语义与真后端一致 → **本地能走一遍完整流程**,发布后同一份产物自动切后端。
+  ⚠️ **页面上不要加"本地预览"标记** —— 本地和线上必须长得一样,否则每次预览都在看一个
+  线上不存在的页面。要提示就写控制台。
+
 ## 图片理解(view_image / list_images)
 
 让 AI **看懂**页面里的位图(地图、图表、截图文字),而不只是改它们的 CSS。
