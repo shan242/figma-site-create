@@ -522,6 +522,38 @@ test("会话历史:文件不存在或损坏都返回空,不能让程序起不来
   assert.equal(loadChatHistory(dir).length, 1, "也兼容直接是数组的老形状");
 });
 
+test("读前写校验:新文件不需要先读;读过但文件变了要拦住(FS_STALE_VERSION)", async () => {
+  // 借鉴 DSH 的 fs-observation-policy:写工具**不信任自己上一次的读**。
+  // 多轮编辑里最贵的错误是"基于过期内容整体覆写"。
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  // 新建文件 → 允许(没有"过期内容"可言)
+  const fresh = await handlers.write_file({ path: "notes.txt", content: "第一版" });
+  assert.ok(!fresh.error, `新文件不该被拦: ${fresh.error}`);
+  // 同一轮里连写两次也不用重读(写完就更新了观测记录)
+  const again = await handlers.write_file({ path: "notes.txt", content: "第二版" });
+  assert.ok(!again.error, `刚写过的不该要求重读: ${again.error}`);
+  // 模拟"外部改了它"(重新生成 / 别人动的)
+  writeFileSync(join(dir, "notes.txt"), "被别人改成了第三版");
+  const stale = await handlers.write_file({ path: "notes.txt", content: "拿旧内容覆写" });
+  assert.match(String(stale.error), /已经变了|FS_STALE_VERSION/, `要拦住: ${JSON.stringify(stale)}`);
+  assert.match(String(stale.hint), /重新 read_file/, "要给出唯一正确的下一步");
+  // 重读之后就能写了
+  await handlers.read_file({ path: "notes.txt" });
+  const ok = await handlers.write_file({ path: "notes.txt", content: "基于最新版改的" });
+  assert.ok(!ok.error, `重读之后该能写: ${ok.error}`);
+  assert.equal(readFileSync(join(dir, "notes.txt"), "utf8"), "基于最新版改的");
+});
+
+test("read_file:内容被截断时明确警告不要凭它整体覆写", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  writeFileSync(join(dir, "big.html"), "<p>" + "x".repeat(60000) + "</p>");
+  const r = await handlers.read_file({ path: "big.html" });
+  assert.equal(r.truncated, true);
+  assert.match(String(r.truncatedNote), /不要凭这份内容整体覆写/, "要明确警告,否则模型会把后半页弄丢");
+});
+
 test("buildSystemPrompt:关键规则一条都不能丢", () => {
   const p = buildSystemPrompt(null);
   // 每条都是"删掉了会出事故"的规则,列在这里防止重构时无声丢失
@@ -822,7 +854,12 @@ test("write_file allows generated html / styles.css / data and locks products", 
   const html = await handlers.write_file({ path: "index.html", content: "<html><body>AI 版</body></html>" });
   assert.equal(html.locked, true);
   const data = await handlers.write_file({ path: "data/index.json", content: JSON.stringify({ hello: 1 }) });
-  assert.equal(data.locked, false);
+  // data/index.json 在 fixture 里**已存在** —— 读前写校验会拦下没读过就覆写的调用
+  assert.match(String(data.error), /还没有被读过/, "没读过已存在的文件就该拦下来");
+  assert.ok(data.hint, "要告诉它先读一下");
+  await handlers.read_file({ path: "data/index.json" });
+  const data2 = await handlers.write_file({ path: "data/index.json", content: JSON.stringify({ hello: 1 }) });
+  assert.equal(data2.locked, false, "读过之后就能写了(它不在生成物清单里,所以不锁)");
   const locks = JSON.parse(readFileSync(join(dir, "file-locks.json"), "utf8"));
   // 锁里存的是对象:内容 + **改动前那份生成物的哈希**。
   // 存哈希是为了重新拉取设计后能发现"底稿变了",不再拿旧副本静默盖掉新设计。
@@ -841,6 +878,8 @@ test("锁:设计重新拉取后**不能**用旧副本盖掉新设计(问题 4)",
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
   await buildSite(dir); // 产出底稿 G
   const G = readFileSync(join(dir, "index.html"), "utf8");
+  // 读前写校验:要覆写已存在的生成物,必须先读过它
+  await handlers.read_file({ path: "index.html" });
   await handlers.write_file({ path: "index.html", content: G.replace("hello world", "AI 改过的") + "<!--ai-->" });
   const locks0 = JSON.parse(readFileSync(join(dir, "file-locks.json"), "utf8"));
   assert.ok(locks0.files["index.html"].baseHash, "要记下底稿哈希");

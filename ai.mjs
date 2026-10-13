@@ -219,6 +219,9 @@ export const PROMPT_SECTIONS = [
     text:
       "## 整体改写 HTML\n" +
       "- 需要大改页面结构时,可以用 write_file 改写生成的 *.html(也可以写 data/ 下的页面数据)。改写 *.html 后,系统会在每次重新生成后把你改的内容自动套回去(记录在 file-locks.json),所以是持久的。\n" +
+      "  · **改一个已存在的文件之前必须先 read_file 读它** —— 没读过就整体覆写会被拒绝;读完之后文件又被改过(重新生成过、或设计重新拉取过)同样会被拒绝,并告诉你重新读一遍。这不是刁难:整体覆写一个你没读过的最新版本,等于把它现在的内容全丢掉。\n" +
+      "  · 只想改一处时优先用 edit_text / edit_node / append_css 这类定点工具,不要整份重写。\n" +
+      "  · 如果 read_file 提示内容被截断了,**不要凭那份内容整体覆写回去** —— 后半段会丢。改用定点工具,或者分段处理。\n" +
       "  · **设计重新拉取过之后要注意**:锁里记着改动时的底稿哈希,底稿变了就不会自动套回(否则会把你客户的新设计盖掉),那时系统会明确告诉你哪些文件被跳过了。遇到这种情况要在**新版本**上重新应用一次你的改动。\n" +
       "- 注意:对同一个页面,要么用 edit_text / edit_node / apply_wordcloud 这类覆盖层工具改,要么用 write_file 整体改写 HTML,不要混用——整体改写会把该页覆盖层的改动盖掉。append_css 与 write_file 改 styles.css 同理。",
   },
@@ -1520,6 +1523,29 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     renameSync(`${file}.tmp`, file);
   };
 
+  // --- 读前写校验(观测记录) ----------------------------------------------------
+  //
+  // 借鉴 DSH 的 fs-observation-policy:**写工具不信任自己上一次的读**。
+  // 多轮编辑里最贵的错误是"基于过期内容整体覆写" —— 尤其是 write_file 能整份改写
+  // index.html 的时候:模型凭几轮前看到的内容写回,中间别人(或程序)改过的地方
+  // 就无声消失了。DSH 用两张表解决:没读过(FS_NOT_OBSERVED)、读过但变了
+  // (FS_STALE_VERSION),而且**失败信息直接告诉你下一步**(读一下再试)。
+  //
+  // 只在**文件已存在**时要求先读:新建文件没有"过期内容"可言(DSH 也叫
+  // "confirmed absent"),要求先读纯属添乱。
+  const observed = new Map(); // rel -> 读的时候的内容哈希
+  const hashOf = (p) => {
+    try {
+      return createHash("sha1").update(readFileSync(p)).digest("hex").slice(0, 12);
+    } catch {
+      return null;
+    }
+  };
+  const noteObserved = (rel, p) => {
+    const h = hashOf(p);
+    if (h) observed.set(rel, h);
+  };
+
   const loadFileLocks = () => {
     try {
       const d = JSON.parse(readFileSync(resolve(root, "file-locks.json"), "utf8"));
@@ -1710,9 +1736,11 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         return { error: `文件不存在: ${path}` };
       }
       let content = readFileSync(p, "utf8");
+      // 记下"读过它、内容是这一版" —— write_file 靠它判断能不能安全覆写
+      noteObserved(norm(p.slice(root.length + 1)), p);
       const truncated = content.length > 50000;
       if (truncated) content = content.slice(0, 50000) + "\n…(truncated)";
-      return { path, content, truncated };
+      return { path, content, truncated, ...(truncated ? { truncatedNote: "内容被截断了。**不要凭这份内容整体覆写回去** —— 那会把后半段弄丢;要么用 edit_text / edit_node / append_css 这类定点工具,要么分段处理。" } : {}) };
     },
 
     async write_file({ path, content }) {
@@ -1724,6 +1752,25 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       }
       if (deny(path)) return { error: `不允许改写关键文件: ${path}` };
       if (typeof content !== "string") return { error: "content 必须是字符串" };
+      // **读前写校验**(DSH 的 fs-observation-policy)。只针对**已存在**的文件:
+      // 新建文件没有"过期内容"可言,要求先读纯属添乱。
+      const relBefore = norm(p.slice(root.length + 1));
+      if (existsSync(p)) {
+        const seen = observed.get(relBefore);
+        if (seen === undefined) {
+          return {
+            error: `不能改写 "${relBefore}":这个文件还没有被读过`,
+            hint: `先 read_file("${relBefore}") 看清当前内容再改。**整体覆写一个没读过的文件等于把它现在的内容全丢掉** —— 如果只是想改一处,也可以直接用 edit_text / edit_node / append_css 这类定点工具,不必整份重写。`,
+          };
+        }
+        const nowHash = hashOf(p);
+        if (nowHash && nowHash !== seen) {
+          return {
+            error: `不能改写 "${relBefore}":它在你读过之后已经变了(FS_STALE_VERSION)`,
+            hint: `重新 read_file("${relBefore}") 拿到最新内容,基于它再改。直接用你手上那份旧内容覆写会把中间的改动全部抹掉 —— 多半是重新生成过页面,或者设计被重新拉取过。`,
+          };
+        }
+      }
       if (!(await confirm({ kind: "write", payload: { path, content: content.slice(0, 2000), fullLength: content.length } }))) {
         return { error: "用户拒绝了这次修改" };
       }
@@ -1744,6 +1791,8 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         };
         saveFileLocks(locks);
       }
+      // 写完更新观测记录 —— 这一版现在是"已读过"的,连着改两次不用重新读
+      noteObserved(rel, p);
       // 写 styles.css 时也体检 —— 这是 AI 手写 CSS 的另一条路径,
       // append_css 那份是覆盖层,这份是整体替换,两边都得看。
       let cssWarnings = [];
