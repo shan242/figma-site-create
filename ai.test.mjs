@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -396,6 +396,84 @@ test("图片卸载:runAgent 在发请求前会卸,并报出事件", async () => 
     config: {},
   });
   assert.ok(events.some((e) => e.type === "images_offloaded" && e.count === 2), `应卸载 2 张: ${JSON.stringify(events.filter((e) => e.type === "images_offloaded"))}`);
+});
+
+test("canonicalArgs:键序不同要算同一次调用", () => {
+  // 不按 key 排序的话 {a,b} 和 {b,a} 会被当成两次不同调用,循环就漏检了
+  assert.equal(canonicalArgs({ slug: "index", nodeId: "1:2" }), canonicalArgs({ nodeId: "1:2", slug: "index" }));
+  assert.equal(canonicalArgs({ a: { y: 1, x: 2 } }), canonicalArgs({ a: { x: 2, y: 1 } }), "嵌套也要排序");
+  assert.notEqual(canonicalArgs({ a: 1 }), canonicalArgs({ a: 2 }), "值不同就是不同调用");
+  assert.equal(canonicalArgs(undefined), "{}");
+});
+
+test("repeatReminder:5 次以后要点名工具和参数,并明确说别再发", () => {
+  const gentle = repeatReminder("edit_text", 3, "{}");
+  assert.match(gentle, /3 次/);
+  assert.match(gentle, /不要原样再发一次/);
+  const firm = repeatReminder("edit_text", 5, '{"nodeId":"9:9"}');
+  assert.match(firm, /edit_text/, "要点名工具");
+  assert.match(firm, /9:9/, "要点名参数");
+  assert.match(firm, /不要再用这组参数调用这个工具/);
+  assert.match(firm, /列举工具/, "要给出出路,不能只说别做");
+});
+
+test("循环检测:同一个调用连着 3 次会注入提醒(键序不同也算同一次)", async () => {
+  const events = [];
+  let turn = 0;
+  const model = async () => {
+    turn++;
+    if (turn <= 4) return { content: "", toolCalls: [{ id: `c${turn}`, name: "list_pages", arguments: { a: 1, b: 2 } }] };
+    if (turn === 5) return { content: "", toolCalls: [{ id: "c5", name: "list_pages", arguments: { b: 2, a: 1 } }] };
+    return { content: "停", toolCalls: [] };
+  };
+  await runAgent({
+    messages: [{ role: "user", content: "go" }],
+    model,
+    tools: { schemas: [], handlers: { list_pages: async () => ({ pages: [] }) } },
+    onEvent: (e) => events.push(e),
+    config: {},
+    maxTurns: 8,
+  });
+  const reps = events.filter((e) => e.type === "repeat_detected");
+  assert.deepEqual(reps.map((r) => r.count), [3, 5], `第 3、5 次各提醒一次: ${JSON.stringify(reps)}`);
+});
+
+test("循环检测:失败的调用也计数(对着被拒的调用反复敲最该打断)", async () => {
+  const events = [];
+  let turn = 0;
+  const model = async () => {
+    turn++;
+    if (turn <= 3) return { content: "", toolCalls: [{ id: `c${turn}`, name: "boom", arguments: {} }] };
+    return { content: "停", toolCalls: [] };
+  };
+  await runAgent({
+    messages: [{ role: "user", content: "go" }],
+    model,
+    tools: { schemas: [], handlers: { boom: async () => { throw new Error("永远失败"); } } },
+    onEvent: (e) => events.push(e),
+    config: {},
+    maxTurns: 6,
+  });
+  assert.ok(events.some((e) => e.type === "repeat_detected" && e.count === 3), "失败的调用第 3 次也要提醒");
+});
+
+test("循环检测:不同参数不算重复", async () => {
+  const events = [];
+  let turn = 0;
+  const model = async () => {
+    turn++;
+    if (turn <= 4) return { content: "", toolCalls: [{ id: `c${turn}`, name: "list_pages", arguments: { n: turn } }] };
+    return { content: "停", toolCalls: [] };
+  };
+  await runAgent({
+    messages: [{ role: "user", content: "go" }],
+    model,
+    tools: { schemas: [], handlers: { list_pages: async () => ({ pages: [] }) } },
+    onEvent: (e) => events.push(e),
+    config: {},
+    maxTurns: 6,
+  });
+  assert.equal(events.some((e) => e.type === "repeat_detected"), false, "参数各不相同就不该报循环");
 });
 
 test("runAgent surfaces a model exception as an error event", async () => {  const events = [];

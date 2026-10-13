@@ -597,6 +597,59 @@ export function offloadOldImages(history, budget = {}) {
   return dropped;
 }
 
+// --- 循环检测 ------------------------------------------------------------------
+//
+// 为什么需要:模型会**卡在同一个调用上反复敲** —— 同一个 id、同样的参数、连着好几遍,
+// 每次都拿回同样的失败,而它每次都"再看一次"结果然后原样重发。这在一轮无上限的
+// 循环里能烧掉大量 token 和时间。这一轮真出现过:AI 找不到视频节点,连续试了
+// 20 多个 id(那次参数各不相同,循环检测救不了;但"同一个 id 试三遍"是另一种)。
+//
+// 做法借鉴 DSH 的 repeat-tool-reminder:
+//   · 按 (工具名, **规范化**参数) 连续计数;
+//   · 在 3 / 5 / 8 次时注入提醒,措辞逐级加重,到后面直接点名参数;
+//   · **数的是"尝试",不是"成功"** —— 被拒绝的调用也算;模型对着一个被拒的调用
+//     反复敲,恰恰是最该打断的那种循环;
+//   · 提醒是**建议性**的,不阻断任何合法调用。
+//
+// 规范化的关键:按键排序后再序列化。否则 `{a:1,b:2}` 和 `{b:2,a:1}` 会被当成
+// 两次不同的调用,循环就漏检了。
+export const REPEAT_THRESHOLDS = Object.freeze([3, 5, 8]);
+
+export function canonicalArgs(args) {
+  const walk = (v) => {
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === "object") {
+      const out = {};
+      for (const k of Object.keys(v).sort()) out[k] = walk(v[k]);
+      return out;
+    }
+    return v;
+  };
+  try {
+    return JSON.stringify(walk(args ?? {}));
+  } catch {
+    return String(args);
+  }
+}
+
+export function repeatReminder(tool, count, argsCanonical) {
+  if (count < 5) {
+    return (
+      `你把同一个工具调用连着发了 ${count} 次,参数完全一样。\n` +
+      "先仔细看上一轮的结果再决定下一步:如果任务还没完成,换一个思路或换一组参数,**不要原样再发一次**。"
+    );
+  }
+  return (
+    `检测到重复调用:\n` +
+    `- 工具: ${tool}\n` +
+    `- 连续次数: ${count}\n` +
+    `- 参数: ${String(argsCanonical).slice(0, 300)}\n` +
+    "这些调用没有带来任何进展。**不要再用这组参数调用这个工具。** 看最新的结果,然后换一个动作、\n" +
+    "换一组参数,或者在你已经拿到的证据足够时直接结束任务。\n" +
+    "如果这个调用是因为缺信息而失败的,先想办法拿到那个信息(用对应的列举工具),而不是继续试。"
+  );
+}
+
 export async function runAgent({ messages, model, tools, onEvent, config, maxTurns }) {
   const history = [{ role: "system", content: SYSTEM_PROMPT }, ...messages];
   let finalText = "";
@@ -606,6 +659,9 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
   // 本轮改过哪些页面 —— 自检只查这些,不去渲染没动过的页(每次要起一次浏览器)。
   const touched = new Set();
   let selfChecks = 0;
+  // 循环检测状态:上一次的 (工具,规范化参数) 与连续次数
+  let lastKey = null;
+  let repeatCount = 0;
   const selfCheckOn = config?.selfCheck !== false && typeof tools.handlers?.check_page === "function";
   for (let turn = 0; turn < limit; turn++) {
     onEvent?.({ type: "status", turn });
@@ -667,6 +723,15 @@ export async function runAgent({ messages, model, tools, onEvent, config, maxTur
 
     for (const tc of res.toolCalls) {
       onEvent?.({ type: "tool_start", tool: tc.name, args: tc.arguments });
+      // 循环检测:**执行之前**计数。被拒绝/失败的调用也要算 ——
+      // 模型对着一个失败的调用反复敲,正是最该打断的那种循环(DSH 同理)。
+      const key = `${tc.name}\u0000${canonicalArgs(tc.arguments)}`;
+      if (key === lastKey) repeatCount++;
+      else { lastKey = key; repeatCount = 1; }
+      if (REPEAT_THRESHOLDS.includes(repeatCount)) {
+        history.push({ role: "user", content: repeatReminder(tc.name, repeatCount, canonicalArgs(tc.arguments)) });
+        onEvent?.({ type: "repeat_detected", tool: tc.name, count: repeatCount });
+      }
       let result;
       if (tc.arguments && tc.arguments.__raw) {
         result = { error: `工具参数不是合法 JSON: ${tc.arguments.__raw.slice(0, 160)}` };

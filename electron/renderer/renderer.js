@@ -231,6 +231,20 @@ function handleChatEvent(evt) {
       lastToolEl = null;
       chatEl.scrollTop = chatEl.scrollHeight;
       break;
+    case "repeat_detected": {
+      // 模型卡在同一个调用上反复敲 —— 已提醒它换思路
+      const el = chatBubble("tool");
+      el.textContent = `🔁 ${evt.tool} 连续调用 ${evt.count} 次(参数相同)—— 已提醒 AI 换个做法`;
+      el.classList.add("err");
+      chatEl.scrollTop = chatEl.scrollHeight;
+      break;
+    }
+    case "images_offloaded": {
+      const el = chatBubble("tool");
+      el.textContent = `🗜 已从上下文卸载 ${evt.count} 张旧图片(需要时 AI 可以重新查看)`;
+      chatEl.scrollTop = chatEl.scrollHeight;
+      break;
+    }
     case "self_check": {
       // 模型说做完了,程序正在**实际渲染页面**再检查一遍。
       // 这一步要起浏览器,可能几秒到十几秒 —— 不显示的话界面看起来就是卡住了,
