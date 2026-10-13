@@ -14,10 +14,11 @@
 // generated files; edits are gated behind a human confirmation unless
 // autoApply is on. There is no shell access.
 
-import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync, statSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync, statSync, readdirSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
 import { resolve, dirname, sep, join, basename } from "node:path";
 import { buildSite } from "./build.mjs";
 import { findCanvas, hexToColor, expandInstances, collectAll, videoTracks, videoOptionsFrom } from "./lib.mjs";
+import { createHash } from "node:crypto";
 import { extractKeywordsLocal } from "./wordcloud.mjs";
 import { pageProbe } from "./pageprobe.mjs";
 import { pathToFileURL } from "node:url";
@@ -89,6 +90,7 @@ const SYSTEM_PROMPT = `你是「Figma 站点静态复制工具」的桌面端助
 - 需要大改页面结构时,可以用 write_file 改写生成的 *.html(也可以写 data/ 下的页面数据)。改写 *.html 后,系统会在每次重新生成后把你改的内容自动套回去(记录在 file-locks.json),所以是持久的。
 - 注意:对同一个页面,要么用 edit_text / edit_node / apply_wordcloud 这类覆盖层工具改,要么用 write_file 整体改写 HTML,不要混用——整体改写会把该页覆盖层的改动盖掉。append_css 与 write_file 改 styles.css 同理。
 - 不要改写 manifest.json、wordclouds.json、databinds.json、edits.json、nodeStyles.json、overrides.json、file-locks.json、design-report.md、design-report.json(它们是构建元数据/覆盖层来源/设计报告,直接改会破坏一致性)。
+- **改坏了可以回退**:每次改动覆盖层(文字/样式/词云/绑定/视频)之前程序都会自动存一份快照。如果用户说"还是刚才那样好"、或者你发现把样式改烂了,用 list_history 找到那一步、再 restore_history 回去 —— **不要靠自己凭记忆反着改**,那几乎一定改不回来。回滚本身也是可逆的。
 - **写 CSS 前先看这几条硬规矩**(违反时工具会返回 warnings,必须改掉而不是忽略):
   · **不要用 [style*="6850"] 这种按内联样式字符串匹配的选择器** —— 那等于把坐标写死,元素一挪就全失效,而且没人知道那个数字指哪里。用 [data-node-id="..."] 这种稳定标识。
   · **少用 !important** —— 数量一多就互相打架,出问题时无法判断哪条生效。要覆盖就提高选择器特异性,而不是无脑加 !important。
@@ -798,7 +800,58 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     }
   };
 
+  // --- 覆盖层快照 -------------------------------------------------------------
+  //
+  // 为什么需要:覆盖层文件(AI 的全部改动都落在这些文件里)是**唯一的事实来源**,
+  // 但它们只由 AI 自己的工具写 —— 一次写坏就没有回去的路。
+  // 这一轮真的发生过:我用脚本清理 CSS 时按 `}` 切块删规则,把紧跟在
+  // "关于预览的注释"后面的**按钮样式整块删掉了**,页面上按钮全没样式,
+  // 最后是靠文件旁边的 `.bak` 才救回来。那不该靠运气。
+  //
+  // 做法:每次 save* 之前把当前所有覆盖层文件拷一份到 `.history/<时间>-<谁>/`。
+  // 只留最近 HISTORY_KEEP 份,免得无限增长。恢复就是整目录拷回来。
+  const HISTORY_KEEP = 40;
+  const OVERLAY_FILES = ["edits.json", "nodeStyles.json", "overrides.json", "wordclouds.json", "databinds.json", "videos.json", "databind-locks.json"];
+  const historyDir = resolve(root, ".history");
+  let lastSnapHash = "";
+
+  const snapshot = (label) => {
+    try {
+      // 按**内容**去重,不是按时间:同一秒内连着改两次是两件事,必须各存一份
+      // (否则回滚只能回到更早的状态,"撤掉刚才那一下"就做不到)。
+      // 内容没变才跳过 —— 那种情况再存一份也没有意义。
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
+      let hash = "";
+      for (const f of OVERLAY_FILES) {
+        const src = resolve(root, f);
+        if (existsSync(src)) { try { hash += createHash("sha1").update(readFileSync(src)).digest("hex").slice(0, 8); } catch {} }
+      }
+      if (hash && hash === lastSnapHash) return;
+      lastSnapHash = hash;
+      const dir = join(historyDir, `${stamp}-${label}`);
+      mkdirSync(dir, { recursive: true });
+      let n = 0;
+      for (const f of OVERLAY_FILES) {
+        const src = resolve(root, f);
+        if (existsSync(src)) { copyFileSync(src, join(dir, f)); n++; }
+      }
+      // 一份覆盖层文件都没有也要留档:那是"什么都没改"的初始状态,
+      // 而"回到什么都没改"恰恰是回滚最常见的用途。恢复时对不存在的文件会删掉,
+      // 所以空快照能真正把覆盖层清回初始态。
+      writeFileSync(join(dir, "meta.json"), JSON.stringify({ label, at: new Date().toISOString(), files: n }, null, 2));
+      // 只留最近 N 份
+      const all = readdirSync(historyDir).filter((d) => !d.startsWith(".")).sort();
+      for (const old of all.slice(0, Math.max(0, all.length - HISTORY_KEEP))) {
+        rmSync(join(historyDir, old), { recursive: true, force: true });
+      }
+    } catch (e) {
+      // 快照失败不能挡住真正的写入 —— 但要让人知道
+      console.warn("覆盖层快照失败:", e.message);
+    }
+  };
+
   const saveWordClouds = (items) => {
+    snapshot("wordcloud");
     const file = resolve(root, "wordclouds.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
@@ -814,6 +867,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   };
 
   const saveDatabinds = (items) => {
+    snapshot("databind");
     const file = resolve(root, "databinds.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
@@ -830,6 +884,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   };
 
   const saveVideos = (items) => {
+    snapshot("video");
     const file = resolve(root, "videos.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
@@ -870,6 +925,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   };
 
   const saveEdits = (items) => {
+    snapshot("edit");
     const file = resolve(root, "edits.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
@@ -885,6 +941,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   };
 
   const saveNodeStyles = (items) => {
+    snapshot("nodestyle");
     const file = resolve(root, "nodeStyles.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
@@ -900,6 +957,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   };
 
   const saveOverrides = (items) => {
+    snapshot("css");
     const file = resolve(root, "overrides.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
@@ -915,6 +973,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   };
 
   const saveFileLocks = (files) => {
+    snapshot("filelock");
     const file = resolve(root, "file-locks.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, files }, null, 2));
     renameSync(`${file}.tmp`, file);
@@ -1092,6 +1151,42 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         cssWarnings = auditCss(content).map((w) => `[${w.rule}] ${w.message}${w.sample ? `  例: ${w.sample}` : ""}`);
       }
       return { path, bytes: Buffer.byteLength(content), locked, ...(cssWarnings.length ? { warnings: cssWarnings } : {}) };
+    },
+
+    // 列出覆盖层快照 —— 每次 AI 改动覆盖层之前都会自动存一份。
+    // 用它是为了"改坏了能回去":覆盖层是唯一的事实来源,一次写坏就没有退路。
+    async list_history({ limit }) {
+      if (!existsSync(historyDir)) return { steps: [], note: "还没有任何快照(这是第一次改动前的状态)" };
+      const dirs = readdirSync(historyDir).filter((d) => !d.startsWith(".")).sort().reverse();
+      const steps = [];
+      for (const d of dirs.slice(0, Math.max(1, Math.min(50, limit || 15)))) {
+        let meta = {};
+        try { meta = JSON.parse(readFileSync(join(historyDir, d, "meta.json"), "utf8")); } catch {}
+        let files = [];
+        try { files = readdirSync(join(historyDir, d)).filter((f) => f !== "meta.json"); } catch {}
+        steps.push({ id: d, label: meta.label || "?", at: meta.at || "", files });
+      }
+      return { steps, total: dirs.length, note: "用 restore_history({id}) 回到某一步" };
+    },
+
+    // 把覆盖层整体回滚到某个快照。**只动覆盖层,不动产物 HTML** ——
+    // 产物 regenerate 一次就会按回滚后的覆盖层重建。
+    async restore_history({ id }) {
+      const dir = join(historyDir, String(id || ""));
+      if (!id || !existsSync(dir)) {
+        const r = await this.list_history({});
+        return { error: `没有这个快照: ${id}`, ...(r.steps?.length ? { hint: `可用的: ${r.steps.slice(0, 8).map((s) => s.id).join(", ")}` } : {}) };
+      }
+      // 回滚本身也要可逆:先把"当前状态"存一份
+      snapshot("before-restore");
+      lastSnapHash = "";
+      const restored = [];
+      for (const f of OVERLAY_FILES) {
+        const src = join(dir, f);
+        if (existsSync(src)) { copyFileSync(src, resolve(root, f)); restored.push(f); }
+        else if (existsSync(resolve(root, f))) { rmSync(resolve(root, f), { force: true }); }
+      }
+      return { restoredTo: id, files: restored, note: "覆盖层已回滚;需要 regenerate 一次才能让产物反映出来" };
     },
 
     // 把产物页面真的打开看一眼 —— 代替 AI 的眼睛。
@@ -1801,6 +1896,26 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
           },
           required: ["slug", "rect", "spec"],
         },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_history",
+        description:
+          "列出覆盖层的自动快照(每次你改动 edits/nodeStyles/overrides/wordclouds/databinds/videos 之前都会自动存一份)。" +
+          "改动改坏了、或者用户说刚才那样挺好的时候,用这个找到要回到的那一步,再调 restore_history。不消耗 API 额度",
+        parameters: { type: "object", properties: { limit: { type: "number", description: "最多列几步,默认 15" } } },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "restore_history",
+        description:
+          "把覆盖层整体回滚到某个快照(id 来自 list_history)。只动覆盖层,产物需要 regenerate 一次才会体现。" +
+          "回滚本身也是可逆的(会自动先存一份当前状态)。会请求用户确认",
+        parameters: { type: "object", properties: { id: { type: "string", description: "快照 id" } }, required: ["id"] },
       },
     },
     {

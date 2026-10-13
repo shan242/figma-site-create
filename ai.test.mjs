@@ -419,6 +419,53 @@ test("build re-applies only in-dir locks", async () => {
   assert.equal(existsSync(join(dir, "..", "evil.txt")), false);
 });
 
+// --- 覆盖层快照 / 回滚 --------------------------------------------------------
+// 覆盖层是 AI 改动的唯一事实来源,一次写坏就没有退路。这一轮我用脚本清 CSS 时
+// 按 } 切块删规则,把按钮样式整块删掉了,最后靠文件旁边的 .bak 才救回来 ——
+// 那不该靠运气。
+
+test("每次改覆盖层前都会存一份快照,并且能回滚", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  // 第一次改动 → 存的快照是"什么都没有"的初始状态(那也是有效的回滚目标)
+  await handlers.append_css({ id: "css-1", css: ".a { color: red; }" });
+  assert.ok((await handlers.list_history({})).steps.length >= 1, "改完应该有快照");
+
+  // 第二次改动 → 又存一份,内容是"只有 css-1"的状态
+  await handlers.append_css({ id: "css-2", css: ".b { color: blue; }" });
+  assert.equal(JSON.parse(readFileSync(join(dir, "overrides.json"), "utf8")).items.length, 2, "两条都在");
+  // 最新的那份快照 = 加 css-2 之前的状态
+  const beforeCss2 = (await handlers.list_history({})).steps[0].id;
+
+  // 回到那份 → css-2 应该没了,css-1 还在
+  const r = await handlers.restore_history({ id: beforeCss2 });
+  assert.ok(!r.error, `回滚失败: ${r.error}`);
+  const after = JSON.parse(readFileSync(join(dir, "overrides.json"), "utf8"));
+  assert.equal(after.items.length, 1, "回滚后只剩第一条");
+  assert.equal(after.items[0].id, "css-1");
+});
+
+test("restore_history:回滚本身也可逆(会先存当前状态)", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  await handlers.append_css({ id: "css-1", css: ".a{}" });
+  const s1 = (await handlers.list_history({})).steps[0].id;
+  await handlers.append_css({ id: "css-2", css: ".b{}" });
+  await handlers.restore_history({ id: s1 });
+  // 回滚后 history 里应该多出一份 before-restore
+  const steps = (await handlers.list_history({})).steps;
+  assert.ok(steps.some((s) => s.label === "before-restore"), "回滚前要自动存一份,否则回滚不可逆");
+});
+
+test("restore_history:快照 id 不存在时给出可用的列表", async () => {
+  const dir = fixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  await handlers.append_css({ id: "css-1", css: ".a{}" });
+  const r = await handlers.restore_history({ id: "not-a-real-step" });
+  assert.match(String(r.error), /没有这个快照/);
+  assert.ok(r.hint, "要提示有哪些可用,否则 AI 只能瞎猜");
+});
+
 // --- CSS 体检 -----------------------------------------------------------------
 // 这一整轮"样式不生效/看不见/点不动"的问题**全部**出在 AI 手写的 CSS 上,
 // 而且都是浏览器不报错的那些。下面每条都对应一个真实事故。
