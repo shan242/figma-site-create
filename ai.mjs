@@ -19,7 +19,7 @@ import { resolve, dirname, sep, join, basename } from "node:path";
 import { buildSite } from "./build.mjs";
 import { findCanvas, hexToColor, expandInstances, collectAll, videoTracks, videoOptionsFrom } from "./lib.mjs";
 import { createHash } from "node:crypto";
-import { extractKeywordsLocal } from "./wordcloud.mjs";
+import { extractKeywordsLocal, layoutWordCloud } from "./wordcloud.mjs";
 import { pageProbe } from "./pageprobe.mjs";
 import { pathToFileURL } from "node:url";
 
@@ -118,7 +118,15 @@ export const PROMPT_SECTIONS = [
     when: "apply_wordcloud",
     text:
       "## 词云\n" +
-      "- 放置词云:调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。**直接调用即可,不需要先读 wordclouds.json** —— 覆盖层文件(wordclouds/databinds/videos/edits/nodeStyles/overrides)由这些工具自己读写,第一次添加前它们并不存在,那是正常状态。",
+      "- 放置词云:调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。**直接调用即可,不需要先读 wordclouds.json** —— 覆盖层文件(wordclouds/databinds/videos/edits/nodeStyles/overrides)由这些工具自己读写,第一次添加前它们并不存在,那是正常状态。\n" +
+      "- **要让它看起来像\"云\",关键是字号和词数要匹配矩形的形状。** 词云的词是横向排的,所以:\n" +
+      "  · 一行大约只放得下 `矩形宽 ÷ 最长词宽` 个词。词长(整句 vs 单个单词)决定了能放几个。\n" +
+      "  · 需要的**行数 × 行高**必须明显小于矩形高度,否则只会挤成一条竖排 —— 那不是云。\n" +
+      "  · 经验值:**单个单词**(Landmarks、Food)→ maxFont 40-60,矩形 400px 高就够,可以放 20+ 个;\n" +
+      "    **短语**(Building Ancestral Halls)→ maxFont 24-36,矩形要 500px 以上;\n" +
+      "    **整句**(After viewing this website, which of the following… )→ maxFont 14-22,矩形要 600px 以上,而且只放 6-10 个。\n" +
+      "  · 标签长的时候,**宁可少放几个**(maxWords 6-10)也不要硬塞 —— 塞进去只会互相压住。\n" +
+      "  · 绑定数据后端时(bind_data + kind=wordcloud),**工具的 warnings 会告诉你这个矩形在给定 maxFont 下够不够**;说不够就按它给的调法改,别无视。",
   },
   {
     id: "data",
@@ -937,6 +945,51 @@ export function repeatReminder(tool, count, argsCanonical) {
     "换一组参数,或者在你已经拿到的证据足够时直接结束任务。\n" +
     "如果这个调用是因为缺信息而失败的,先想办法拿到那个信息(用对应的列举工具),而不是继续试。"
   );
+}
+
+/** 词云装不装得下 —— AI 算不出来,而它决定了词云看起来像不像"云"。
+ *  用**真实布局**试算,而不是拍脑袋给公式:直接问 layoutWordCloud "这个字号下放得下几个",
+ *  再往下找一个能全放下的字号。这样给出的建议是**验证过的**,不是估的。 */
+export function wordcloudFitCheck({ labels, rect, maxFont, minFont = 12, maxWords, layout = layoutWordCloud }) {
+  const list = (labels || []).map((s) => String(s || "")).filter((s) => s.trim());
+  if (!list.length || !rect || typeof layout !== "function") return [];
+  const n = Math.min(list.length, Number.isFinite(maxWords) ? maxWords : list.length);
+  const words = list.slice(0, n).map((text, i) => ({ text, weight: n - i }));
+  const run = (font) =>
+    layout(words, {
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      maxFont: font,
+      minFont,
+      maxWords: n,
+    }).items.length;
+  const atMax = run(maxFont);
+  const longest = list.slice(0, n).reduce((a, b) => (a.length >= b.length ? a : b));
+  const out = [];
+  // 布局现在会自动缩小字号直到全部放下,所以"放不下"不再是常态 ——
+  // 真正要判断的是**看起来像不像云**:词铺开的范围占矩形多大。
+  // 全挤在中间一条线上 = 不像云,而 AI 从坐标里看不出这一点。
+  const placed = layout(words, { width: Math.round(rect.width), height: Math.round(rect.height), maxFont, minFont, maxWords: n }).items;
+  if (placed.length) {
+    // 用 **AI 要求的 maxFont** 算,不是布局自动缩小之后的 ——
+    // 布局会一路缩到"全放得下"为止,拿它的结果去判断永远不会触发。
+    // 一行大约只放得下一个词时,需要的行数就是词数:行数 × 行高 > 矩形高度
+    // → 数学上就成不了云,只能挤成一条。
+    const rows = placed.length;
+    const needH = rows * (maxFont + 6);
+    if (needH > rect.height * 1.1) {
+      out.push(
+        `${rows} 个词按你给的 maxFont=${maxFont} 排,一行大约只放得下一个,于是需要约 ${Math.round(needH)}px 高,` +
+          `而矩形只有 ${Math.round(rect.height)}px —— **摆不成云**,页面上会是挤在一起的竖排(布局会自动缩小去迁就,` +
+          `但那样词就很小、也不好看)。调法(任选):**把 maxFont 调小**、**把矩形加高**、或**减少 maxWords**` +
+          `(只放最高频的几个)。标签是整句时尤其明显:长标签要么小字号配高矩形,要么只放少数几个。`,
+      );
+    }
+  }
+  if (atMax < n) {
+    out.push(`按 maxFont=${maxFont} 只排得下 ${atMax}/${n} 个词(布局会自动缩小字号兜底)—— 想让它们显眼就调小 maxFont 或加大矩形。`);
+  }
+  return out;
 }
 
 export async function runAgent({ messages, model, tools, onEvent, config, maxTurns }) {
@@ -2235,6 +2288,19 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       // 和自己以外的所有覆盖层比一遍 —— AI 看不到页面,这是唯一能提醒它"这里已经有东西"的机会
       const existing = [...all.filter((i) => i.id !== newId), ...loadWordClouds(), ...loadVideos()];
       const collisions = overlayCollisions(r, existing);
+      // 词云还要检查"装不装得下":字号/矩形配不好时它只会挤成一条或互相压住,
+      // 看起来完全不像"云"。这件事 AI 自己算不出来 —— 2026101305 就是这么栽的:
+      // 12 个整句标签配 maxFont 50 和 430px 高的矩形,页面上是一根竖排。
+      const fitWarnings =
+        k === "wordcloud"
+          ? wordcloudFitCheck({
+              labels: (fallback?.buckets || []).map((b) => b?.key),
+              rect: r,
+              maxFont: options?.maxFont || 48,
+              minFont: options?.minFont || 12,
+              maxWords: options?.maxWords,
+            })
+          : [];
       const items = all.filter((i) => i.id !== newId);
       items.push(item);
       saveDatabinds(items);
@@ -2244,13 +2310,16 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         collection: item.collection,
         kind: k,
         mode: w ? (w.target ? `点击节点 ${w.target} 提交` : "访客输入后提交") : "只读",
-        ...(collisions.length
+        ...(collisions.length || fitWarnings.length
           ? {
-              warnings: collisions.map(
-                (c) => `矩形和已有的「${c.id}」(${c.kind}, ${c.overlap}% 重叠)压在一起 —— 页面上会看到两段内容叠着。` +
-                  `请确认这是有意的;如果只是想给同一个位置再绑一次,应该用 id 更新原来那条(传 id="${c.id}"),` +
-                  `或者把 rect 挪到没有内容的位置。`,
-              ),
+              warnings: [
+                ...collisions.map(
+                  (c) => `矩形和已有的「${c.id}」(${c.kind}, ${c.overlap}% 重叠)压在一起 —— 页面上会看到两段内容叠着。` +
+                    `请确认这是有意的;如果只是想给同一个位置再绑一次,应该用 id 更新原来那条(传 id="${c.id}"),` +
+                    `或者把 rect 挪到没有内容的位置。`,
+                ),
+                ...fitWarnings,
+              ],
             }
           : {}),
       };

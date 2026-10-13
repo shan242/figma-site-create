@@ -77,46 +77,64 @@ export function layoutWordCloud(words, opts = {}) {
     .slice(0, maxWords);
 
   const maxWeight = ranked.length ? ranked[0].weight : 0;
-  const placed = [];
 
-  const tryPlace = (item, cx, cy) => {
-    const x = cx - item.w / 2;
-    const y = cy - item.h / 2;
-    if (x < 0 || y < 0 || x + item.w > width || y + item.h > height) return null;
-    for (const p of placed) {
-      if (x < p.x + p.w && p.x < x + item.w && y < p.y + p.h && p.y < y + item.h) return null;
-    }
-    return { x: Math.round(x), y: Math.round(y) };
-  };
-
-  const items = [];
-  for (let i = 0; i < ranked.length; i++) {
-    const r = ranked[i];
-    const scaled = maxWeight > 0 ? maxFont * Math.sqrt(r.weight / maxWeight) : minFont;
-    const size = Math.round(clamp(scaled, minFont, maxFont));
-    const w = measureText(r.text, size);
-    const h = size + GAP;
-    const box = { w: w + GAP, h };
-    const color = colors[i % colors.length];
-
+  const run = (capFont) => {
+    const placed = [];
+    const items = [];
     const cx = width / 2;
     const cy = height / 2;
-    let pos = null;
-    if (i === 0) {
-      pos = tryPlace(box, cx, cy);
-    } else {
-      for (let t = 0; t < MAX_TRIES && !pos; t++) {
-        const angle = t * 0.35;
-        const radius = 1.8 * angle;
-        pos = tryPlace(box, cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+    const tryPlace = (item, px, py) => {
+      const x = px - item.w / 2;
+      const y = py - item.h / 2;
+      if (x < 0 || y < 0 || x + item.w > width || y + item.h > height) return null;
+      for (const p of placed) {
+        if (x < p.x + p.w && p.x < x + item.w && y < p.y + p.h && p.y < y + item.h) return null;
       }
+      return { x: Math.round(x), y: Math.round(y) };
+    };
+    for (let i = 0; i < ranked.length; i++) {
+      const r = ranked[i];
+      const scaled = maxWeight > 0 ? capFont * Math.sqrt(r.weight / maxWeight) : minFont;
+      const size = Math.round(clamp(scaled, minFont, capFont));
+      const w = measureText(r.text, size);
+      const h = size + GAP;
+      const box = { w: w + GAP, h };
+      const color = colors[i % colors.length];
+      let pos = null;
+      if (i === 0) {
+        pos = tryPlace(box, cx, cy);
+      } else {
+        const spread = Math.max(width, height) * 0.62;
+        const base = i * 2.399963;
+        const far = Math.max(1, ranked.length - 1);
+        const r0 = spread * Math.min(0.72, (i / far) * 0.72);
+        for (let t = 0; t < MAX_TRIES && !pos; t++) {
+          const angle = base + t * 0.42;
+          const radius = r0 + (t / MAX_TRIES) * (spread - r0);
+          pos = tryPlace(box, cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+        }
+        for (let t = 0; t < MAX_TRIES && !pos; t++) {
+          const angle = base + t * 0.42;
+          const radius = (t / MAX_TRIES) * r0;
+          pos = tryPlace(box, cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+        }
+      }
+      if (!pos) continue;
+      placed.push({ x: pos.x, y: pos.y, w: box.w, h: box.h });
+      items.push({ text: r.text, weight: r.weight, x: pos.x, y: pos.y, size, color, w: Math.round(w) });
     }
-    if (!pos) continue;
-    placed.push({ x: pos.x, y: pos.y, w: box.w, h: box.h });
-    items.push({ text: r.text, weight: r.weight, x: pos.x, y: pos.y, size, color, w: Math.round(w) });
-  }
+    return items;
+  };
 
-  return { items, width, height, fontFamily };
+  let best = run(maxFont);
+  if (ranked.length && best.length < ranked.length) {
+    for (const factor of [0.8, 0.64, 0.5, 0.4, 0.32, 0.25, 0.2]) {
+      const next = run(Math.max(minFont, Math.round(maxFont * factor)));
+      if (next.length > best.length) best = next;
+      if (best.length >= ranked.length) break;
+    }
+  }
+  return { items: best, width, height, fontFamily };
 }
 
 // Local fallback keyword extraction — used when there is no API key or the

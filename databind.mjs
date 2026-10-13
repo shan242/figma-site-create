@@ -234,6 +234,14 @@ function renderList(root, spec, items) {
 
 var CLOUDS = [];
 function renderWordcloud(root, spec, buckets) {
+  // **没有数据时画 fallback,不要画空的。**
+  // 这是"词云不显示"的真正原因:boot 时先按 spec.fallback 画好了(全部选项
+  // 按最小字号铺开,让访客看得到可以点什么),紧接着 refresh() 拿到空数组,
+  // 又把一个**空布局**画上去 —— canvas 被清空,页面上就是一块空白。
+  // 线上同理:还没有人投票时,词云是空的而不是"待投票的选项"。
+  if ((!buckets || !buckets.length) && spec.fallback && spec.fallback.buckets && spec.fallback.buckets.length) {
+    buckets = spec.fallback.buckets;
+  }
   var words = [];
   for (var i = 0; i < buckets.length; i++) { words.push({ text: String(buckets[i].key === null ? "" : buckets[i].key), weight: buckets[i].count }); }
   var holder = body(root);
