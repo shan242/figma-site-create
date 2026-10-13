@@ -261,17 +261,25 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
     nodeStyles: new Map(NODE_STYLES.filter((s) => s.slug === page.slug).map((s) => [s.nodeId, s.style])),
     // insert_video:nodeId -> 视频记录。命中的节点由 videoElement 接管,
     // 不再走普通渲染(否则底色会画在视频后面)。
-    videos: new Map(VIDEOS.filter((v) => v.slug === page.slug).map((v) => [v.nodeId, v])),
+    // kind:"fillOptions" 的是 set_video_options 只改播放选项的记录 —— 它不接管
+    // 节点,只把选项套到设计自带的 VIDEO 填充上,所以不进 videos 这张表。
+    videos: new Map(VIDEOS.filter((v) => v.slug === page.slug && v.kind !== "fillOptions").map((v) => [v.nodeId, v])),
+    videoOpts: new Map(VIDEOS.filter((v) => v.slug === page.slug && v.kind === "fillOptions").map((v) => [v.nodeId, v])),
     // Scroll frames render their subtree themselves; the flat loop must not
     // render those children a second time at canvas level.
     handled: new Set(),
   };
   for (const n of all) {
     if (n === canvas || ctx.handled.has(n.id)) continue;
+    // set_video_options 写的"只改播放选项":套到设计自带的 VIDEO 填充上。
+    // Figma 永远给 muted:true / showControls:false 且**在 Figma 里改不了**,
+    // 所以只能在这里补。先于 renderNode,因为 renderNode 到 VIDEO 填充时
+    // 会立刻读 __videoOptions。
+    const opt = ctx.videoOpts.get(n.id);
+    if (opt) { n.__videoOptions = { muted: opt.muted, controls: opt.controls, autoplay: opt.autoplay, loop: opt.loop }; }
     // 插了视频的节点:交给 videoElement,不再普通渲染。先于 renderNode 判断,
     // 因为 renderNode 会接管 ctx.handled 之外的一切。
-    const vid = ctx.videos.get(n.id);
-    if (vid) {
+    const vid = ctx.videos.get(n.id);    if (vid) {
       out.push(videoElement(n, cb, ctx, vid));
       continue;
     }

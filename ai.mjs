@@ -17,7 +17,7 @@
 import { readFileSync, writeFileSync, renameSync, realpathSync, existsSync, statSync, readdirSync } from "node:fs";
 import { resolve, dirname, sep, join, basename } from "node:path";
 import { buildSite } from "./build.mjs";
-import { findCanvas, hexToColor, expandInstances, collectAll } from "./lib.mjs";
+import { findCanvas, hexToColor, expandInstances, collectAll, videoTracks, videoOptionsFrom } from "./lib.mjs";
 import { extractKeywordsLocal } from "./wordcloud.mjs";
 
 // --- 图片理解 ------------------------------------------------------------------
@@ -1200,6 +1200,11 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       }
 
       const newId = id || `vid-${Date.now().toString(36)}`;
+      // 默认**不静音**。旧写法 `muted !== false` 在没传时是 true —— AI 调用时
+      // 通常不会特意传 muted,于是每个插入的视频都变成哑巴(实测 2026101203:
+      // 那个文件有音轨、93 秒,页面上却一声不响,而没人要求过静音)。
+      // 只有两种情况静音:显式 muted:true,或者要自动播放(浏览器一律拦截带声音的自动播放)。
+      const wantsAutoplay = !!autoplay;
       const spec = {
         id: newId,
         slug,
@@ -1207,11 +1212,14 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         src: useSrc,
         poster: usePoster,
         fit: fit === "contain" || fit === "fill" ? fit : "cover",
+        // 有声音就必须给控件,否则访客既听不到也没法自己播
         controls: controls !== false,
-        autoplay: !!autoplay,
+        autoplay: wantsAutoplay && muted !== false,
         loop: !!loop,
-        muted: muted !== false,
+        muted: muted === true || (wantsAutoplay && muted !== false),
       };
+      // 查一下文件里到底有没有音轨 —— 有声音却被静音,是用户最需要知道的那种
+      const tracks = /^https?:\/\//i.test(useSrc) ? null : videoTracks(resolve(root, useSrc));
       if (!(await confirm({ kind: "video", payload: spec }))) return { error: "用户拒绝了插入视频" };
       const kept = loadVideos().filter((i) => i.id !== newId && i.nodeId !== nodeId);
       kept.push({ ...spec, createdAt: new Date().toISOString() });
@@ -1224,13 +1232,84 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         src: useSrc,
         box: `${Math.round(bb.width ?? 0)}x${Math.round(bb.height ?? 0)}`,
         autoplay: spec.autoplay,
+        muted: spec.muted,
+        controls: spec.controls,
         note: [
           srcSwapped ? `你说的是 ${srcSwapped.from},它不存在;已改用实际存在的 ${srcSwapped.to}(中文文件名被错误编码过就会这样),要换请告诉用户` : null,
-          spec.autoplay && !muted ? "已自动加 muted:浏览器会拦截带声音的自动播放" : null,
+          spec.autoplay && spec.muted ? "已自动加 muted:浏览器会拦截带声音的自动播放" : null,
+          // 有音轨却被静音 —— 这是用户最需要知道的一条,因为他只能靠耳朵发现
+          tracks?.audio && spec.muted ? `这个视频**含音轨**,但当前是静音播放(访客听不到)。要有声音就用 set_video_options({nodeId:"${nodeId}", muted:false, controls:true});注意有声音就不能自动播放。` : null,
+          tracks?.audio && !spec.muted ? "已开启声音(浏览器要求访客先点一下播放)" : null,
+          tracks && !tracks.audio ? "这个文件里没有音轨(纯画面),设 muted 与否都一样" : null,
         ]
           .filter(Boolean)
           .join("；") || undefined,
       };
+    },
+
+    // 改一个**已存在**视频的播放选项 —— 设计自带的 VIDEO 填充也包括在内。
+    // 存在的理由:Figma 的 VIDEO 填充永远带着 muted:true / showControls:false,
+    // 而且**在 Figma 里根本没有开关可以改**(Figma 不处理视频声音)。
+    // 于是文件里明明有音轨、页面上却一声不响,用户只能靠"看页面"发现。
+    // 这个工具让 AI/用户把 Figma 给不了的选项补上。
+    async set_video_options({ slug, nodeId, muted, controls, autoplay, loop, src }) {
+      const page = loadPages().find((p) => p.slug === slug);
+      if (!page) return { error: `没有这个页面: ${slug}` };
+      const { data } = pageTextOf(slug);
+      const node = data.nodeById?.[nodeId];
+      if (!node) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
+
+      const existing = loadVideos().find((i) => i.nodeId === nodeId && i.slug === slug);
+      const fill = (node.fills || []).find((f) => f.type === "VIDEO");
+      if (!existing && !fill) {
+        const vids = loadVideos().filter((i) => i.slug === slug).map((i) => `${i.nodeId}(${i.src.split("/").pop()})`);
+        return {
+          error: `节点 ${nodeId} 上没有视频(既不是设计自带的 VIDEO 填充,也没有 insert_video 记录)`,
+          ...(vids.length ? { hint: `这个页面的视频在: ${vids.join(", ")}` } : {}),
+        };
+      }
+
+      const pick = (v, cur) => (typeof v === "boolean" ? v : cur);
+      let next;
+      if (existing) {
+        next = { ...existing, muted: pick(muted, existing.muted), controls: pick(controls, existing.controls), autoplay: pick(autoplay, existing.autoplay), loop: pick(loop, existing.loop) };
+        if (src) next.src = String(src);
+      } else {
+        // 设计自带的 VIDEO 填充:基底是 Figma 的默认值(永远静音、永远没控件)
+        const base = videoOptionsFrom(fill, {});
+        next = {
+          kind: "fillOptions",
+          id: `vopt-${nodeId}`,
+          slug,
+          nodeId,
+          src: `assets/${fill.videoRef}.mp4`,
+          muted: pick(muted, base.muted),
+          controls: pick(controls, base.controls),
+          autoplay: pick(autoplay, base.autoplay),
+          loop: pick(loop, base.loop),
+        };
+      }
+
+      const notes = [];
+      // 有声音 + 自动播放 = 浏览器直接不播,必须摘掉一个
+      if (next.muted === false && next.autoplay) {
+        next.autoplay = false;
+        notes.push("有声音时不能自动播放(浏览器一律拦截),已把 autoplay 关掉");
+      }
+      if (next.muted === false && next.controls === false) {
+        next.controls = true;
+        notes.push("开了声音但没给控件,已把 controls 打开 —— 否则访客没法自己点播放");
+      }
+      const local = next.src && !/^https?:\/\//i.test(next.src) ? join(root, next.src) : null;
+      const tracks = local ? videoTracks(local) : null;
+      if (tracks?.audio && next.muted) notes.push("这个文件**含音轨**,现在仍是静音;要听得到就 muted:false");
+      if (tracks && !tracks.audio) notes.push("这个文件里没有音轨(纯画面)");
+
+      if (!(await confirm({ kind: "video", payload: next }))) return { error: "用户拒绝了这次修改" };
+      const kept = loadVideos().filter((i) => !(i.nodeId === nodeId && i.slug === slug));
+      kept.push({ ...next, createdAt: new Date().toISOString() });
+      saveVideos(kept);
+      return { slug, nodeId, muted: next.muted, controls: next.controls, autoplay: next.autoplay, loop: next.loop, note: notes.join("；") || undefined };
     },
 
     async delete_video({ id }) {
@@ -1499,6 +1578,31 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
             },
           },
           required: ["slug", "rect", "spec"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "set_video_options",
+        description:
+          "改一个**已存在**视频的播放选项(设计自带的 VIDEO 填充也能改)。" +
+          "存在的理由:Figma 的视频填充永远带着 muted:true / showControls:false,而且 Figma 里**没有开关可以改** —— " +
+          "文件里明明有音轨、页面上却一声不响,用户只能靠看页面发现。这个工具把 Figma 给不了的选项补上。" +
+          "注意:浏览器一律拦截带声音的自动播放,所以 muted:false 与 autoplay:true 不能同时成立(会自动摘掉 autoplay 并说明);" +
+          "开了声音就一定保留控件,否则访客没法自己点播放。会请求用户确认",
+        parameters: {
+          type: "object",
+          properties: {
+            slug: { type: "string", description: "页面 slug" },
+            nodeId: { type: "string", description: "视频所在节点(insert_video 用的那个,或设计里带 VIDEO 填充的节点)" },
+            muted: { type: "boolean", description: "是否静音。想让访客听到声音就传 false" },
+            controls: { type: "boolean", description: "是否显示浏览器播放控件。有声音时强制为 true" },
+            autoplay: { type: "boolean", description: "是否自动播放。有声音时会被关掉(浏览器拦截)" },
+            loop: { type: "boolean", description: "是否循环" },
+            src: { type: "string", description: "可选;顺便换掉视频文件" },
+          },
+          required: ["slug", "nodeId"],
         },
       },
     },

@@ -299,14 +299,19 @@ test("insert_video:正常插入并落盘", async () => {
   assert.equal(saved.items[0].nodeId, "1:3");
   assert.equal(saved.items[0].loop, true);
   assert.equal(saved.items[0].controls, true, "默认显示控件");
-  assert.equal(saved.items[0].muted, true, "默认静音");
+  // 默认**不静音**。旧行为是 `muted !== false` —— 没传就静音,于是每个插入的视频
+  // 都变哑巴,而没人要求过(实测 2026101203:文件有音轨、93 秒,页面上没声音)。
+  assert.equal(saved.items[0].muted, false, "没人要求静音就不该静音");
 });
 
-test("insert_video:autoplay 会提示自动静音;同一节点重复插入只留一条", async () => {
+test("insert_video:要声音与要自动播放不能兼得;同一节点重复插入只留一条", async () => {
   const dir = videoFixture();
   const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  // 同时要 autoplay 和 muted:false —— 浏览器一律拦截带声音的自动播放,
+  // 所以必须摘掉一个;这里摘 autoplay,并且要**说明**,不能悄悄改。
   const a = await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4", autoplay: true, muted: false });
-  assert.match(String(a.note || ""), /muted/, "要告诉用户自动静音了");
+  assert.equal(a.autoplay, false, "有声音时不能自动播放");
+  assert.equal(a.muted, false, "要声音就真的给声音");
   await handlers.insert_video({ slug: "index", nodeId: "1:3", src: "assets/real-clip.mp4" });
   const saved = JSON.parse(readFileSync(join(dir, "videos.json"), "utf8"));
   assert.equal(saved.items.filter((i) => i.nodeId === "1:3").length, 1, "同一节点只能有一条");

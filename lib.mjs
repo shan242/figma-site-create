@@ -972,18 +972,70 @@ export function videoElement(node, canvas, ctx, spec) {
   st["display"] = "block";
 
   const flag = (k) => (spec[k] ? ` ${k}` : "");
-  // autoplay 必须配 muted:浏览器一律拦截带声音的自动播放。
+  // 静音规则(2026101203 的教训):
+  //   旧写法 `spec.muted !== false` —— 没传 muted 时是 undefined,`undefined !== false`
+  //   成立,于是**默认静音**。那个视频文件里明明有音轨(["vide","soun"],93 秒),
+  //   渲染出来却是哑巴,而这个"默认"没有任何人要求过。
+  //   只有两种情况该静音:
+  //     1. 显式要求 muted: true
+  //     2. 要自动播放 —— 浏览器一律拦住带声音的自动播放,不静音等于根本不播
   const autoplay = !!spec.autoplay;
-  const muted = autoplay || spec.muted !== false ? " muted" : "";
+  const muted = spec.muted === true || (autoplay && spec.muted !== false);
   const attrs =
     // controls 默认开:一个没法播放的视频不是好默认值。insert_video 也会显式存这个值。
-    `${spec.controls === false ? "" : " controls"}${autoplay ? " autoplay" : ""}${muted}${flag("loop")} playsinline preload="metadata"` +
+    `${spec.controls === false ? "" : " controls"}${autoplay ? " autoplay" : ""}${muted ? " muted" : ""}${flag("loop")} playsinline preload="metadata"` +
     (spec.poster ? ` poster="${escapeHtml(String(spec.poster))}"` : "");
   return `  <video class="replica-video" src="${escapeHtml(String(spec.src))}"${attrs} style="${cssText(st)}" data-node-id="${node.id}" data-video-id="${escapeHtml(String(spec.id || ""))}"></video>`;
 }
 
 export function escapeHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");}
+
+// 视频文件里有没有音轨 —— 扫 MP4 的 box 找 hdlr 的 handler_type。
+// 为什么需要:**Figma 的 VIDEO 填充没有音频开关**(它永远按静音渲染),
+// 而文件里往往是**有声音的** —— 实测 2026101203 那个 18.57MB 的 mp4 同时有
+// ["vide","soun"] 两条轨、93 秒,页面上却一声不响。
+// 用户是"看了页面才发现没声音",程序本来可以一开始就告诉他。
+// 只认 MP4/MOV 系列(moov/hdlr);webm 等其它容器返回 null = 不知道。
+export function videoTracks(file) {
+  let buf;
+  try { buf = readFileSync(file); } catch { return null; }
+  if (buf.length < 64 || buf.toString("ascii", 4, 8) !== "ftyp") return null;
+  const handlers = new Set();
+  const walk = (start, end, depth) => {
+    if (depth > 6) return;
+    let p = start;
+    while (p + 8 <= end) {
+      const size = buf.readUInt32BE(p);
+      const type = buf.toString("ascii", p + 4, p + 8);
+      if (size < 8 || p + size > end) break;
+      if (type === "moov" || type === "trak" || type === "mdia" || type === "minf" || type === "stbl") {
+        walk(p + 8, p + size, depth + 1);
+      } else if (type === "hdlr" && p + 20 <= end) {
+        handlers.add(buf.toString("ascii", p + 16, p + 20));
+      }
+      p += size;
+    }
+  };
+  walk(0, buf.length, 0);
+  return { video: handlers.has("vide"), audio: handlers.has("soun") };
+}
+
+// 视频选项的最终值:先取 Figma 填充的默认,再套用户的覆盖。
+// Figma 永远给 muted:true / showControls:false 且**无法在 Figma 里改** ——
+// 这正是"Figma 能力所限"的地方,所以覆盖层必须能补上。
+export function videoOptionsFrom(fill, node) {
+  const base = { muted: fill?.muted !== false, controls: fill?.showControls === true, autoplay: fill?.autoplay === true, loop: fill?.mediaLoop === true };
+  const ov = node?.__videoOptions;
+  if (!ov) return base;
+  for (const k of ["muted", "controls", "autoplay", "loop"]) {
+    if (typeof ov[k] === "boolean") base[k] = ov[k];
+  }
+  // 想有声音就不能自动播放 —— 浏览器一律拦住带声音的自动播放,
+  // 硬要两者兼得的结果是**根本不播**(比静音自动播放更糟)。
+  if (base.muted === false && base.autoplay) { base.autoplay = false; base.__autoplayDropped = true; }
+  return base;
+}
 
 // 设计里自带的视频填充(fill.type === "VIDEO")。
 //
@@ -1000,16 +1052,20 @@ export function videoSpecFromFill(node, fill, assetDir) {
   // 落地文件名带扩展名(浏览器按扩展名/内容决定 MIME),这里统一用 .mp4
   const src = `assets/${ref}.mp4`;
   void assetDir;
+  // 播放选项:先取 Figma 的默认,再套 set_video_options 写的覆盖 ——
+  // Figma 永远给 muted:true / showControls:false 且**在 Figma 里改不了**,
+  // 这正是需要覆盖层的原因。
+  const o = videoOptionsFrom(fill, node);
   return {
     id: `fill-${String(ref).slice(0, 12)}`,
     nodeId: node.id,
     src,
     poster: null, // 线上没设 poster(靠 autoplay),封面图另存为普通图片资源即可
     fit: fill.scaleMode === "FIT" ? "contain" : fill.scaleMode === "STRETCH" ? "fill" : "cover",
-    controls: !!fill.showControls,
-    autoplay: !!fill.autoplay,
-    loop: !!fill.mediaLoop,
-    muted: fill.muted !== false,
+    controls: o.controls,
+    autoplay: o.autoplay,
+    loop: o.loop,
+    muted: o.muted,
   };
 }
 

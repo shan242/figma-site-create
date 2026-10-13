@@ -6,7 +6,7 @@
 // 一个子节点都取不到。这里的用例把这个还原逻辑钉死。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement, textRuns, videoSpecFromFill } from "./lib.mjs";
+import { expandInstances, collectAll, renderNode, swapTargetOf, swapRuntime, fillToCss, videoElement, textRuns, videoSpecFromFill, videoTracks, videoOptionsFrom } from "./lib.mjs";
 
 // --- 插入视频(videoElement) --------------------------------------------------
 // 把某个节点整体换成 <video>,位置尺寸沿用该节点。之前工具集里没有「插入媒体」,
@@ -49,13 +49,39 @@ test("videoElement:节点自身的 opacity 仍然保留", () => {
   assert.match(html, /opacity: 0.4/, "节点自己的透明度是设计意图");
 });
 
-test("videoElement:autoplay 必须自动配 muted", () => {
-  const auto = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", autoplay: true, muted: false });
+test("videoElement:没传 muted 时**不**默认静音(2026101203 的教训)", () => {
+  // 旧写法 `spec.muted !== false` 在没传时是 true → 默认静音。2026101203 那个
+  // 视频文件里明明有音轨(["vide","soun"],93 秒),渲染出来却是哑巴,
+  // 而且没有任何人要求过静音 —— 用户是看了页面才发现没声音。
+  const plain = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4" });
+  assert.equal(/ muted/.test(plain), false, "没人要求静音就不该静音");
+  assert.match(plain, / controls/, "默认给控件,否则没法播也没法调音量");
+  // 显式要求静音才静音
+  assert.match(videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", muted: true }), / muted/);
+  // 自动播放必须静音:浏览器一律拦截带声音的自动播放,不静音等于根本不播
+  const auto = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", autoplay: true });
   assert.match(auto, / autoplay/);
-  assert.match(auto, / muted/, "带声音的自动播放会被浏览器拦截");
+  assert.match(auto, / muted/, "自动播放要配 muted");
+  // 明确要声音时 muted 生效(autoplay 由 videoOptionsFrom 摘掉,见那边的测试)
   const manual = videoElement(vnode(), vcanvas, vctx(), { id: "v", src: "a.mp4", autoplay: false, muted: false });
   assert.equal(/ autoplay/.test(manual), false);
-  assert.equal(/ muted/.test(manual), false, "不自动播放时 muted:false 应当尊重");
+  assert.equal(/ muted/.test(manual), false, "muted:false 应当尊重");
+});
+
+test("videoTracks / videoOptionsFrom:认出音轨,且声音与自动播放不可兼得", () => {
+  // 真实的那个文件确实两条轨都有
+  const t = videoTracks("D:/Project/Scope/figma-context-mcp/output/2026101203/assets/30d9d3a016fc1ef8444dbf3bb9c714895e728298.mp4");
+  if (t) { assert.equal(t.video, true); assert.equal(t.audio, true, "这个文件确实有音轨"); }
+  assert.equal(videoTracks("definitely-not-here.mp4"), null, "读不到就返回 null(不知道),不要瞎猜");
+  // Figma 的 VIDEO 填充永远带着 muted:true / showControls:false,且**在 Figma 里改不了**
+  const figma = { muted: true, showControls: false, autoplay: true, mediaLoop: true };
+  assert.deepEqual(videoOptionsFrom(figma, {}), { muted: true, controls: false, autoplay: true, loop: true });
+  // 覆盖层要能补上 Figma 补不了的东西:开声音 + 给控件
+  const want = videoOptionsFrom(figma, { __videoOptions: { muted: false, controls: true } });
+  assert.equal(want.muted, false, "要声音就打开");
+  assert.equal(want.controls, true, "有声音就要有控件,否则用户没法自己播");
+  assert.equal(want.autoplay, false, "有声音就不能自动播放");
+  assert.equal(want.__autoplayDropped, true, "要告诉调用方 autoplay 被摘掉了,不能悄悄改");
 });
 
 test("videoElement:controls / loop / fit / poster", () => {
