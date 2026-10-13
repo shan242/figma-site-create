@@ -288,7 +288,20 @@ function initOne(root) {
   // 用 localStorage 当后端,读写语义完全一样,所以本地能走一遍完整流程
   // (投票 → 词云长大 → 留言),发布后同一份产物自动切到真后端。
   // 只标一个类供样式区分,不再写"本地预览"之类的话 —— 本地和线上应当长得一样。
-  if (LOCAL) { root.classList.add("db-local"); }
+  // 本地(file://)时 ONLINE 是 false,但**不退出** —— api() 会走 localApi(),
+  // 用 localStorage 当后端,读写语义完全一样,所以本地能走一遍完整流程
+  // (投票 → 词云长大 → 留言),发布后同一份产物自动切到真后端。
+  //
+  // ⚠️ **不要在页面上加"本地预览"之类的标记。** 用户明确要求过删掉这类字样:
+  // 本地和线上应当长得一模一样,否则每次预览都在看一个线上不存在的页面。
+  // 需要让人知道"这是模拟数据"时,写到控制台 —— 开发者看得到,访客看不到。
+  if (LOCAL) {
+    root.classList.add("db-local");
+    if (window.console && console.info && !window.__dbLocalNotice) {
+      window.__dbLocalNotice = true;
+      console.info("[replica] 本地模拟数据(localStorage);发布后自动改用后端。");
+    }
+  }
 
   function paint(data) {
     if (!data) { return; }

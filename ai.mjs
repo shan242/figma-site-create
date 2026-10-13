@@ -1353,11 +1353,20 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       const items = allClouds.filter((i) => i.id !== newId);
       items.push({ id: newId, slug, rect: r, spec: newSpec, createdAt: new Date().toISOString() });
       saveWordClouds(items);
+      // **被夹取要说明**。横向会夹进画布宽度、纵向允许低于画布(构建会把画布加高),
+      // 但"我按原样放的"和"程序替我挪了"必须分得清 —— 否则 AI 以为放在 A 处、
+      // 实际落在别处,后面所有关于位置的判断都建立在错的坐标上。
+      const moved = [];
+      if (Math.round(r.left) !== Math.round(rect.left)) moved.push(`left ${Math.round(rect.left)} → ${Math.round(r.left)}`);
+      if (Math.round(r.top) !== Math.round(rect.top)) moved.push(`top ${Math.round(rect.top)} → ${Math.round(r.top)}`);
+      if (Math.round(r.width) !== Math.round(rect.width)) moved.push(`width ${Math.round(rect.width)} → ${Math.round(r.width)}(画布宽 ${Math.round(cw)}px,不能超出)`);
+      if (Math.round(r.height) !== Math.round(rect.height)) moved.push(`height ${Math.round(rect.height)} → ${Math.round(r.height)}`);
       return {
         id: newId,
         slug,
         rect: r,
         wordCount: newSpec.words.length,
+        ...(moved.length ? { adjusted: moved, note: `你给的矩形被调整过:${moved.join(";")}。实际生效的是返回的 rect。` } : {}),
         ...(collisions.length
           ? {
               warnings: collisions.map(

@@ -120,8 +120,10 @@ test("本地(file://)走完整模拟,发布后自动切后端", () => {
   assert.ok(paintIdx >= 0, "要先画 fallback");
   assert.equal(/if \(!ONLINE\) \{\s*return;\s*\}/.test(clientRuntime), false, "不能因为离线就退出");
   assert.match(clientRuntime, /classList\.add\("db-local"\)/, "本地只标一个类,不写提示文案");
-  // 本地模拟不能出现在"预览"字样里 —— 本地和线上要长得一样
+  // 用户明确要求过删掉页面上的"本地预览"字样:本地和线上要长得一模一样。
+  // 要提示就写控制台 —— 开发者看得到,访客看不到。
   assert.equal(/本地预览/.test(clientRuntime), false, "运行时里不该有'本地预览'字样");
+  assert.match(clientRuntime, /console\.info/, "改用控制台说明");
 });
 
 test("词云布局:权重全为 0 也要铺出全部选项(不是空布局)", () => {
