@@ -14,7 +14,7 @@ const { writeFileSync, readFileSync, renameSync, existsSync } = require("fs");
 // applyConfigPatch 从 worker.cjs 拿(它由 esbuild 打进同一个产物)。
 // 不要 require("./config-merge.cjs"):electron-builder 的 files 是白名单,
 // 单独的 .cjs 不在名单里就不会进 asar —— 本地测试全过,装到用户机器上启动即崩。
-const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch, setPageProbe, applyConfigPatch } = require("./worker.cjs");
+const { scrapeSite, buildSite, runAgent, createDeepSeekModel, makeTools, publishSite, testPanel, httpsOptions, dataApiHealth, machineCode: computeMachineCode, checkLicense, setFetch, setPageProbe, applyConfigPatch, loadChatHistory, saveChatHistory, trimChatHistory } = require("./worker.cjs");
 
 let win = null;
 let chatRunning = false;
@@ -273,12 +273,14 @@ ipcMain.handle("ai-config:set", (event, cfg) => {
 // 所以每一轮都是失忆的:用户说"再大一点"、"换成蓝色",模型根本不知道在说什么。
 // 工具调用与结果不进历史(它们是中间过程,重放既费 token 又可能过期);只留
 // 用户和助手的文字,足够让"上一条指的是什么"成立。
-const chatHistories = new Map(); // outDir -> [{role, content}]
-const HISTORY_MAX_MESSAGES = 16; // 8 轮问答
-const HISTORY_MAX_CHARS = 24000;
-
+// 会话历史落盘,存在**输出目录**里(chat-history.json)—— 跟着目录走,
+// 换机器/换目录都对得上,重开程序也不失忆。
+// 以前它是内存里的一个 Map:关掉程序上下文就清零,用户得把需求重说一遍,
+// 而模型还会重复做已经失败过的事(它不知道自己刚才试过)。
+// 实现在 ai.mjs(纯函数可单测),经 gui-worker 打进 worker.cjs —— 不新增独立文件,
+// 免得踩 build.files 白名单那个坑。
 function getHistory(outDir) {
-  return chatHistories.get(outDir) || [];
+  return loadChatHistory(outDir);
 }
 
 function pushHistory(outDir, role, content) {
@@ -286,11 +288,7 @@ function pushHistory(outDir, role, content) {
   if (!text) return;
   const list = getHistory(outDir).slice();
   list.push({ role, content: text });
-  // 先按条数截断,再按总长度从头砍 —— 至少保留最近一轮
-  while (list.length > HISTORY_MAX_MESSAGES) list.shift();
-  let total = list.reduce((n, m) => n + m.content.length, 0);
-  while (total > HISTORY_MAX_CHARS && list.length > 1) total -= list.shift().content.length;
-  chatHistories.set(outDir, list);
+  saveChatHistory(outDir, trimChatHistory(list));
 }
 
 ipcMain.handle("chat:history", (event, { outDir }) => {
@@ -299,7 +297,8 @@ ipcMain.handle("chat:history", (event, { outDir }) => {
 });
 
 ipcMain.handle("chat:clear-history", (event, { outDir }) => {
-  chatHistories.delete(outDir);
+  // 历史现在在磁盘上,清空要把文件也清掉 —— 否则重启又冒出来了
+  saveChatHistory(outDir, []);
   return { ok: true };
 });
 

@@ -23,7 +23,7 @@ const UPLOAD_CONCURRENCY = 4;
 // Top-level output-dir entries that are build metadata, never deployed. Mirrors
 // the WRITE_DENY list in ai.mjs — these are inputs/overlay sources, not files
 // the static site serves.
-const SKIP_NAMES = new Set(["data", "manifest.json", "edits.json", "nodeStyles.json", "overrides.json", "wordclouds.json", "file-locks.json"]);
+const SKIP_NAMES = new Set(["data", "manifest.json", "edits.json", "nodeStyles.json", "overrides.json", "wordclouds.json", "file-locks.json", "videos.json", "databinds.json", "chat-history.json", ".history"]);
 
 // --- Auth --------------------------------------------------------------------
 

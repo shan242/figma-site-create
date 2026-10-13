@@ -702,6 +702,65 @@ export function pruneToolResult(result, cfg = {}) {
   return pruned;
 }
 
+// --- 会话历史:持久化 + 裁剪 ----------------------------------------------------
+//
+// 以前历史只存在 `main.js` 的一个内存 `Map` 里,所以:
+//   · **关掉程序就全没了** —— 用户重开一次就得把需求重说一遍;
+//   · 超出预算时从**最旧**开始丢 —— 而最旧的那条恰恰是他最初的需求,
+//     于是模型记得"再大一点",却不记得"大一点"的是什么东西。
+//
+// 现在落到 `<输出目录>/chat-history.json`:跟着目录走,换机器/换目录都还对得上。
+// 裁剪规则也改了:**永远保住第一条用户消息**(那是任务本身),中间的先丢。
+//
+// 借鉴 DSH 的 session-persistence:历史是**可回放**的一等对象,不是进程里的临时变量。
+// 与 DSH 的差别:它用 append-only 的 JSONL + 四代格式迁移;这里只有一条对话,
+// 单个 JSON 文件足够,不值得为它背上迁移的复杂度。
+export const CHAT_HISTORY_FILE = "chat-history.json";
+export const CHAT_HISTORY_LIMITS = Object.freeze({ maxMessages: 24, maxChars: 40000 });
+
+/** 纯函数:裁剪历史。保住第一条用户消息,其余从中间丢。 */
+export function trimChatHistory(list, limits = {}) {
+  const lim = { ...CHAT_HISTORY_LIMITS, ...limits };
+  if (!Array.isArray(list)) return [];
+  let out = list.filter((m) => m && typeof m.content === "string" && m.content.trim());
+  // 第一条用户消息 = 用户最初的需求,模型后面所有"再改一点"都依赖它
+  const firstUser = out.find((m) => m.role === "user") || null;
+  const rest = out.filter((m) => m !== firstUser);
+  // 先按条数砍(从中间砍,不砍第一条)
+  while (rest.length + (firstUser ? 1 : 0) > lim.maxMessages) rest.shift();
+  // 再按长度砍
+  const size = (l) => l.reduce((n, m) => n + m.content.length, 0);
+  while (firstUser && rest.length && (size(rest) + firstUser.content.length) > lim.maxChars) rest.shift();
+  return firstUser ? [firstUser, ...rest] : rest;
+}
+
+/** 读历史。文件不存在/坏了都返回空数组 —— 历史丢了不该让程序起不来。 */
+export function loadChatHistory(outDir) {
+  try {
+    const raw = readFileSync(join(outDir, CHAT_HISTORY_FILE), "utf8");
+    // 兼容两种形状:直接是数组,或 { version, messages }
+    const d = JSON.parse(raw);
+    const list = Array.isArray(d) ? d : d?.messages;
+    return Array.isArray(list) ? list.filter((m) => m && typeof m.content === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 写历史(原子替换)。写失败只警告,不影响对话。 */
+export function saveChatHistory(outDir, list) {
+  try {
+    const file = join(outDir, CHAT_HISTORY_FILE);
+    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, messages: list }, null, 2));
+    renameSync(`${file}.tmp`, file);
+    return true;
+  } catch (e) {
+    // 磁盘满之类 —— 历史存不下不是致命错误,但不能一声不吭
+    console.warn(`会话历史保存失败(${e.message});这一轮的上下文重开程序后会丢失。`);
+    return false;
+  }
+}
+
 // --- 强制自检 ------------------------------------------------------------------
 //
 // 为什么需要:这一整轮所有"DOM 全对但页面不对"的问题,模型**一个都发现不了** ——

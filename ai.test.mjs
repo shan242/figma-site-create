@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder, buildSystemPrompt, PROMPT_SECTIONS } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder, buildSystemPrompt, PROMPT_SECTIONS, trimChatHistory, loadChatHistory, saveChatHistory, CHAT_HISTORY_FILE } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -474,6 +474,52 @@ test("循环检测:不同参数不算重复", async () => {
     maxTurns: 6,
   });
   assert.equal(events.some((e) => e.type === "repeat_detected"), false, "参数各不相同就不该报循环");
+});
+
+test("trimChatHistory:永远保住第一条用户消息(那是任务本身)", () => {
+  const list = [{ role: "user", content: "给首页加词云" }];
+  for (let i = 0; i < 40; i++) {
+    list.push({ role: "assistant", content: `第 ${i} 轮回复` });
+    list.push({ role: "user", content: `再改一点 ${i}` });
+  }
+  const t = trimChatHistory(list, { maxMessages: 6 });
+  assert.equal(t.length, 6);
+  assert.equal(t[0].content, "给首页加词云", "最初的需求必须还在");
+  assert.equal(t[t.length - 1].content, "再改一点 39", "最近的也要在");
+});
+
+test("trimChatHistory:按总长度裁剪,同样保住第一条", () => {
+  const list = [
+    { role: "user", content: "最初的需求" },
+    ...Array.from({ length: 20 }, (_, i) => ({ role: "assistant", content: "x".repeat(5000) + i })),
+  ];
+  const t = trimChatHistory(list, { maxChars: 12000 });
+  assert.equal(t[0].content, "最初的需求");
+  assert.ok(t.length < 20, "要真的裁掉一些");
+});
+
+test("trimChatHistory:空内容与坏数据要被过滤掉", () => {
+  const t = trimChatHistory([{ role: "user", content: "ok" }, { role: "assistant", content: "   " }, null, { role: "user" }]);
+  assert.deepEqual(t.map((m) => m.content), ["ok"]);
+  assert.deepEqual(trimChatHistory(null), []);
+});
+
+test("会话历史:写盘后能读回来(关掉程序不失忆)", () => {
+  const dir = fixture();
+  saveChatHistory(dir, [{ role: "user", content: "你好" }, { role: "assistant", content: "在的" }]);
+  assert.equal(existsSync(join(dir, CHAT_HISTORY_FILE)), true, "要落盘");
+  const back = loadChatHistory(dir);
+  assert.equal(back.length, 2);
+  assert.equal(back[0].content, "你好");
+});
+
+test("会话历史:文件不存在或损坏都返回空,不能让程序起不来", () => {
+  const dir = fixture();
+  assert.deepEqual(loadChatHistory(dir), [], "没有文件就是空");
+  writeFileSync(join(dir, CHAT_HISTORY_FILE), "{ 这不是 JSON");
+  assert.deepEqual(loadChatHistory(dir), [], "损坏也返回空而不是抛");
+  writeFileSync(join(dir, CHAT_HISTORY_FILE), JSON.stringify([{ role: "user", content: "x" }]));
+  assert.equal(loadChatHistory(dir).length, 1, "也兼容直接是数组的老形状");
 });
 
 test("buildSystemPrompt:关键规则一条都不能丢", () => {
