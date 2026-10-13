@@ -505,7 +505,7 @@ function initOne(root) {
           var list = sel[spec.collection] || (sel[spec.collection] = []);
           var i = -1;
           for (var k = 0; k < list.length; k++) { if (list[k].el === target) { i = k; break; } }
-          if (i >= 0) { list.splice(i, 1); target.removeAttribute("data-db-selected"); }
+          if (i >= 0) { list.splice(i, 1); target.removeAttribute("data-db-selected"); target.style.removeProperty("filter"); }
           else {
             // **连值一起存** —— 提交时直接用这个值。
             // 早先只存 DOM 元素、提交时读 el.textContent,而选项节点的文字往往在
@@ -513,6 +513,12 @@ function initOne(root) {
             // 页面上只显示"没有可提交的选项"。存值就没有这个猜测。
             list.push({ el: target, value: write.value !== undefined && write.value !== null ? write.value : (target.textContent || "").trim() });
             target.setAttribute("data-db-selected", "1");
+            // **选中变深也由运行时落笔。**
+            // 原来靠写一条 [data-db-selected] { filter: brightness(...) } 的 CSS,
+            // 而实测那种规则经常被后面的样式表压掉、或者选择器根本没命中 ——
+            // 用户看到的就是"点了之后颜色没变"。用带 important 的内联声明,
+            // 和揭示、可点击性是同一套做法:必须成立的事不交给样式表。
+            target.style.setProperty("filter", "brightness(0.45)", "important");
           }
           note(root, "");
         });
