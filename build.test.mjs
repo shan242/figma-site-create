@@ -69,7 +69,9 @@ test("字体下载偶发失败会重试,成功后正常落盘", async () => {
   assert.equal(calls, 2, "第一次失败后应当重试");
   assert.deepEqual(warns, [], "重试成功就不该有告警");
   assert.ok(existsSync(join(dir, "fonts", "Acme_1.woff2")), "字体应落盘");
-  assert.match(readFileSync(join(dir, "styles.css"), "utf8"), /src: url\(fonts\/Acme_1\.woff2\)/, "应写出 @font-face");
+  // 字体 URL 带内容哈希查询串:字体文件名不是内容哈希(是 字体名_序号),
+  // 内容变了名字不变,而静态托管的 max-age 很长 → 访客会一直用旧字体。
+  assert.match(readFileSync(join(dir, "styles.css"), "utf8"), /src: url\(fonts\/Acme_1\.woff2\?v=[a-f0-9]{8}\)/, "应写出带版本串的 @font-face");
 });
 
 test("字体持续失败:说明真实原因,且不写出指向不存在文件的 @font-face", async () => {
@@ -115,7 +117,7 @@ test("字体已存在时不重复下载(重建不浪费流量)", async () => {
   assert.equal(calls, 0, "不应发起请求");
   assert.deepEqual(warns, []);
   assert.equal(readFileSync(join(dir, "fonts", "Acme_1.woff2"), "utf8"), "CACHED", "不能覆盖已有文件");
-  assert.match(readFileSync(join(dir, "styles.css"), "utf8"), /src: url\(fonts\/Acme_1\.woff2\)/, "仍然要写 @font-face");
+  assert.match(readFileSync(join(dir, "styles.css"), "utf8"), /src: url\(fonts\/Acme_1\.woff2\?v=[a-f0-9]{8}\)/, "仍然要写 @font-face(带版本串)");
 });
 
 test("零字节的残留文件会被重新下载", async () => {

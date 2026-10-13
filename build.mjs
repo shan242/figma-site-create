@@ -214,11 +214,17 @@ async function selfHostedCss(selfHost) {
       console.warn(`  ⚠ 字体 ${name} 下载失败(${url}):${lastErr}`);
       continue; // 不写出指向不存在文件的 @font-face;浏览器会退到字体栈的下一项
     }
+    // 字体 URL 也带内容哈希。assets/ 下的图片/视频**文件名本身就是 Figma 给的
+    // 内容哈希**,天然缓存安全;字体不是 —— 名字是 `字体名_序号.woff2`,
+    // 字体文件内容变了名字也不变,而静态托管的 max-age 往往是几小时,
+    // 于是访客会一直用旧字体(和 styles.css 那次是同一个坑)。
+    let fontVer = "";
+    try { fontVer = "?v=" + createHash("sha1").update(readFileSync(join(outDir, "fonts", file))).digest("hex").slice(0, 8); } catch {}
     rules.push(`@font-face {
   font-family: '${name.split(":")[0]}';
   font-weight: ${info.weight || 400};
   font-style: ${info.italic ? "italic" : "normal"};
-  src: url(fonts/${file}) format('woff2');
+  src: url(fonts/${file}${fontVer}) format('woff2');
 }`);
     console.log(`  ✓ self-hosted font ${name} (${file})`);
   }
