@@ -89,9 +89,10 @@ test("离线(没后端 / file:// 预览)时也要画 fallback,不能提前 retur
   assert.equal(/if \(!Site\) \{ return; \}/.test(clientRuntime), false, "不能再提前 return");
   // 用真实代码定位(注释会被 stripComments 剥掉,不能拿注释当锚点)
   const paintIdx = clientRuntime.indexOf("paint((spec.fallback");
-  const gateIdx = clientRuntime.indexOf("if (!ONLINE) { return; }");
-  assert.ok(paintIdx >= 0 && gateIdx >= 0, "两处都要在");
+  const gateIdx = clientRuntime.indexOf("if (!ONLINE) {");
+  assert.ok(paintIdx >= 0 && gateIdx >= 0, `两处都要在 (paint=${paintIdx} gate=${gateIdx})`);
   assert.ok(paintIdx < gateIdx, "必须先画 fallback,再判断要不要联网");
+  assert.match(clientRuntime, /classList\.add\("db-offline"\)/, "离线要标 db-offline,让用户知道为什么点了没反应");
 });
 
 test("词云布局:权重全为 0 也要铺出全部选项(不是空布局)", () => {

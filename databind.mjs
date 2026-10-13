@@ -195,7 +195,14 @@ function initOne(root) {
 
   // 没联网(没配后端,或是 file:// 本地预览)就到此为止:
   // fallback 已经画出来了,后面的读/写都需要后端。
-  if (!ONLINE) { return; }
+  // 但**要把原因挂到元素上**,否则用户看到"点了没反应"完全无从判断 ——
+  // 实测 coco figma2 的 AI 只能自己写一条 content:'...the voting script only
+  // runs there' 的 CSS 来代偿。加上 db-offline 类,样式就能有一处统一的口径。
+  if (!ONLINE) {
+    root.classList.add("db-offline");
+    if (write) { note(root, spec.options && spec.options.offline || "本地预览:发布后这里才能记录", "db-off"); }
+    return;
+  }
 
   function paint(data) {
     if (!data) { return; }
@@ -206,6 +213,8 @@ function initOne(root) {
   }
 
   function refresh() {
+    // action 只负责把点击接到后端,不读也不画 —— 不必去轮询
+    if (spec.kind === "action") { return Promise.resolve(); }
     var q;
     if (spec.kind === "list") { q = "?limit=" + (read.limit || 20); }
     else if (spec.kind === "counter") { q = "?field=" + encodeURIComponent(read.groupBy || "id") + "&limit=1"; }

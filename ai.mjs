@@ -1010,14 +1010,24 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         return { error: "collection 必须是 [a-z0-9-] 组成的标识,如 votes / words / guestbook" };
       }
       const k = kind || "bar";
-      if (!["bar", "counter", "list", "wordcloud"].includes(k)) {
-        return { error: "kind 必须是 bar(占比条,投票) / counter(计数) / list(列表,留言) / wordcloud(实时词云)" };
+      if (!["bar", "counter", "list", "wordcloud", "action"].includes(k)) {
+        return { error: "kind 必须是 bar(占比条,投票) / counter(计数) / list(列表,留言) / wordcloud(实时词云) / action(只写入、不渲染)" };
+      }
+      // action = 只把点击接到后端,**不在页面上画任何东西**。
+      // 缺了它,「点这个标签给词云投一票」只能靠 kind=wordcloud + 1×1 的矩形硬凑 ——
+      // 实测 coco figma2 就是这么干的:24 个分类标签 = 24 条 wordcloud,其中 23 条
+      // rect 是 1x1,再写 CSS `.databind[style*="width:1px"]{display:none}` 把它们藏掉。
+      // 65 处 [style*=] 坐标 hack、137 个 !important、618 行 CSS,全是为了绕开这一点。
+      if (k === "action") {
+        if (!write || !write.target) return { error: "action 绑定必须给 write.target(点哪个节点)" };
+        rect = rect || { left: 0, top: 0, width: 0, height: 0 };
       }
       if (!rect || !["left", "top", "width", "height"].every((f) => Number.isFinite(rect[f]))) {
         return { error: "rect 需要 {left,top,width,height} 数值" };
       }
       const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]{0,31}$/;
       const rd = read || {};
+      // action 不读数据(groupBy 只用于 /stats 的字段名,action 用不到)
       if ((k === "bar" || k === "wordcloud") && !FIELD_RE.test(String(rd.groupBy || ""))) {
         return { error: "read.groupBy 必须是合法字段名(字母/下划线开头),例如 choice / text" };
       }
