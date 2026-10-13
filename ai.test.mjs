@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder, buildSystemPrompt, PROMPT_SECTIONS, trimChatHistory, loadChatHistory, saveChatHistory, CHAT_HISTORY_FILE } from "./ai.mjs";
+import { parseSSE, runAgent, makeTools, createDeepSeekModel, sniffImageMime, rectOverlap, overlayCollisions, estimateTextHeight, auditCss, pruneToolResult, PRUNE_DEFAULTS, formatSelfCheck, SELF_CHECK_MAX, offloadOldImages, canonicalArgs, repeatReminder, buildSystemPrompt, PROMPT_SECTIONS, fallbackDataCheck, wordcloudFitCheck, trimChatHistory, loadChatHistory, saveChatHistory, CHAT_HISTORY_FILE } from "./ai.mjs";
 import { setPageProbe } from "./pageprobe.mjs";
 import { buildSite } from "./build.mjs";
 
@@ -701,6 +701,41 @@ test("参数不是合法 JSON 时,报错要列出合法参数名", async () => {
   // 从 history 里把那条 tool 结果捞出来看
   const found = events.find((e) => e.type === "tool_end");
   assert.ok(found, "应该有工具结束事件");
+});
+
+test("fallbackDataCheck:投票类绑定的 fallback 不许带编造的票数", () => {
+  // 实际事故:AI 给一个投票词云写了 fallback{total:23, counts:4,3,3,2…} ——
+  // 于是本地预览(以及后端不可用时)访客看到的是**编造的统计结果**,
+  // 看起来像"已经有人投过了",而那些人根本不存在。
+  const invented = fallbackDataCheck("wordcloud", { total: 23, buckets: [{ key: "A", count: 4 }, { key: "B", count: 3 }] });
+  assert.equal(invented.length, 1);
+  assert.match(invented[0], /非 0 的票数/);
+  assert.match(invented[0], /count 都要写 0/, "要给出正确写法");
+  // 全 0 是对的 —— 示例 2026101301 就是这样
+  assert.deepEqual(fallbackDataCheck("wordcloud", { total: 0, buckets: [{ key: "A", count: 0 }, { key: "B", count: 0 }] }), []);
+  // counter 同理(参与人数也是统计结果)
+  assert.equal(fallbackDataCheck("counter", { total: 12 }).length, 1);
+  assert.deepEqual(fallbackDataCheck("counter", { total: 0 }), []);
+  // list 没有"票数"概念,不该乱报
+  assert.deepEqual(fallbackDataCheck("list", { items: [] }), []);
+});
+
+test("wordcloudFitCheck:用真实布局判断,而不是拍脑袋给公式", () => {
+  // 整句标签 + 大字号 + 矮矩形 = 数学上排不成云。这个是算出来的,不是估计的。
+  // 真实的 12 个整句标签 —— 4 个的话确实装得下,不该报警
+  const labels = [
+    "Lamp-Lighting Ritual", "Returning to One's Ancestral Roots", "Building Ancestral Halls",
+    "Stealing White Radishes", "Inclusion in the Family Genealogy", "Journeying to Nanyang",
+    "Sense of Belonging", "Overseas Chinese Identity", "Staying Behind in the Hometown",
+    "Clan System", "Women's Place in Tradition", "Patrilineal Descent",
+  ];
+  const bad = wordcloudFitCheck({ labels, rect: { width: 1160, height: 430 }, maxFont: 50, minFont: 14, maxWords: 12 });
+  assert.ok(bad.length >= 1, "要报警");
+  assert.match(bad.join("\n"), /摆不成云/);
+  assert.match(bad.join("\n"), /maxFont 调小|矩形加高|maxWords/, "要给出可执行的调法");
+  // 短词 + 合理配置 = 不打扰
+  const good = wordcloudFitCheck({ labels: ["Food", "Routes", "Tickets"], rect: { width: 1180, height: 440 }, maxFont: 40, minFont: 12, maxWords: 3 });
+  assert.deepEqual(good, [], `不该报警: ${JSON.stringify(good)}`);
 });
 
 test("buildSystemPrompt:关键规则一条都不能丢", () => {

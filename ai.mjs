@@ -142,6 +142,8 @@ export const PROMPT_SECTIONS = [
       "  · 只写入、不在页面上画东西:kind='action'。它要求 write.target,rect 可省略。**「点某个标签投一票」就用它** —— 不要用 1×1 的词云矩形去凑,更不要为此写 CSS 把假元素藏起来。\n" +
       "  · 每个访客能投几次由 options.perVisitor 决定:once(默认,每一项一次)/ many(可重复)/ single(可改主意,后端后写覆盖前写)。注意 once 是**每一项一次**,不是总共一票。\n" +
       "  · fallback 必填,且形状要与 kind 对应(bar/wordcloud 给 {buckets:[{key,count}],total};list 给 {items:[{data:{...}}]};counter 给 {total})——后端不可用时访客看到的就是它。\n" +
+      "  · **fallback 是\"还没有任何数据\"时给访客看的,所以 count / total 一律写 0。** 把选项**全部列出来**、票数写 0,词云就会按最小字号把所有选项铺开 —— 访客这才知道有哪些可以点。**绝对不要填编造的票数** ✗:那等于给访客看假的统计结果,而且会让人以为已经有人投过了。只有确实想展示\"示例数据\"时才给非 0,并且要在页面上标明那是示例。\n" +
+      "  · **词云要长得像云,请一并看上面「词云」那节的字号经验值** —— 整句标签用 maxFont 14-22、矩形高度 600px 以上、maxWords 6-10。工具的 warnings 会直接告诉你够不够。\n" +
       "  · rect 用画布坐标,宽度别超出画布;纵向可以放在内容下方。",
   },
   {
@@ -945,6 +947,27 @@ export function repeatReminder(tool, count, argsCanonical) {
     "换一组参数,或者在你已经拿到的证据足够时直接结束任务。\n" +
     "如果这个调用是因为缺信息而失败的,先想办法拿到那个信息(用对应的列举工具),而不是继续试。"
   );
+}
+
+/** 投票类绑定的 fallback 不许带票数 —— 那是**编造统计结果**。 */
+export function fallbackDataCheck(kind, fallback) {
+  if (!fallback || (kind !== "wordcloud" && kind !== "bar" && kind !== "counter")) return [];
+  const out = [];
+  const buckets = Array.isArray(fallback.buckets) ? fallback.buckets : [];
+  const counted = buckets.filter((b) => Number(b?.count) > 0);
+  if (counted.length) {
+    const total = buckets.reduce((n, b) => n + (Number(b?.count) || 0), 0);
+    out.push(
+      `fallback 里带了**非 0 的票数**(共 ${total} 票:${counted.slice(0, 4).map((b) => `${b.key}=${b.count}`).join(", ")}${counted.length > 4 ? " …" : ""})。` +
+        `后端不可用(以及本地预览)时访客看到的就是它 —— 那等于**给访客看编造的统计结果**,而且会让人以为已经有人投过票了。` +
+        `投票类绑定的 fallback **每个选项的 count 都要写 0**(所有选项都要列出来,fontSize 会按最小字号铺开,访客才知道可以点什么);` +
+        `只有确实想展示"示例/种子数据"时才给非 0 —— 那种情况要在界面上说明这是示例数据。`,
+    );
+  }
+  if (kind === "counter" && Number(fallback.total) > 0) {
+    out.push(`counter 的 fallback.total 是 ${fallback.total} —— 参与人数也是统计结果,没有数据时应当写 0。`);
+  }
+  return out;
 }
 
 /** 词云装不装得下 —— AI 算不出来,而它决定了词云看起来像不像"云"。
@@ -2301,6 +2324,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
               maxWords: options?.maxWords,
             })
           : [];
+      const fbWarnings = fallbackDataCheck(k, fallback);
       const items = all.filter((i) => i.id !== newId);
       items.push(item);
       saveDatabinds(items);
@@ -2310,7 +2334,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         collection: item.collection,
         kind: k,
         mode: w ? (w.target ? `点击节点 ${w.target} 提交` : "访客输入后提交") : "只读",
-        ...(collisions.length || fitWarnings.length
+        ...(collisions.length || fitWarnings.length || fbWarnings.length
           ? {
               warnings: [
                 ...collisions.map(
@@ -2319,6 +2343,7 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
                     `或者把 rect 挪到没有内容的位置。`,
                 ),
                 ...fitWarnings,
+                ...fbWarnings,
               ],
             }
           : {}),
