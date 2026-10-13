@@ -703,6 +703,39 @@ test("参数不是合法 JSON 时,报错要列出合法参数名", async () => {
   assert.ok(found, "应该有工具结束事件");
 });
 
+test("check_page:Electron 外壳的安全警告不许当成页面问题", async () => {
+  // 自检做成强制闭环之后,这条警告每轮都被报成"页面异常",AI 就一直去追它 ——
+  // 而那说的是**预览外壳的渲染器**,和产物无关,发布后也不会出现。
+  // 更糟的是"修"它会害了页面:站点靠内联脚本和跨域接口工作,硬塞 CSP
+  // 要么是假锁,要么把投票变成"点了没反应"。
+  const dir = fixture();
+  writeFileSync(join(dir, "index.html"), "<html></html>");
+  setPageProbe(async () => ({
+    value: { url: "file:///x", databinds: 13, states: { "(无)": 13 }, clouds: [], hidden: [], slowTransition: [], blocked: [], overlaps: [] },
+    errors: [
+      "Electron Security Warning (Insecure Content-Security-Policy) This renderer process has either no Content Security Policy set or a policy which contains unsafe-eval.",
+      "TypeError: 这才是真的页面异常",
+    ],
+  }));
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.check_page({ slug: "index" });
+  const all = r.problems.join("\n");
+  assert.equal(/Content-Security-Policy|Electron Security/.test(all), false, `外壳警告不该出现: ${all}`);
+  assert.match(all, /这才是真的页面异常/, "真正的异常仍要报");
+  setPageProbe(null);
+});
+
+test("wordcloud-poll 标准:写清了「先选、再提交、然后才出现词云」", () => {
+  const c = STANDARDS["wordcloud-poll"].content;
+  assert.match(c, /options\.defer/, "选项要 defer(选中不写)");
+  assert.match(c, /data-db-selected/, "选中态用属性表达");
+  assert.match(c, /不要任何文字说明|不要文字说明/, "选中不靠文字说明");
+  assert.match(c, /submitAll/, "要有一条 submitAll 的提交绑定");
+  assert.match(c, /提交之后词云才出现|提交之后才生成|reveal/, "词云要在提交后才出现");
+  assert.match(c, /data-db-any-submitted/, "要给揭示用的 CSS");
+  assert.match(c, /pointer-events/, "要点明 submit 点不动的常见原因");
+});
+
 test("fallbackDataCheck:投票类绑定的 fallback 不许带编造的票数", () => {
   // 实际事故:AI 给一个投票词云写了 fallback{total:23, counts:4,3,3,2…} ——
   // 于是本地预览(以及后端不可用时)访客看到的是**编造的统计结果**,

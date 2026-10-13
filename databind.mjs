@@ -420,12 +420,57 @@ function initOne(root) {
     input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") { go(); } });
   }
 
+  // 把所有选中的选项一次性提交(每个选项一条记录,后端 /stats?groupBy= 才能按词计数)
+  function submitAllSelected(list) {
+    if (busy) { note(root, (spec.options && spec.options.sending) || "发送中…", "db-wait"); return; }
+    busy = true;
+    // 每个选项一条:词云是按字段值分桶统计的,合成一条只会算成一个词
+    var jobs = [];
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      var d = {};
+      d[write.field] = el ? (el.textContent || "").trim() : "";
+      if (!d[write.field]) continue;
+      jobs.push(api(path, { method: "POST", body: { data: d, client: client } }));
+    }
+    if (!jobs.length) { busy = false; note(root, "没有可提交的选项", "db-err"); return; }
+    Promise.all(jobs)
+      .then(function () { afterSubmit(); })
+      .catch(function (e) { note(root, e.message || "提交失败", "db-err"); })
+      .then(function () { busy = false; });
+  }
+
   // 点击式写入:绑到某个 Figma 节点(例如一个按钮)
   if (write && write.target) {
     var target = document.querySelector('[data-node-id="' + write.target + '"]');
     if (target) {
       target.style.cursor = "pointer";
-      target.addEventListener("click", function () { submit(target); });
+      // **两种点击语义** —— 问卷式"先选再提交"要求它们分开:
+      //  · options.defer:点一下只是**选中**(打上 data-db-selected,由 CSS 变深),
+      //    **不写后端**。访客可以反复改主意。
+      //  · write.submitAll:这才是"提交" —— 把**所有已选中项**一次性写进去,
+      //    然后才揭示结果。
+      // 早先只有"点了就写",于是没有"提交"这一步,词云在点第一个选项时就出结果了,
+      // 而用户要的是**点 submit 之后才生成词云**。
+      if (spec.options && spec.options.defer) {
+        target.addEventListener("click", function () {
+          var sel = window.__dbSel || (window.__dbSel = {});
+          var list = sel[spec.collection] || (sel[spec.collection] = []);
+          var i = list.indexOf(target);
+          if (i >= 0) { list.splice(i, 1); target.removeAttribute("data-db-selected"); }
+          else { list.push(target); target.setAttribute("data-db-selected", "1"); }
+          note(root, "");
+        });
+      } else if (write.submitAll) {
+        target.addEventListener("click", function () {
+          var sel = window.__dbSel || (window.__dbSel = {});
+          var list = (sel[spec.collection] || []).slice();
+          if (!list.length) { note(root, (spec.options && spec.options.none) || "请先选一选上面的选项", "db-err"); return; }
+          submitAllSelected(list);
+        });
+      } else {
+        target.addEventListener("click", function () { submit(target); });
+      }
     }
   }
 

@@ -593,7 +593,20 @@ app.whenReady().then(() => {
       });
       const errors = [];
       probe.webContents.on("console-message", (_e, level, message) => {
-        if (level >= 2) errors.push(String(message).slice(0, 300));
+        if (level < 2) return;
+        const text = String(message);
+        // **Electron 自己的安全提示不是页面问题**,必须滤掉。
+        // 预览用的 Electron 外壳只要没配 CSP 就会往控制台打一段
+        // "Electron Security Warning (Insecure Content-Security-Policy)" ——
+        // 说的是**外壳的渲染器**,和输出目录里的 HTML/CSS/JS 毫无关系,发布到真实
+        // 域名后也不会出现。但自检(强制闭环)把控制台里的东西当"页面异常"报上去,
+        // 于是 AI 每一轮都在追这条根本无法消除、也不该消除的警告 ——
+        // 而给页面硬塞 CSP 反而有害:这个站点靠内联脚本和跨域接口工作,写宽了是假锁,
+        // 写严了会直接把投票变成"点了没反应"。
+        if (/Electron Security Warning|Insecure Content-Security-Policy|Content-Security-Policy.*unsafe-eval/i.test(text)) return;
+        // 调试端口/DevTools 之类的外壳噪声同理
+        if (/DevTools|Autofill\.|Request Autofill/i.test(text)) return;
+        errors.push(text.slice(0, 300));
       });
       try {
         await probe.loadURL(url);

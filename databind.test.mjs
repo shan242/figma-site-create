@@ -31,7 +31,10 @@ test("注入的运行时里不留源码注释(会一字不差发给访客)", () 
   assert.match(stripped, /const b = 2;/);
   // 真正注入的那份必须干净
   const cjk = (clientRuntime.match(/[\u4e00-\u9fff]+/g) || []).join("");
-  assert.ok(cjk.length < 60, `运行时里不该有成段中文注释,实际 ${cjk.length} 个字符: ${cjk.slice(0, 80)}`);
+  // 阈值是"注释没成段泄漏"的粗略哨兵,不是"一个中文字都不许有" ——
+  // 运行时里本来就有该给访客看的 UI 文案(发送中/已提交过/请先选一选…)。
+  // 实测泄漏过一次 756 个字符,那才是要拦的;正常状态在 100 上下。
+  assert.ok(cjk.length < 160, `运行时里不该有成段中文注释,实际 ${cjk.length} 个字符: ${cjk.slice(0, 80)}`);
   assert.equal(/^\s*\/\//m.test(clientRuntime), false, "不该有整行注释残留");
 });
 

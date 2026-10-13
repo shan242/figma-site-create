@@ -500,7 +500,38 @@ write.target 填那个选项在页面上的节点 id,field 与上面 groupBy 一
 
 选项的节点 id 从 read_page_text 拿(用 q 搜选项文字最快,例如 q:"Q1")。
 
-【五、做完自查】
+【六、交互:先选、再提交、然后才出现词云 —— 这是硬要求】
+用户要的行为是:访客点选项(**只是选中,变深**,不提交),全部选好后点 **submit** 提交,
+**提交之后词云才出现**。所以不能"点一下就写后端",必须分成两拨绑定:
+
+· **每个选项**:一条 action,但要带 options.defer: true —— 点它只打上
+  data-db-selected 属性(**不写后端**),再点一下取消。
+  **选中态完全靠 CSS 表达,不要任何文字说明**。
+· **submit 按钮**:另做一条 action,带 write.submitAll: true,write.target 指向设计里
+  那个 submit 按钮。点它才把**所有已选中项**一次性写进去。
+  这条最容易漏:漏了就没有"提交"这一步,词云会在点第一个选项时就出结果。
+· **词云**:kind="wordcloud" 的那条**什么都不用加** —— 揭示是纯 CSS 做的(见下面的
+  [data-db-any-submitted] 规则),运行时会在"这个访客提交过"时给画布打上那个属性。
+  **注意是"这个访客提交过没有",不是"这次会话点没点过"** —— 提交过的人刷新页面会
+  直接看到词云,不会又被要求投一次。
+
+配套的 CSS(逐字用,{DATA} 换成你实际的色值):
+  /* 选中 = 变深。不要文字说明。 */
+  [data-node-id][data-db-selected] { filter: brightness(0.55); }
+  /* 结果是提交之后才生成的:没提交过就一直藏着 */
+  .databind[data-spec*='"kind":"wordcloud"'] .db-body { opacity: 0; transition: opacity .35s ease; }
+  [data-db-any-submitted] .databind[data-spec*='"kind":"wordcloud"'] .db-body { opacity: 1; }
+  /* submit 那条自己不画东西,但**必须可点** —— 不要让别的容器盖住它 */
+  .databind[data-spec*='"kind":"action"'][data-spec*='submitAll'] { pointer-events: none; }
+  .databind[data-spec*='"kind":"action"'][data-spec*='submitAll'] * { pointer-events: none; }
+
+⚠️ **submit 按钮"点不动"是最常见的投诉**,三个原因,逐个排掉:
+  1. 它有 pointer-events: none(自己写的或继承来的)—— 上面那段 CSS 就是解药;
+  2. 它被后面渲染的容器(比如词云那块的透明底)盖住了 —— 给词云容器 pointer-events: none,
+     或者把 submit 的 z-index 抬高;
+  3. write.target 填错了节点(填成了按钮旁边的文字,而不是按钮本身)。
+
+【七、做完自查】
 · 选项数 N 个 → 应该有 1 条 wordcloud + N 条 action,一共 N+1 条。
 · 所有 action 的 collection 与 wordcloud 的 collection 相同。
 · 所有 action 的 write.field 与 wordcloud 的 read.groupBy 相同。
@@ -1097,6 +1128,10 @@ export function wordcloudFitCheck({ labels, rect, maxFont, minFont = 12, maxWord
   }
   return out;
 }
+
+/** 这些是**宿主外壳**的噪声,不是页面问题 —— 报给 AI 只会让它去追一个消不掉的东西。 */
+export const HOST_NOISE_RE =
+  /Electron Security Warning|Insecure Content-Security-Policy|Content-Security-Policy.*unsafe-eval|DevTools|Autofill\.|Request Autofill|Electron Helper|GPU stall|Slow network/i;
 
 export async function runAgent({ messages, model, tools, onEvent, config, maxTurns }) {
   // 按**这一轮实际可用的工具**拼提示词:某个工具不存在,它的那一节就不出现。
@@ -2213,7 +2248,14 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
         else if (b.muted && b.controls === false) problems.push(`video(${at}) 没有播放控件,而访客默认听不到声音。要有声音用 set_video_options({nodeId:"${b.nodeId}", muted:false, controls:true})。`);
       }
       for (const o of v.overlaps || []) problems.push(`文字叠在一起: ${o.a} 与 ${o.b}(重叠 ${o.pct}%)。`);
-      for (const e of r?.errors || []) problems.push(`页面抛了 JS 异常: ${e}`);
+      // 页面抛的 JS 异常。**宿主的噪声要滤掉** —— 尤其是 Electron 的
+      // "Insecure Content-Security-Policy" 警告:那说的是预览外壳,和产物无关,
+      // 发布后也不会出现。不滤的话自检每轮都报它,AI 就会一直去追一个
+      // 既消不掉、也不该消掉的东西(给页面硬塞 CSP 反而会把投票变成静默失败)。
+      for (const e of r?.errors || []) {
+        if (HOST_NOISE_RE.test(String(e))) continue;
+        problems.push(`页面抛了 JS 异常: ${e}`);
+      }
       return {
         slug,
         ok: problems.length === 0,
