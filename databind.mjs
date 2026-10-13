@@ -381,6 +381,24 @@ function initOne(root) {
     }
     var host = root.closest(".canvas") || document;
     host.setAttribute("data-db-any-submitted", "1");
+    // **把"提交后才揭示"的那些绑定也打开。**
+    // 这件事原来靠 AI 写一段 CSS(用 [data-db-any-submitted] 选择器把 opacity 提到 1),实测
+    // 它写的规则常常**一条都没命中**(选择器里的引号、优先级、后面的覆盖…),
+    // 结果就是"提交了也不展开",而页面上又看不出哪里错。
+    // 现在由运行时直接管:带 options.reveal:"submit" 的绑定在初始化时被藏起来,
+    // 这里统一揭开 —— 用 important,免得被样式表里更特异的规则压回去。
+    var all = host.querySelectorAll('.databind');
+    for (var i = 0; i < all.length; i++) {
+      var s = null;
+      try { s = JSON.parse(all[i].getAttribute("data-spec") || "null"); } catch (e) { s = null; }
+      if (!s || !s.options || s.options.reveal !== "submit") continue;
+      var bb = all[i].querySelector(".db-body");
+      if (bb) {
+        bb.style.setProperty("opacity", "1", "important");
+        bb.style.setProperty("transform", "none", "important");
+      }
+      all[i].style.setProperty("pointer-events", "auto", "important");
+    }
   }
 
   function submit(el, value) {
@@ -427,10 +445,14 @@ function initOne(root) {
     // 每个选项一条:词云是按字段值分桶统计的,合成一条只会算成一个词
     var jobs = [];
     for (var i = 0; i < list.length; i++) {
-      var el = list[i];
+      var pick = list[i] || {};
+      // value 在选中时就存好了,不依赖此刻的 DOM 结构
+      var v = pick.value !== undefined && pick.value !== null && pick.value !== ""
+        ? pick.value
+        : (pick.el ? (pick.el.textContent || "").trim() : "");
+      if (!v) continue;
       var d = {};
-      d[write.field] = el ? (el.textContent || "").trim() : "";
-      if (!d[write.field]) continue;
+      d[write.field] = v;
       jobs.push(api(path, { method: "POST", body: { data: d, client: client } }));
     }
     if (!jobs.length) { busy = false; note(root, "没有可提交的选项", "db-err"); return; }
@@ -445,6 +467,13 @@ function initOne(root) {
     var target = document.querySelector('[data-node-id="' + write.target + '"]');
     if (target) {
       target.style.cursor = "pointer";
+      // **保证它能被点到。** 实测最常见的"点了没反应"就是这条节点被 CSS 设了
+      // pointer-events: none(有时还是它自己的容器继承来的),或者被后面渲染的透明
+      // 容器盖住 —— 而写绑定的人从数据里完全看不出来。既然它是这条绑定的点击目标,
+      // 就由运行时把它钉成可点,不指望样式表配合。
+      target.style.setProperty("pointer-events", "auto", "important");
+      target.style.setProperty("position", target.style.position || "relative", "important");
+      target.style.setProperty("z-index", "3", "important");
       // **两种点击语义** —— 问卷式"先选再提交"要求它们分开:
       //  · options.defer:点一下只是**选中**(打上 data-db-selected,由 CSS 变深),
       //    **不写后端**。访客可以反复改主意。
@@ -456,9 +485,17 @@ function initOne(root) {
         target.addEventListener("click", function () {
           var sel = window.__dbSel || (window.__dbSel = {});
           var list = sel[spec.collection] || (sel[spec.collection] = []);
-          var i = list.indexOf(target);
+          var i = -1;
+          for (var k = 0; k < list.length; k++) { if (list[k].el === target) { i = k; break; } }
           if (i >= 0) { list.splice(i, 1); target.removeAttribute("data-db-selected"); }
-          else { list.push(target); target.setAttribute("data-db-selected", "1"); }
+          else {
+            // **连值一起存** —— 提交时直接用这个值。
+            // 早先只存 DOM 元素、提交时读 el.textContent,而选项节点的文字往往在
+            // **子节点**里,于是 textContent 可能是空串 → 提交时一个都写不出去,
+            // 页面上只显示"没有可提交的选项"。存值就没有这个猜测。
+            list.push({ el: target, value: write.value !== undefined && write.value !== null ? write.value : (target.textContent || "").trim() });
+            target.setAttribute("data-db-selected", "1");
+          }
           note(root, "");
         });
       } else if (write.submitAll) {
@@ -471,6 +508,19 @@ function initOne(root) {
       } else {
         target.addEventListener("click", function () { submit(target); });
       }
+    }
+  }
+
+  // **"提交后才揭示"的绑定:一开始就藏起来。**
+  // 由运行时直接做,不依赖 AI 写 CSS —— 它写的揭示规则实测经常一条都不命中,
+  // 于是"没提交也看得见结果"。藏起来是这里的默认,markSubmitted 会统一打开。
+  var revealOnSubmit = !!(spec.options && spec.options.reveal === "submit");
+  if (revealOnSubmit) {
+    var rb = body(root);
+    if (rb) {
+      rb.style.setProperty("opacity", "0", "important");
+      rb.style.setProperty("transform", "none", "important");
+      rb.style.setProperty("transition", "opacity .35s ease", "important");
     }
   }
 

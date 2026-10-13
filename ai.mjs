@@ -517,23 +517,21 @@ write.target 填那个选项在页面上的节点 id,field 与上面 groupBy 一
 · **submit 按钮**:另做一条 action,带 write.submitAll: true,write.target 指向设计里
   那个 submit 按钮。点它才把**所有已选中项**一次性写进去。
   这条最容易漏:漏了就没有"提交"这一步,词云会在点第一个选项时就出结果。
-· **词云**:kind="wordcloud" 的那条**什么都不用加** —— 揭示是纯 CSS 做的(见下面的
-  [data-db-any-submitted] 规则),运行时会在"这个访客提交过"时给画布打上那个属性。
+· **词云**:kind="wordcloud" 的那条要加 **options.reveal: "submit"** —— 运行时会在
+  初始化时把词云**藏起来**,等这个访客提交过之后再揭开(用 important,不会被样式表压回去)。
+  这样你**不需要写任何揭示用的 CSS** —— 实测过,指望 CSS 命中的写法经常一条规则都不生效,
+  于是"没提交也看得见结果",而页面上又看不出哪里错。
   **注意是"这个访客提交过没有",不是"这次会话点没点过"** —— 提交过的人刷新页面会
   直接看到词云,不会又被要求投一次。
 
-配套的 CSS(逐字用,{DATA} 换成你实际的色值):
+配套的 CSS(只剩"选中变深"这一条要用 CSS 表达;揭示由运行时管,不用你写):
   /* 选中 = 变深。不要文字说明。 */
   [data-node-id][data-db-selected] { filter: brightness(0.55); }
-  /* 结果是提交之后才生成的:没提交过就一直藏着 */
-  .databind[data-spec*='"kind":"wordcloud"'] .db-body { opacity: 0; transition: opacity .35s ease; }
-  [data-db-any-submitted] .databind[data-spec*='"kind":"wordcloud"'] .db-body { opacity: 1; }
-  /* 词云容器在没提交时是空的,别让它盖住下面的按钮(它自己也不该吃掉点击) */
-  .databind[data-spec*='"kind":"wordcloud"'] { pointer-events: none; }
-  [data-db-any-submitted] .databind[data-spec*='"kind":"wordcloud"'] { pointer-events: auto; }
 
-⚠️ **注意上面没有给 Submit 按钮加 pointer-events: none** —— 它是**必须可点**的那个。
+⚠️ **不要给 Submit 按钮写 pointer-events: none** —— 它是**必须可点**的那个。
    (我第一版标准里写反了,把 submit 那条绑定设成 pointer-events:none,那等于亲手让它点不动。)
+   运行时现在会自动把点击目标钉成可点(pointer-events:auto !important + z-index),
+   但你要是再写一条 none 上去,就是在跟它对着干。
 
 ⚠️ **submit 按钮"点不动"是最常见的投诉**,三个原因,逐个排掉:
   1. 它有 pointer-events: none(自己写的或继承来的)—— 上面那段 CSS 就是解药;

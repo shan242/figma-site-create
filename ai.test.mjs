@@ -732,7 +732,8 @@ test("wordcloud-poll 标准:写清了「先选、再提交、然后才出现词�
   assert.match(c, /不要任何文字说明|不要文字说明/, "选中不靠文字说明");
   assert.match(c, /submitAll/, "要有一条 submitAll 的提交绑定");
   assert.match(c, /提交之后词云才出现|提交之后才生成|reveal/, "词云要在提交后才出现");
-  assert.match(c, /data-db-any-submitted/, "要给揭示用的 CSS");
+  assert.match(c, /options\.reveal/, "词云要用 options.reveal:\"submit\"(揭示由运行时做,不靠 CSS)");
+  assert.match(c, /不要给 Submit 按钮写 pointer-events: none|不要给 Submit/, "要警告别把 Submit 设成不可点");
   assert.match(c, /pointer-events/, "要点明 submit 点不动的常见原因");
 });
 
