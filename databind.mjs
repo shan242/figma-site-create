@@ -303,11 +303,23 @@ function initOne(root) {
 
   function afterSubmit() {
     submitted = true;
+    markSubmitted();
     // options.done 显式给空串 = **不要任何提示**(不只是用默认值兜底)。
     // 旧写法是 options.done || "你已提交",空串是 falsy,想关掉提示的人反而
     // 会拿到默认文案 —— 用户报的"已提交字样删不掉"就是这个。
     if (doneText(spec) !== null) { note(root, doneText(spec), "db-ok"); }
     refresh();
+  }
+
+  // 状态用属性表达,**不要靠提示文字或类名**。
+  // 踩过的坑:样式里用 .db-note.db-ok 判断"已提交",一旦把提示关掉(用户要求),
+  // 那个类就不再出现,依赖它的 reveal 规则永远不触发 —— 结果就是
+  // "Answer the three questions above…" 提交后也不消失。
+  // 现在 data-db-state="submitted" 由运行时保证设置,与要不要显示提示无关。
+  function markSubmitted() {
+    root.setAttribute("data-db-state", "submitted");
+    var host = root.closest(".canvas") || document;
+    host.setAttribute("data-db-any-submitted", "1");
   }
 
   function submit(el, value) {
@@ -355,6 +367,7 @@ function initOne(root) {
         .then(function (d) {
           if (d.items && d.items.length) {
             submitted = true;
+            markSubmitted();
             var t = doneText(spec);
             if (t !== null) { note(root, t, "db-ok"); }
           }
