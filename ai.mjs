@@ -852,9 +852,33 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     }
   };
 
+  // 节点必须**会被渲染**才能改。
+  //
+  // 发布数据里有一大块组件定义区的原件:它们在 nodeById 里有坐标、看着完全正常,
+  // 却永远不会出现在页面上。只查 nodeById 的话,edit_text / edit_node / bind_data
+  // 都会"成功"返回,而页面上什么都没变 —— 用户看到的是"AI 说改了但页面没变",
+  // 而 AI 完全不知道自己做错了(insert_video 早就有这道校验,其余几个漏了)。
+  const requireRenderable = (slug, nodeId, what) => {
+    const page = loadPages().find((p) => p.slug === slug);
+    if (!page) return { error: `没有这个页面: ${slug}` };
+    const { data } = pageTextOf(slug);
+    const node = data.nodeById?.[nodeId];
+    if (!node) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
+    if (!collectAll(data).some((n) => n.id === nodeId)) {
+      const cands = collectAll(data)
+        .filter((n) => (n.type === "TEXT" || n.type === "RECTANGLE" || n.type === "FRAME") && n.id !== nodeId)
+        .slice(0, 6)
+        .map((n) => `${n.id}(${n.type} ${n.name ? String(n.name).slice(0, 14) : ""})`);
+      return {
+        error: `节点 ${nodeId} 不在页面上(它是组件定义区的原件,永远不会被渲染),改它不会有任何效果`,
+        hint: cands.length ? `${what || "可改"}的节点举例: ${cands.join(", ")}。用 read_page_text 拿完整列表` : undefined,
+      };
+    }
+    return { node, data };
+  };
+
   const saveWordClouds = (items) => {
-    snapshot("wordcloud");
-    const file = resolve(root, "wordclouds.json");
+    snapshot("wordcloud");    const file = resolve(root, "wordclouds.json");
     writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
     renameSync(`${file}.tmp`, file);
   };
@@ -1394,10 +1418,10 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       if (write) {
         if (!FIELD_RE.test(String(write.field || ""))) return { error: "write.field 必须是合法字段名" };
         if (write.target) {
-          const data = JSON.parse(readFileSync(resolve(root, "data", `${slug}.json`), "utf8"));
-          if (!data.nodeById?.[write.target]) {
-            return { error: `页面 ${slug} 没有节点 ${write.target},请先用 read_page_text 拿到正确的节点 id` };
-          }
+          // 只查 nodeById 不够:组件定义区的原件在数据里存在、有坐标,却永远不渲染。
+          // 绑到那种节点上,点击永远不会有反应,而这里会"成功"返回。
+          const chk = requireRenderable(slug, String(write.target), "可绑点击");
+          if (chk.error) return chk;
           w = { event: "click", target: String(write.target), field: write.field, value: write.value };
         } else if (write.input) {
           w = {
@@ -1615,11 +1639,9 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     // 于是文件里明明有音轨、页面上却一声不响,用户只能靠"看页面"发现。
     // 这个工具让 AI/用户把 Figma 给不了的选项补上。
     async set_video_options({ slug, nodeId, muted, controls, autoplay, loop, src }) {
-      const page = loadPages().find((p) => p.slug === slug);
-      if (!page) return { error: `没有这个页面: ${slug}` };
-      const { data } = pageTextOf(slug);
-      const node = data.nodeById?.[nodeId];
-      if (!node) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
+      const chk = requireRenderable(slug, nodeId, "可改视频");
+      if (chk.error) return chk;
+      const node = chk.node;
 
       const existing = loadVideos().find((i) => i.nodeId === nodeId && i.slug === slug);
       const fill = (node.fills || []).find((f) => f.type === "VIDEO");
@@ -1691,11 +1713,9 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     },
 
     async edit_text({ id, slug, nodeId, text, fontSize, fontWeight, color }) {
-      const page = loadPages().find((p) => p.slug === slug);
-      if (!page) return { error: `没有这个页面: ${slug}` };
-      const data = JSON.parse(readFileSync(resolve(root, "data", `${slug}.json`), "utf8"));
-      const node = data.nodeById?.[nodeId];
-      if (!node) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
+      const chk = requireRenderable(slug, nodeId, "可改文字");
+      if (chk.error) return chk;
+      const node = chk.node;
       if (node.type !== "TEXT") return { error: `节点 ${nodeId} 不是文本节点(type=${node.type})` };
       const change = {};
       if (text != null) change.text = String(text);
@@ -1768,11 +1788,9 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
     // 而修的办法就是用 height 把框调大。之前只能塞进 style:{height:"Xpx"},
     // 但那样得自己记得写单位,而且工具说明里没引导 —— AI 往往就放着不管了。
     async edit_node({ id, slug, nodeId, style, height, width }) {
-      const page = loadPages().find((p) => p.slug === slug);
-      if (!page) return { error: `没有这个页面: ${slug}` };
-      const data = JSON.parse(readFileSync(resolve(root, "data", `${slug}.json`), "utf8"));
-      const node = data.nodeById?.[nodeId];
-      if (!node) return { error: `页面 ${slug} 没有节点 ${nodeId}` };
+      const chk = requireRenderable(slug, nodeId, "可改样式");
+      if (chk.error) return chk;
+      const node = chk.node;
       if (!style && height === undefined && width === undefined) {
         return { error: "至少要提供 style 或 height / width" };
       }

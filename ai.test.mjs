@@ -472,6 +472,55 @@ test("edit_node:height/width 直接给数字,并核对文字还放不放得下",
   assert.match(String((await handlers.edit_node({ slug: "index", nodeId: "1:2" })).error), /至少要提供/);
 });
 
+// --- 静默失败清零 --------------------------------------------------------------
+// 发布数据里有一大块**组件定义区的原件**:nodeById 里有、坐标正常,却永远不渲染。
+// 只查 nodeById 的话,这些工具都会"成功"返回而页面上什么都没变 ——
+// 用户看到的是"AI 说改了但页面没变"。insert_video 早就有这道校验,其余几个漏了。
+
+function ghostFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "rep-ghost-"));
+  mkdirSync(join(dir, "data"));
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({ liveBase: "https://e.figma.site", pages: [{ path: "/", slug: "index", file: "index.html", title: "H", json: "data/index.json" }] }));
+  writeFileSync(join(dir, "data", "index.json"), JSON.stringify({
+    roots: ["1:1"],
+    nodeById: {
+      "1:1": { id: "1:1", type: "FRAME", name: "Canvas", absoluteBoundingBox: { x: 0, y: 0, width: 500, height: 400 }, children: ["1:2"] },
+      "1:2": { id: "1:2", type: "TEXT", name: "real", characters: "hi", absoluteBoundingBox: { x: 10, y: 10, width: 100, height: 20 } },
+      // 幽灵:在 nodeById 里,但不在 roots 可达的树里
+      "9:9": { id: "9:9", type: "TEXT", name: "ghost", characters: "never rendered", absoluteBoundingBox: { x: 300, y: 900, width: 100, height: 20 } },
+    },
+  }));
+  return dir;
+}
+
+for (const [tool, args] of [
+  ["edit_text", { text: "x" }],
+  ["edit_node", { height: 100 }],
+  ["set_video_options", { muted: false }],
+]) {
+  test(`${tool}:改永远不渲染的幽灵节点要说清楚,不能假装成功`, async () => {
+    const dir = ghostFixture();
+    const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+    const r = await handlers[tool]({ slug: "index", nodeId: "9:9", ...args });
+    assert.ok(r.error, `必须报错,实际: ${JSON.stringify(r)}`);
+    assert.match(r.error, /不在页面上|永远不会被渲染/, "要说清原因");
+    assert.ok(r.hint, "要给出可用的替代节点");
+    // 真实节点应当**过得了这道校验**。至于它本身能不能改是另一回事
+    // (set_video_options 对没有视频的节点报错是正确的),所以只要求错误信息
+    // 不是"幽灵节点"那一句。
+    const ok = await handlers[tool]({ slug: "index", nodeId: "1:2", ...args });
+    if (ok.error) assert.equal(/不在页面上|永远不会被渲染/.test(ok.error), false, `真实节点不该被当成幽灵节点: ${ok.error}`);
+  });
+}
+
+test("bind_data:点击目标指向幽灵节点要拦住", async () => {
+  const dir = ghostFixture();
+  const { handlers } = makeTools({ outDir: dir, confirm: allowAll });
+  const r = await handlers.bind_data({ slug: "index", rect: { left: 0, top: 0, width: 10, height: 10 }, collection: "v", kind: "action", write: { target: "9:9", field: "text" } });
+  assert.ok(r.error, "必须报错");
+  assert.match(r.error, /不在页面上/);
+});
+
 // --- 覆盖层快照 / 回滚 --------------------------------------------------------
 // 覆盖层是 AI 改动的唯一事实来源,一次写坏就没有退路。这一轮我用脚本清 CSS 时
 // 按 } 切块删规则,把按钮样式整块删掉了,最后靠文件旁边的 .bak 才救回来 ——
