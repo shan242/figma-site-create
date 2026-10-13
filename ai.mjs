@@ -528,9 +528,12 @@ write.target 填那个选项在页面上的节点 id,field 与上面 groupBy 一
   /* 结果是提交之后才生成的:没提交过就一直藏着 */
   .databind[data-spec*='"kind":"wordcloud"'] .db-body { opacity: 0; transition: opacity .35s ease; }
   [data-db-any-submitted] .databind[data-spec*='"kind":"wordcloud"'] .db-body { opacity: 1; }
-  /* submit 那条自己不画东西,但**必须可点** —— 不要让别的容器盖住它 */
-  .databind[data-spec*='"kind":"action"'][data-spec*='submitAll'] { pointer-events: none; }
-  .databind[data-spec*='"kind":"action"'][data-spec*='submitAll'] * { pointer-events: none; }
+  /* 词云容器在没提交时是空的,别让它盖住下面的按钮(它自己也不该吃掉点击) */
+  .databind[data-spec*='"kind":"wordcloud"'] { pointer-events: none; }
+  [data-db-any-submitted] .databind[data-spec*='"kind":"wordcloud"'] { pointer-events: auto; }
+
+⚠️ **注意上面没有给 Submit 按钮加 pointer-events: none** —— 它是**必须可点**的那个。
+   (我第一版标准里写反了,把 submit 那条绑定设成 pointer-events:none,那等于亲手让它点不动。)
 
 ⚠️ **submit 按钮"点不动"是最常见的投诉**,三个原因,逐个排掉:
   1. 它有 pointer-events: none(自己写的或继承来的)—— 上面那段 CSS 就是解药;
@@ -2433,7 +2436,11 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
           // 绑到那种节点上,点击永远不会有反应,而这里会"成功"返回。
           const chk = requireRenderable(slug, String(write.target), "可绑点击");
           if (chk.error) return chk;
-          w = { event: "click", target: String(write.target), field: write.field, value: write.value };
+          // **submitAll 必须原样带上** —— 实测漏过一次:标准里让 AI 用
+          // write.submitAll 做"提交"那条绑定,而这里只挑了 event/target/field/value,
+          // 于是 submitAll 被静默丢掉,存下来的绑定和普通选项一模一样 ——
+          // 点 Submit 什么都不会发生,而文件里看着"绑定是存在的"。
+          w = { event: "click", target: String(write.target), field: write.field, value: write.value, ...(write.submitAll ? { submitAll: true } : {}) };
         } else if (write.input) {
           w = {
             input: true,
