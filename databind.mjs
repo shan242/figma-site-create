@@ -135,9 +135,17 @@ function localApi(path, opts) {
         .sort(function (a, b) { return b.count - a.count; }).slice(0, limit);
       return Promise.resolve({ ok: true, field: field, total: all.length, buckets: buckets });
     }
-    // 计数:任何字段的条数
+    // **列表**:kind:"list" 读的是 d.items —— 这一支以前**只返回 total/field**,
+    // 于是本地(file://)打开时列表永远是空的,而线上是好的。
+    // 判据是"带 limit 就是列表,带 field 才是计数",和线上两个不同路径对应。
     var f2 = /field=([^&]+)/.exec(path);
+    var l2 = /limit=(\d+)/.exec(path);
     var rows2 = localLoad(path.split("?")[0]);
+    if (l2 && !f2) {
+      var lim2 = Number(l2[1]);
+      return Promise.resolve({ ok: true, items: rows2.slice(0, lim2).map(function (r) { return { data: r }; }), total: rows2.length });
+    }
+    // 计数:任何字段的条数
     return Promise.resolve({ ok: true, total: rows2.length, field: f2 ? decodeURIComponent(f2[1]) : "id" });
   } catch (e) {
     return Promise.reject(new Error("本地模拟失败:" + e.message));
