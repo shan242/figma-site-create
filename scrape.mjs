@@ -179,7 +179,38 @@ function crawlPaths(homeData) {
   return [...found].sort((a, b) => (a === "/" ? -1 : b === "/" ? 1 : a.localeCompare(b)));
 }
 
-const slugFor = (path) => (path === "/" ? "index" : path.replace(/^\/+|\/+$/g, "").replace(/[^a-zA-Z0-9_\-]/g, "-"));
+// 本地文件名(也是发布后的 URL 文件名)。
+//
+// **不要把非 ASCII 换成横线。** 旧实现是 `replace(/[^a-zA-Z0-9_-]/g, "-")`,
+// 于是中文页面 /两个案例对比分析 变成 --------.html —— 文件名失去意义,
+// 而且**两个字数相同的中文页面会撞成同一个文件名**(静默互相覆盖)。
+// 实测 thomas2026 就是这样:用户看到的 URL 是 output/…/--------.html。
+//
+// 现在的规则:
+//   · 只替换**文件名非法**的字符(< > : " / \ | ? * 和控制字符)—— 这是硬约束;
+//     Windows 与各大静态托管都不接受它们;
+//   · 其它字符(中文、日文、空格、&、# …)原样保留,Windows/macOS/Linux 都支持
+//     UTF-8 文件名,Git 与 1Panel 上传也没问题(浏览器与客户端会自动百分号编码);
+//   · 连续横线压成一个、首尾横线去掉,避免 `a//b` 或 `a /b` 这类怪名字;
+//   · 空白折成单个 "-"(空格在 URL 里编码成 %20,可读性差,横线更稳)。
+const slugFor = (path) => {
+  if (path === "/") return "index";
+  const raw = String(path).replace(/^\/+|\/+$/g, "");
+  // 里面那个 `/` 是**嵌套页面**的分隔符,必须折成横线 —— 否则 writeFileSync
+  // 会去写一个不存在的子目录(data/a/b.json),直接 ENOENT。
+  // 首尾的 `/` 上面已经剪掉了,所以这里剩下的都是内部的。
+  const safe = raw
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!safe) return "page";
+  // 太长会撞上各系统的文件名上限;截断后补一小段哈希保证仍唯一
+  if (safe.length <= 80) return safe;
+  let h = 0;
+  for (let i = 0; i < safe.length; i++) h = (h * 31 + safe.charCodeAt(i)) >>> 0;
+  return `${safe.slice(0, 70)}-${h.toString(36).slice(0, 6)}`;
+};
 
 // --- Asset download ---------------------------------------------------------
 
@@ -237,8 +268,19 @@ export async function scrapeSite(outDir, urlArg) {
   // 2. Fetch every page's content file + HTML <title>.
   mkdirSync(join(outDir, "data"), { recursive: true });
   const pages = [];
+  // **防撞名**:两条不同的路径绝不能落到同一个文件名上 —— 那会静默互相覆盖,
+  // 而且构建后只剩一个页面。撞了就补一段短哈希,可读性仍然保得住。
+  const usedSlugs = new Set();
+  const hashOf = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h.toString(36).slice(0, 6); };
+  const uniqueSlug = (base, path) => {
+    if (!usedSlugs.has(base)) { usedSlugs.add(base); return base; }
+    const alt = `${base}-${hashOf(path)}`;
+    usedSlugs.add(alt);
+    console.warn(`  ⚠ 页面 ${path} 与已抓取页面同名(${base}),改用 ${alt}`);
+    return alt;
+  };
   for (const p of paths) {
-    const slug = slugFor(p);
+    const slug = uniqueSlug(slugFor(p), p);
     const file = `${slug}.html`;
     const json = `data/${slug}.json`;
     const href = p === "/" ? `${origin}/` : `${origin}${p}`;
