@@ -111,7 +111,12 @@ const ALT_EXTS = ["png", "jpg", "svg", "webp", "gif", "mp4", "webm", "jpeg"];
 // 取一个资源,带重试 + 超时。
 // 实测(lily2026new):同一个 URL 会时而 200、时而 `fetch failed`(连接被重置),
 // 所以**连接级错误必须重试**;明确的 4xx 直接放弃,别浪费时间。
-async function fetchAsset(url, attempts = 3, timeoutMs = 60000) {
+//
+// **超时不能给太长。** 下面按扩展名逐个探测,一个资源最坏要试 8 个扩展名;
+// 旧的 60 秒 × 3 次重试 = 184 秒/扩展名 → 一个下不来的资源能拖 **24 分钟**,
+// 期间屏幕上什么都没有 —— 用户看到的就是"抓取卡住了"。
+// 资源是 CDN 上的内容寻址文件,15 秒足够;扩展名探测(ALT)只给 2 次机会。
+async function fetchAsset(url, attempts = 3, timeoutMs = 15000) {
   for (let t = 1; t <= attempts; t++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -285,18 +290,25 @@ export async function scrapeSite(outDir, urlArg) {
   }));
   let downloaded = 0, unusedMissing = 0;
   const failedAssets = [];
+  let doneCount = 0;
   const results = await runPool(entries, async ({ hash, ext, referenced }) => {
     // 实测:同一个 URL 会时而成功、时而 `fetch failed`(连接被重置)。所以
     // **主扩展和 alt 探测都要重试** —— 旧代码只在主扩展上重试,alt 探测是一次性的,
     // 一次连接重置就把资源永久判死,而磁盘上可能连旧文件都没有。
     // 明确的 4xx 才立即放弃(那是真的不在服务器上)。
-    for (const e of [ext, ...ALT_EXTS.filter((x) => x !== ext)]) {
-      const buf = await fetchAsset(`${origin}/_assets/v11/${hash}.${e}`);
+    // 主扩展用 3 次重试;alt 只是"猜",给它 2 次、别在一个不存在的后缀上耗太久。
+    const cands = [ext, ...ALT_EXTS.filter((x) => x !== ext)];
+    for (let ci = 0; ci < cands.length; ci++) {
+      const e = cands[ci];
+      const buf = await fetchAsset(`${origin}/_assets/v11/${hash}.${e}`, ci === 0 ? 3 : 2);
       if (!buf) continue;
       const real = sniffExt(buf) || e;
       writeFileSync(join(outDir, "assets", `${hash}.${real}`), buf);
+      // 进度:每 20 个说一句,否则大站在这一步看起来像"死掉了"
+      if (++doneCount % 20 === 0) console.log(`  … 资源 ${doneCount}/${entries.length}`);
       return { hash, real, referenced };
     }
+    if (++doneCount % 20 === 0) console.log(`  … 资源 ${doneCount}/${entries.length}`);
     return { hash, error: "download failed", referenced };
   });
   // 磁盘上可能已经有上一次抓取留下的文件:本次下载失败但文件在,页面照样正常。
@@ -331,7 +343,9 @@ export async function scrapeSite(outDir, urlArg) {
   for (const ref of neededVideos) {
     const dest = join(outDir, "assets", `${ref}.mp4`);
     if (existsSync(dest)) { videoOk++; continue; }
-    const buf = await fetchAsset(`${origin}/_videos/v1/${ref}`);
+    // 视频是整段文件,给足时间(默认 15 秒是给图标的);3 次重试仍然保留 ——
+    // 实测大文件失败几乎都是连接中断,重跑同一 URL 就好。
+    const buf = await fetchAsset(`${origin}/_videos/v1/${ref}`, 3, 120000);
     if (buf) { writeFileSync(dest, buf); videoOk++; } else failedVideos.push(ref);
   }
   if (neededVideos.size) {
