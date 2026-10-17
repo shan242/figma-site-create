@@ -621,7 +621,7 @@ function applyScaleH(node, st, canvas, ctx) {
 //   data-swap-off     : 非当前变体,CSS 隐藏(用属性而不是内联 display,
 //                       因为文本节点靠内联 display:flex 布局,覆盖就散了)
 //   data-swap-to      : 点了要切到哪个变体(只出现在 SWAP_STATE 箭头上)
-const nodeAttr = (node) => {
+const nodeAttrWith = (node, parentOf) => {
   if (!node?.id) return "";
   // **同时给一个真正的 id**。锚点跳转(#<nodeId>)用的是 id,不是 data-*;
   // 页头的 SCROLL_TO 导航就靠它 —— 纯 HTML + 浏览器原生滚动,不需要任何脚本,
@@ -632,7 +632,9 @@ const nodeAttr = (node) => {
     s += ` data-swap-group="${sw.group}" data-swap-variant="${sw.variant}"`;
     if (!sw.on) s += " data-swap-off";
   }
-  const to = swapTargetOf(node);
+  // 变体切换的点击目标。**能继承祖先**:挂 SWAP_STATE 的常是 GROUP,
+  // 而 GROUP 不产生元素 —— 不给祖先的交互找个落脚点,按钮就永远是死的。
+  const to = swapTargetOf(node, parentOf);
   if (to) s += ` data-swap-to="${to}"`;
   return s;
 };
@@ -640,6 +642,8 @@ const nodeAttr = (node) => {
 export function renderNode(node, nodes, canvas, out, ctx) {
   const { assetDir, pathToFile, fontStack } = ctx;
   const assetUrl = makeAssetUrl(assetDir);
+  // 这里把 parentOf 绑进去,下面十来个调用点就不用各传一次。
+  const nodeAttr = (n) => nodeAttrWith(n, ctx.parentOf);
   const tag = node.type;
   const bb = node.absoluteBoundingBox;
   if (!bb) return;
@@ -1256,13 +1260,27 @@ function subtreeHasSwap(nodes, ids, setId) {
   return ids.some(walk);
 }
 
-// 节点上挂的 SWAP_STATE 目标变体 id(没有则 null)。
-export function swapTargetOf(node) {
-  for (const i of node?.interactions || []) {
-    for (const a of i.actions || []) {
-      if (a?.navigationType !== "SWAP_STATE" || !a.transitionNodeID) continue;
-      return `${a.transitionNodeID.sessionID}:${a.transitionNodeID.localID}`;
+// 节点**自己或最近的祖先**上挂的 SWAP_STATE 目标变体 id(没有则 null)。
+//
+// **必须能往上找。** 实测 thomas2026:三个 tab 按钮("Fishing & Livelihoods" 等)
+// 的 SWAP_STATE 挂在一个 **GROUP** 上,而 GROUP 按渲染规则**不产生元素** ——
+// 它只是把自己的 children 平铺出来。于是交互无处落地:标签渲染出来了、
+// 却没有任何元素带 data-swap-to,点了什么都不发生。
+// 同一个站点里另外三组轮播的点击节点是 **SVG**(会渲染),所以它们一直正常 ——
+// 差别只在"交互挂的节点有没有元素"。
+// 和链接(linkInfo)用同一条规则:自己的交互优先,否则继承最近祖先的。
+export function swapTargetOf(node, parentOf) {
+  let cur = node;
+  for (let depth = 0; cur && depth < 12; depth++) {
+    for (const i of cur.interactions || []) {
+      for (const a of i.actions || []) {
+        if (a?.navigationType !== "SWAP_STATE" || !a.transitionNodeID) continue;
+        return `${a.transitionNodeID.sessionID}:${a.transitionNodeID.localID}`;
+      }
     }
+    // 自己的交互里没有 SWAP_STATE 时继续往上找;有别的交互也不阻断 ——
+    // 这两件事互不影响(一个节点可以既跳转又保持轮播分组)。
+    cur = parentOf ? parentOf.get(cur.id) : null;
   }
   return null;
 }
