@@ -58,11 +58,25 @@ function resolveSiteUrl(raw) {
   return { origin: `${u.protocol}//${u.host}`, host };
 }
 
-async function get(url, { asText = true } = {}) {
+async function get(url, { asText = true, timeoutMs = 45000 } = {}) {
   // httpFetch,不是全局 fetch:在 GUI 里它是 Electron 的 net.fetch,走 Chromium
   // 网络栈,因此**遵循系统代理**;Node 自己的 fetch 不读注册表里的系统代理,
   // 于是开着 VPN(代理模式)时浏览器能打开 figma.site、抓取却超时。详见 netfetch.mjs。
-  const res = await httpFetch(url, { redirect: "follow" });
+  //
+  // **必须带超时。** 之前这里是裸的 httpFetch,遇到"连上了但服务器不回"的连接
+  // 就**永远挂住** —— 用户看到的就是"抓取到某一步之后很久没动静"。
+  // 45 秒对 HTML/JSON 足够;资源文件走下面的分块下载,各有自己的计时。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res;
+  try {
+    res = await httpFetch(url, { redirect: "follow", signal: ctrl.signal });
+  } catch (e) {
+    if (ctrl.signal.aborted) throw new Error(`${Math.round(timeoutMs / 1000)} 秒没有响应 for ${url}`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     // Attach the status so callers can tell a definitive 4xx (missing file,
     // no point retrying) from a transient 5xx/network error (retry helps).
@@ -200,12 +214,18 @@ export async function scrapeSite(outDir, urlArg) {
   const siteHash = hashMatch[1];
   console.log(`▸ site hash ${siteHash}`);
 
-  const getData = async (slug) => {
-    const file = slug === "index" ? "_index.json" : `${slug}.json`;
-    return JSON.parse(await get(`${origin}/_json/${siteHash}/${file}`));
+  // **远端 JSON 的路径必须用页面的真实路径,不能用本地文件名。**
+  // slugFor() 会把非字母数字换成 "-",这是给**本地文件**用的(中文文件名在
+  // Windows/CI 上很容易出问题);但远端的 JSON 就存在真实路径下 ——
+  // 实测 thomas2026: /疍家人的生活和故事 → _json/<hash>/疍家人的生活和故事.json 是 200,
+  // 而 /---------.json 是 404。两者混用会静默丢掉所有中文路径的页面。
+  const getData = async (pagePath) => {
+    const p = String(pagePath || "/");
+    const rel = p === "/" ? "_index.json" : `${p.replace(/^\/+/, "")}.json`;
+    return JSON.parse(await get(`${origin}/_json/${siteHash}/${rel}`));
   };
 
-  const homeData = await getData("index");
+  const homeData = await getData("/");
   const siteTitle = homeData.siteSettings?.title || hostFromOrigin(origin);
   const paths = pathsFromData(homeData).length ? pathsFromData(homeData) : crawlPaths(homeData);
 
@@ -221,7 +241,7 @@ export async function scrapeSite(outDir, urlArg) {
       const html = await get(href);
       const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
       const title = titleMatch ? titleMatch[1].trim() : siteTitle;
-      const data = await getData(slug);
+      const data = await getData(p);
       writeFileSync(join(outDir, json), JSON.stringify(data));
       pages.push({ path: p, slug, file, title, json });
       console.log(`  ✓ ${p} (${Object.keys(data.nodeById).length} nodes)`);
