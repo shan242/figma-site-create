@@ -23,7 +23,17 @@ const UPLOAD_CONCURRENCY = 4;
 // Top-level output-dir entries that are build metadata, never deployed. Mirrors
 // the WRITE_DENY list in ai.mjs — these are inputs/overlay sources, not files
 // the static site serves.
-const SKIP_NAMES = new Set(["data", "manifest.json", "edits.json", "nodeStyles.json", "overrides.json", "wordclouds.json", "file-locks.json", "videos.json", "databinds.json", "chat-history.json", ".history"]);
+// 顶层不该上传的东西:构建元数据、AI 覆盖层、访客对话、历史快照,以及
+// 系统垃圾(.DS_Store —— macOS 的 Finder 会到处生成,实测 jesse 的产物里就有一个)
+// 和给开发看的内部报告(节点数、字体清单,不是给访客看的)。
+// **注意不要顺手把 assets/ 里的东西加进来** —— 比如用户放进 assets/ 的 PDF,
+// 那是真资源,必须上传。
+const SKIP_NAMES = new Set([
+  "data", "manifest.json", "edits.json", "nodeStyles.json", "overrides.json",
+  "wordclouds.json", "file-locks.json", "videos.json", "databinds.json",
+  "chat-history.json", ".history",
+  ".DS_Store", "design-report.json", "design-report.md",
+]);
 
 // --- Auth --------------------------------------------------------------------
 

@@ -22,7 +22,52 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# 上传产物需要 actions:write 才能覆盖同名 artifact、清理旧产物。
+permissions:
+  contents: read
+  actions: write
+
 jobs:
+  # **先清理旧产物,再构建。**
+  # 每次 run 都会产出三个 ~200 MB 的包,而这么久以来从不删除 —— 实测仓库里积了
+  # **206 个 artifact、21 GB**,于是 macos-arm64 那次运行"构建成功"但
+  # `Upload artifacts` 直接失败(存储配额)。失败信息只在最后一步,很容易
+  # 被误读成"打包出了问题"。
+  # 这里在上传前把所有超过 1 天的产物删掉;配合下面的 overwrite:true,
+  # 常态占用就只剩"最近一次的三份"。
+  prune:
+    name: Prune old artifacts
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete artifacts older than 1 day
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+            let page = 1, deleted = 0, freed = 0;
+            for (;;) {
+              const { data } = await github.rest.actions.listArtifactsForRepo({
+                owner: context.repo.owner, repo: context.repo.repo, per_page: 100, page,
+              });
+              if (!data.artifacts.length) break;
+              for (const a of data.artifacts) {
+                if (new Date(a.created_at).getTime() > cutoff) continue;
+                try {
+                  await github.rest.actions.deleteArtifact({
+                    owner: context.repo.owner, repo: context.repo.repo, artifact_id: a.id,
+                  });
+                  deleted++;
+                  freed += a.size_in_bytes || 0;
+                } catch (e) {
+                  core.warning(`delete ${a.name} failed: ${e.message}`);
+                }
+              }
+              if (data.artifacts.length < 100) break;
+              page++;
+            }
+            core.info(`deleted ${deleted} artifacts, freed ${(freed / 1024 / 1024).toFixed(1)} MB`);
+
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -93,13 +138,21 @@ jobs:
             electron/dist/*.dmg
             electron/dist/*.zip
           if-no-files-found: warn
-          retention-days: 14
+          # **同名覆盖**,否则每次 run 都新增一套(实测积到 206 个 / 21 GB,
+          # 上传因配额被拒)。覆盖后常态只留最近一次的三份。
+          overwrite: true
+          retention-days: 7
 
   release:
     name: GitHub Release
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # 发布要写 Release:全局 permissions 收窄成只读之后,这里必须显式给回写权限,
+    # 否则打 tag 时这一步会 403。
+    permissions:
+      contents: write
+      actions: read
     steps:
       - uses: actions/download-artifact@v5
         with:
