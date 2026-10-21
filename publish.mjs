@@ -31,7 +31,7 @@ const UPLOAD_CONCURRENCY = 4;
 const SKIP_NAMES = new Set([
   "data", "manifest.json", "edits.json", "nodeStyles.json", "overrides.json",
   "wordclouds.json", "file-locks.json", "videos.json", "databinds.json",
-  "chat-history.json", ".history",
+  "chat-history.json", ".history", "links.json",
   ".DS_Store", "design-report.json", "design-report.md",
 ]);
 

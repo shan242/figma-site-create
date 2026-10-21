@@ -313,7 +313,7 @@ function decodeURIComponentSafe(s) {
 // 它们全被丢掉、渲染成没有行为的 <div>,用户看到的就是"页头链接失效"。
 // 同一个站点的 "start game" 按钮是 connectionType:"URL" 指向
 // https://game.wherethetidesforget.day/,同样只认 INTERNAL_NODE 就被丢掉了。
-export function linkInfo(node, pathToFile, parentOf, localFiles) {
+export function linkInfo(node, pathToFile, parentOf, localFiles, links) {
   // **URL 型交互先看它是不是指向我们自己会发出去的文件。**
   // 实测 jesse:一个 "Legacies of Colonial Violence … .pdf" 的下载按钮,
   // 数据里写的是 connectionURL = "https://assets/Legacies of Colonial … .pdf"
@@ -340,6 +340,19 @@ export function linkInfo(node, pathToFile, parentOf, localFiles) {
   };
   let cur = node;
   while (cur) {
+    // **AI 挂的链接优先。** 设计里没有那条交互时(只有一张图/一段文字),
+    // 靠 link_node 写进 links.json;它同时也覆盖设计里已有的,便于改指向。
+    // 和交互一样按祖先继承,所以把链接挂在一个 GROUP 上也能落到它的子元素。
+    const ov = links && links.get(cur.id);
+    if (ov && ov.href) {
+      return {
+        href: ov.href,
+        ...(ov.external ? { external: true } : {}),
+        ...(ov.href.startsWith("#") ? { scrollTo: ov.href.slice(1) } : {}),
+        ...(ov.href.startsWith("#") ? {} : { localFile: !ov.external }),
+        openInNewTab: ov.newTab !== false,
+      };
+    }
     let owned = false;
     for (const it of cur.interactions || []) {
       if (it.event?.interactionType !== "ON_CLICK") continue;
@@ -690,7 +703,7 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // style so they override whatever the renderer derived, for any node type.
   const overlay = ctx.nodeStyles?.get(node.id);
   // 点击行为:自己的,或最近祖先 GROUP 的(按钮是 group,交互在 group 上)。
-  const link = linkInfo(node, pathToFile, ctx.parentOf, ctx.localFiles);
+  const link = linkInfo(node, pathToFile, ctx.parentOf, ctx.localFiles, ctx.links);
   const scrollTo = link && link.scrollTo ? link.scrollTo : null;
   // 滚到本页节点用 "#id";没有本地页面可跳时不要写死 "/foo"
   const href = link && link.href ? link.href : scrollTo ? `#${scrollTo}` : null;

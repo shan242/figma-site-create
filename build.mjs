@@ -30,6 +30,7 @@ let VIDEOS = [];
 let EDITS = [];
 // Per-node CSS-style overlays persisted by edit_node, applied on any node type.
 let NODE_STYLES = [];
+let LINKS = [];
 
 function readItems(file) {
   try {
@@ -44,6 +45,8 @@ const readWordClouds = (dir) => readItems(join(dir, "wordclouds.json"));
 const readEdits = (dir) => readItems(join(dir, "edits.json"));
 const readNodeStyles = (dir) => readItems(join(dir, "nodeStyles.json"));
 const readOverrides = (dir) => readItems(join(dir, "overrides.json"));
+// AI 挂的链接(link_node):设计里没有那条交互时,靠这个给节点加 href。
+const readLinks = (dir) => readItems(join(dir, "links.json"));
 const readDatabinds = (dir) => readItems(join(dir, "databinds.json"));
 // AI 插入的视频(insert_video):一条记录 = 把某个节点换成 <video>。
 const readVideos = (dir) => readItems(join(dir, "videos.json"));
@@ -325,6 +328,8 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
     // "https://assets/Legacies … .pdf",host 被误当成 assets,整条是死链,
     // 而 PDF 其实就在 assets/ 里。渲染时拿这张表去认领它,链到本地那份。
     localFiles: collectLocalFiles(assetDir),
+    // AI 挂的链接:nodeId -> 记录。linkInfo 会**先**看它,再看设计自带的交互。
+    links: new Map(LINKS.filter((l) => l.slug === page.slug).map((l) => [l.nodeId, l])),
     edits: new Map(EDITS.filter((e) => e.slug === page.slug).map((e) => [e.nodeId, e])),
     nodeStyles: new Map(NODE_STYLES.filter((s) => s.slug === page.slug).map((s) => [s.nodeId, s.style])),
     // insert_video:nodeId -> 视频记录。命中的节点由 videoElement 接管,
@@ -459,6 +464,7 @@ export async function buildSite(outDirParam, opts = {}) {
   DATA_API = String(opts.dataApi ?? process.env.REPLICA_DATA_API ?? "").trim().replace(/\/+$/, "");
   EDITS = readEdits(outDir);
   NODE_STYLES = readNodeStyles(outDir);
+  LINKS = readLinks(outDir);
   HAS_CJK = manifest.pages.some((p) => /[一-鿿]/.test(JSON.stringify(loadData(p.json).nodeById)));
   const { google, selfHost, hasCJK } = planFonts();
   const googleLink = googleFontsLink(google);

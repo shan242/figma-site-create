@@ -117,6 +117,19 @@ export const PROMPT_SECTIONS = [
     order: PROMPT_ORDER.wordcloud,
     when: "apply_wordcloud",
     text:
+      "## 链接(让图或文字点开别的东西)\n" +
+      "- 设计里**自带**的交互(站内跳转 / 页内滚动 / 外部网址)构建时自动生效,你什么都不用做。\n" +
+      "- 设计里**没有**交互、但你想让某个图或文字可点:\n" +
+      "  · **点开一份 PDF / zip / 其它文件** —— 文件放进**输出目录**(放 `assets/` 下最自然),然后\n" +
+      "    `link_node({slug, nodeId, file:\"assets/xxx.pdf\"})`。发布时 `assets/` 会整体上传,\n" +
+      "    同一个相对路径在线上照样有效;文件必须真实存在,不存在时工具会列出该目录里有哪些文件。\n" +
+      "  · **跳到外部网址**:`link_node({slug, nodeId, url:\"https://…\"})`。\n" +
+      "  · **滚到本页某个节点**:`link_node({slug, nodeId, scrollTo:\"<节点id>\"})`。\n" +
+      "- 三种目标**只能给一个**。想改掉设计里已有的链接指向,也用 `link_node`(它覆盖设计自带的)。\n" +
+      "- ⚠️ **不要把文件路径写成 `https://assets/…`** —— 那会把 `assets` 当成域名,是一条死链。\n" +
+      "  给 `file` 就写相对路径 `assets/…`,构建会自己处理编码(空格变 %20)。\n" +
+      "  (顺带一提:构建对这一类坏 URL 也有兜底 —— 换算成路径后如果输出目录里真有那个文件,会认领它;\n" +
+      "  但**别依赖兜底**,写对更省事。)\n" +
       "## 词云\n" +
       "- **要做\"选项点选后生成词云、票越多字号越大颜色越深\"这种(问卷式投票),先调 get_standard('wordcloud-poll') 读那份实测配方,照它做。** 它把三个最容易做错的地方写清楚了:①要 1 条 wordcloud + **每个选项各一条 action**(少一条那个选项就点不动,词云永远是空的);②`options.colors` 必须**从深到浅**(渲染器按票数排名取色,顺序反了就成了\"越多越浅\");③`fallback` 里每个 count 必须写 **0**。\n" +
       "- 放置静态词云(不是投票,只是把关键词排成云):调用 apply_wordcloud。slug 来自 list_pages;rect 是画布坐标系内的矩形 {left,top,width,height};spec.words 是从页面文本提炼的关键词,weight 1-100(越高字越大);spec.colors 选与页面配色协调的颜色;不要超过矩形区域。词云可以放在页面内容下方(让 top 大于画布高度),构建时画布会自动向下扩展;宽度应保持在画布宽度内。**直接调用即可,不需要先读 wordclouds.json** —— 覆盖层文件(wordclouds/databinds/videos/edits/nodeStyles/overrides)由这些工具自己读写,第一次添加前它们并不存在,那是正常状态。\n" +
@@ -1690,6 +1703,27 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
   };
 
   // 插入的视频(insert_video)。和别的覆盖层一样:ai.mjs 写,build.mjs 只读。
+  // 链接覆盖层:让 AI 能给**任意节点**挂一个链接 —— 站内页面、外部网址、
+  // 或者**输出目录里的文件**(PDF 就属于这一类,`assets/xxx.pdf`)。
+  // 为什么不靠 Figma 的数据:很多时候设计里根本没有那条交互 —— 只有一张图或
+  // 一段文字,你想让它点开一份 PDF。没有这个工具,AI 只能改 HTML,而页面动辄
+  // 几百个节点、read_file 会截断,凭半份内容写回会把整页弄丢。
+  const loadLinks = () => {
+    try {
+      const d = JSON.parse(readFileSync(resolve(root, "links.json"), "utf8"));
+      return Array.isArray(d?.items) ? d.items : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const saveLinks = (items) => {
+    snapshot("links");
+    const file = resolve(root, "links.json");
+    writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, items }, null, 2));
+    renameSync(`${file}.tmp`, file);
+  };
+
   const loadVideos = () => {
     try {
       const d = JSON.parse(readFileSync(resolve(root, "videos.json"), "utf8"));
@@ -2763,6 +2797,74 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
       return { id: hit.id, slug: hit.slug, nodeId: hit.nodeId };
     },
 
+    // 给节点挂链接:站内页面 / 外部网址 / **输出目录里的文件**(PDF 等)。
+    // 设计里已有的交互照旧优先;这条只用来**新增**设计里没有的链接。
+    async link_node({ id, slug, nodeId, url, file, scrollTo, newTab }) {
+      if (!slug) return { error: "需要 slug" };
+      if (!nodeId) return { error: "需要 nodeId(用 read_page_text 查)" };
+      const kinds = [url, file, scrollTo].filter((x) => x !== undefined && x !== null && x !== "");
+      if (kinds.length !== 1) {
+        return { error: "url / file / scrollTo 三者**只能给一个**:url=外部网址,file=输出目录里的文件(如 assets/x.pdf),scrollTo=滚到本页某个节点 id" };
+      }
+      const page = loadPages().find((p) => p.slug === slug);
+      if (!page) return { error: `没有这个页面: ${slug}` };
+      const ok = requireRenderable(slug, nodeId, "挂链接");
+      if (ok.error) return ok;
+
+      let href = null;
+      let external = false;
+      let target = null;
+      if (url) {
+        if (!/^(https?:|mailto:|tel:)/i.test(String(url))) return { error: "url 需要以 http(s):// / mailto: / tel: 开头;站内页面用 file 或 scrollTo" };
+        href = String(url);
+        external = true;
+      } else if (file) {
+        // 文件必须在输出目录里真实存在 —— 否则页面上是个静默 404 的链接
+        const rel = String(file).replace(/^\.?\//, "").replace(/\\/g, "/");
+        const abs = resolve(root, rel);
+        if (!existsSync(abs)) {
+          // 帮它找:列出同目录下的候选(常见错因是文件名不对/带了子目录)
+          const dir = rel.includes("/") ? resolve(root, rel.slice(0, rel.lastIndexOf("/"))) : root;
+          let cands = [];
+          try { cands = readdirSync(dir).filter((f) => !/^(data|\.history)$/.test(f)).slice(0, 30); } catch {}
+          return {
+            error: `输出目录里没有这个文件: ${rel}`,
+            ...(cands.length ? { hint: `该目录下有: ${cands.join(", ")}。把 PDF 放进输出目录(放在 assets/ 下最自然),file 写相对路径` } : {}),
+          };
+        }
+        href = encodeURI(rel);
+      } else {
+        const t = String(scrollTo);
+        const targetNode = requireRenderable(slug, t, "滚动目标");
+        if (targetNode.error) return { ...targetNode, error: `scrollTo 的目标不可渲染: ${targetNode.error}` };
+        href = `#${t}`;
+      }
+      if (newTab === undefined) newTab = external || !!file;
+
+      const items = loadLinks();
+      const newId = id || `link-${nodeId.replace(/[^a-zA-Z0-9]/g, "-")}-${Date.now().toString(36).slice(-5)}`;
+      const rec = { id: newId, slug, nodeId, href, ...(external ? { external: true } : {}) };
+      const idx = items.findIndex((i) => i.id === newId);
+      if (idx >= 0) items[idx] = rec; else items.push(rec);
+      saveLinks(items);
+      return {
+        id: newId,
+        slug,
+        nodeId,
+        href,
+        ...(file ? { note: `链接到输出目录里的 ${file}(${newTab ? "新标签" : "当前标签"}打开,发布后同一个相对路径照样有效)` } : {}),
+        ...(scrollTo ? { note: `点击后滚到节点 ${scrollTo}` } : {}),
+      };
+    },
+
+    async delete_link({ id }) {
+      const items = loadLinks();
+      const hit = items.find((i) => i.id === id || i.nodeId === id);
+      if (!hit) return { error: `没有这个链接 id: ${id}` };
+      saveLinks(items.filter((i) => i.id !== hit.id));
+      return { id: hit.id, slug: hit.slug, nodeId: hit.nodeId };
+    },
+
     async edit_text({ id, slug, nodeId, text, fontSize, fontWeight, color }) {
       const chk = requireRenderable(slug, nodeId, "可改文字");
       if (chk.error) return chk;
@@ -3276,6 +3378,39 @@ export function makeTools({ outDir, confirm, onLog, buildFn = buildSite }) {
           },
           required: ["slug", "nodeId", "src"],
         },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "link_node",
+        description:
+          "给页面上任意一个节点挂链接。**三种目标只能给一个**:" +
+          "url=外部网址(新标签打开);file=输出目录里的文件(相对路径,如 assets/xxx.pdf —— PDF、zip 之类;" +
+          "发布时 assets/ 会整体上传,所以同一个相对路径在线上照样有效);scrollTo=滚到本页某个节点。" +
+          "设计里已有的交互仍然优先生效;这个工具有两层用途:给**没有**交互的图/文字补一个链接," +
+          "或者改掉设计里那条链接指向。不消耗 API 额度",
+        parameters: {
+          type: "object",
+          properties: {
+            id: { type: "string", description: "可选;更新已存在的链接时传它的 id" },
+            slug: { type: "string", description: "页面 slug" },
+            nodeId: { type: "string", description: "要挂链接的节点 id(用 read_page_text 查)" },
+            url: { type: "string", description: "外部网址,http(s):// 或 mailto:/tel:" },
+            file: { type: "string", description: "输出目录里的文件相对路径,例如 assets/report.pdf。文件必须真实存在" },
+            scrollTo: { type: "string", description: "本页上另一个节点的 id,点击后滚到它" },
+            newTab: { type: "boolean", description: "可选;是否新标签打开,默认 file/url 为 true、scrollTo 不需要" },
+          },
+          required: ["slug", "nodeId"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "delete_link",
+        description: "删除 link_node 挂的一个链接(按 id 或 nodeId),该节点回到设计自带的行为",
+        parameters: { type: "object", properties: { id: { type: "string", description: "链接 id 或 nodeId" } }, required: ["id"] },
       },
     },
     {
