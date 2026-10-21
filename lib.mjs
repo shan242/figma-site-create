@@ -301,6 +301,10 @@ export function textRuns(node) {
 // the ancestor chain. A node that has interactions of its own owns its click:
 // even if none navigate, we don't fall through to an ancestor's.
 // parentOf maps childId -> parent node; pathToFile maps live paths to local files.
+// 百分号解码,失败就原样返回(URL 里可能有裸 % 或非法转义)
+function decodeURIComponentSafe(s) {
+  try { return decodeURIComponent(String(s)); } catch { return String(s); }
+}
 // 一个节点点击后要做什么。三种,都必须支持 —— 少一种就是"按钮点了没反应":
 //   · INTERNAL_NODE + NAVIGATE + connectionURL  → 跳到站内另一个页面(href)
 //   · INTERNAL_NODE + SCROLL_TO + transitionNodeID → **滚到本页某个节点**
@@ -309,17 +313,51 @@ export function textRuns(node) {
 // 它们全被丢掉、渲染成没有行为的 <div>,用户看到的就是"页头链接失效"。
 // 同一个站点的 "start game" 按钮是 connectionType:"URL" 指向
 // https://game.wherethetidesforget.day/,同样只认 INTERNAL_NODE 就被丢掉了。
-export function linkInfo(node, pathToFile, parentOf) {
+export function linkInfo(node, pathToFile, parentOf, localFiles) {
+  // **URL 型交互先看它是不是指向我们自己会发出去的文件。**
+  // 实测 jesse:一个 "Legacies of Colonial Violence … .pdf" 的下载按钮,
+  // 数据里写的是 connectionURL = "https://assets/Legacies of Colonial … .pdf"
+  // —— `assets` 被当成了**域名**,整条是死链;而 PDF 其实就躺在输出目录的
+  // assets/ 里(用户手动放进去的,文件名可读、没有哈希)。
+  // 所以这里依次尝试:完整相对路径 → 去掉 host 后的路径 → 只看文件名。
+  // 命中就链到**本地那份**,一个字节都不用依赖原站。
+  const pickLocal = (u) => {
+    if (!localFiles || !localFiles.size) return null;
+    let p = String(u || "").trim();
+    if (!p) return null;
+    p = p.replace(/^[a-z]+:\/\//i, "");           // 去掉 https:// 之类
+    const slash = p.indexOf("/");
+    const noHost = slash >= 0 ? p.slice(slash + 1) : p;  // 去掉"host"
+    const cands = [p, noHost, p.replace(/^\/+/, "")];
+    const base = decodeURIComponentSafe(p.split("/").pop() || "");
+    for (const c of cands) {
+      const dec = decodeURIComponentSafe(c);
+      if (localFiles.has(dec)) return dec;
+    }
+    // 只按文件名找(assets/<名字>)—— 覆盖 "https://assets/x.pdf" 这种 host 被吃掉的情况
+    const byBase = [...localFiles].find((f) => f.split("/").pop() === base);
+    return byBase || null;
+  };
   let cur = node;
   while (cur) {
     let owned = false;
     for (const it of cur.interactions || []) {
       if (it.event?.interactionType !== "ON_CLICK") continue;
       for (const a of it.actions || []) {
-        // 外部网址:URL/mailto/tel 之类,直接用,不查 pathToFile
+        // 外部网址:URL/mailto/tel 之类。先看它是不是我们自己的文件。
         if (a.connectionURL && (a.connectionType === "URL" || /^(https?:|mailto:|tel:)/i.test(String(a.connectionURL)))) {
           owned = true;
-          return { href: String(a.connectionURL), external: true };
+          const raw = String(a.connectionURL);
+          if (!/^(mailto:|tel:)/i.test(raw)) {
+            const local = pickLocal(raw);
+            if (local) return { href: encodeURI(local), localFile: true, openInNewTab: a.openUrlInNewTab !== false };
+          }
+          return { href: raw, external: true };
+        }
+        // 相对路径也可能直接指向输出目录里的文件(assets/x.pdf)
+        if (a.connectionURL && /\.(pdf|zip|docx?|xlsx?|pptx?|csv|txt)$/i.test(String(a.connectionURL))) {
+          const local = pickLocal(a.connectionURL);
+          if (local) { owned = true; return { href: encodeURI(local), localFile: true, openInNewTab: a.openUrlInNewTab !== false }; }
         }
         if (a.connectionType === "INTERNAL_NODE" && a.connectionURL) {
           if (a.navigationType === "NAVIGATE") {
@@ -652,12 +690,15 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // style so they override whatever the renderer derived, for any node type.
   const overlay = ctx.nodeStyles?.get(node.id);
   // 点击行为:自己的,或最近祖先 GROUP 的(按钮是 group,交互在 group 上)。
-  const link = linkInfo(node, pathToFile, ctx.parentOf);
+  const link = linkInfo(node, pathToFile, ctx.parentOf, ctx.localFiles);
   const scrollTo = link && link.scrollTo ? link.scrollTo : null;
   // 滚到本页节点用 "#id";没有本地页面可跳时不要写死 "/foo"
   const href = link && link.href ? link.href : scrollTo ? `#${scrollTo}` : null;
+  // 指向**输出目录里真实文件**的链接(PDF 等)默认新开标签:访客看完还能回来。
+  // 真正的站外链接一律新开标签 + noopener。
+  const newTab = link && (link.external || (link.localFile && link.openInNewTab));
   const linkAttrs = link
-    ? `${link.external ? ' target="_blank" rel="noopener noreferrer"' : ""}${scrollTo ? ` data-scroll-to="${scrollTo}"` : ""}`
+    ? `${newTab ? ' target="_blank" rel="noopener noreferrer"' : ""}${scrollTo ? ` data-scroll-to="${scrollTo}"` : ""}`
     : "";
   // 跟随画布中心的两种来源:
   //   1. 祖先链里有 CENTER 约束的框 —— 整棵子树随视口中心移动(见 hasCenteredAncestor);

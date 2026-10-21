@@ -5,7 +5,7 @@
 // Reads manifest.json + data/<slug>.json (produced by scrape.mjs) and writes
 // <slug>.html + styles.css into the same directory. Rendering rules live in
 // lib.mjs; this file decides fonts + page wiring.
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, basename, resolve, sep } from "node:path";
 import { fillToCss, cssText, renderNode, collectAll, escapeHtml, makeAssetUrl, expandInstances, swapRuntime, videoRuntime, videoElement } from "./lib.mjs";
@@ -274,6 +274,30 @@ const fontStack = (family) =>
     ? `'${family}', 'Noto Sans SC', 'Noto Sans JP', system-ui, sans-serif`
     : `'${family}', system-ui, sans-serif`;
 
+// 输出目录 assets/ 下真正存在的文件,相对路径用 posix 分隔符。
+// 给 lib.linkInfo 用来"认领"那些在数据里写坏了的链接(见那里的注释)。
+const collectLocalFiles = (dir) => {
+  const out = new Set();
+  const walk = (rel) => {
+    let items = [];
+    try {
+      items = readdirSync(join(dir, rel), { withFileTypes: true });
+    } catch (e) {
+      // 不要静默 —— 这条曾经把 "读不到 assets 目录" 藏成"表是空的",
+      // 于是链接照样输出成坏 URL,而构建日志里一句解释都没有。
+      console.warn(`  ⚠ 读不出 assets 目录(${rel || "."}): ${e.code || e.message}`);
+      return;
+    }
+    for (const it of items) {
+      const r = rel ? `${rel}/${it.name}` : it.name;
+      if (it.isDirectory()) walk(r);
+      else out.add(`assets/${r}`);
+    }
+  };
+  walk("");
+  return out;
+};
+
 function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
   const d = loadData(page.json);
   // INSTANCE 的子树在发布数据里是复合 id,nodeById 中没有对应项 ——
@@ -296,6 +320,11 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
     pathToFile,
     fontStack,
     parentOf,
+    // **输出目录里真正存在的文件**(相对路径,posix 分隔符)。
+    // 有些链接在数据里是一条坏 URL —— 实测 jesse 的 PDF 按钮写的是
+    // "https://assets/Legacies … .pdf",host 被误当成 assets,整条是死链,
+    // 而 PDF 其实就在 assets/ 里。渲染时拿这张表去认领它,链到本地那份。
+    localFiles: collectLocalFiles(assetDir),
     edits: new Map(EDITS.filter((e) => e.slug === page.slug).map((e) => [e.nodeId, e])),
     nodeStyles: new Map(NODE_STYLES.filter((s) => s.slug === page.slug).map((s) => [s.nodeId, s.style])),
     // insert_video:nodeId -> 视频记录。命中的节点由 videoElement 接管,
