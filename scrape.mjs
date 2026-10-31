@@ -108,15 +108,14 @@ export function extOfAsset(info) {
 // 逐个尝试的候选扩展名 —— 视频也要试,站点里确实会出现 VIDEO_ASSET。
 const ALT_EXTS = ["png", "jpg", "svg", "webp", "gif", "mp4", "webm", "jpeg"];
 
-// 取一个资源,带重试 + 超时。
-// 实测(lily2026new):同一个 URL 会时而 200、时而 `fetch failed`(连接被重置),
-// 所以**连接级错误必须重试**;明确的 4xx 直接放弃,别浪费时间。
-//
-// **超时不能给太长。** 下面按扩展名逐个探测,一个资源最坏要试 8 个扩展名;
-// 旧的 60 秒 × 3 次重试 = 184 秒/扩展名 → 一个下不来的资源能拖 **24 分钟**,
-// 期间屏幕上什么都没有 —— 用户看到的就是"抓取卡住了"。
-// 资源是 CDN 上的内容寻址文件,15 秒足够;扩展名探测(ALT)只给 2 次机会。
-async function fetchAsset(url, attempts = 3, timeoutMs = 15000) {
+// **超时既不能太长,也不能太短。**
+// 太长:下面按扩展名逐个探测,一个资源最坏要试 8 个扩展名;旧的 60 秒 × 3 次重试
+// = 184 秒/扩展名 → 一个下不来的资源能拖 **24 分钟**,期间屏幕上什么都没有
+// (用户看到的就是"抓取卡住了")。
+// 太短:实测 evil-bistre 的两张大图(7.7 MB / 3.2 MB)单独拉只要 2.3 / 1.3 秒,
+// 但**并发拉满**时 15 秒不够,两张都被判成失败 —— 其实完全能下下来。
+// 折中:45 秒;扩展名探测(ALT)只给 2 次机会;整轮结束后对失败项**再补一轮**。
+async function fetchAsset(url, attempts = 3, timeoutMs = 45000) {
   for (let t = 1; t <= attempts; t++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -353,6 +352,29 @@ export async function scrapeSite(outDir, urlArg) {
     if (++doneCount % 20 === 0) console.log(`  … 资源 ${doneCount}/${entries.length}`);
     return { hash, error: "download failed", referenced };
   });
+  // **整轮结束后,对失败的再补一轮(串行)。**
+  // 并发是超时的主要来源:实测 evil-bistre 的 7.7 MB 和 3.2 MB 两张图单独拉
+  // 只要 2.3 / 1.3 秒,但在 8 路并发下会一起超时被判失败 —— 而它们完全能下下来。
+  // 补这一轮的代价很小(只处理失败的),但能救回"页面上缺一块颜色"这种
+  // 只有肉眼才发现的问题。
+  const failedIdx = results.map((r, i) => (r && r.error ? i : -1)).filter((i) => i >= 0);
+  if (failedIdx.length) {
+    console.log(`  ↻ 有 ${failedIdx.length} 个资源第一次没下来,串行再试一轮(慢但在同一连接上更稳)`);
+    for (const i of failedIdx) {
+      const { hash, ext } = entries[i];
+      const cands = [ext, ...ALT_EXTS.filter((x) => x !== ext)];
+      for (let ci = 0; ci < cands.length; ci++) {
+        const e = cands[ci];
+        const buf = await fetchAsset(`${origin}/_assets/v11/${hash}.${e}`, 2);
+        if (!buf) continue;
+        const real = sniffExt(buf) || e;
+        writeFileSync(join(outDir, "assets", `${hash}.${real}`), buf);
+        results[i] = { hash, real, referenced: entries[i].referenced };
+        console.log(`    ✓ 补下来了 ${hash}.${real} (${(buf.length / 1024).toFixed(0)} KB)`);
+        break;
+      }
+    }
+  }
   // 磁盘上可能已经有上一次抓取留下的文件:本次下载失败但文件在,页面照样正常。
   // 把它和"真的缺了"分开报,否则重跑一次抓取就会刷出一堆假告警。
   const onDisk = new Set();

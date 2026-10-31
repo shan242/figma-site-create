@@ -705,8 +705,14 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // 点击行为:自己的,或最近祖先 GROUP 的(按钮是 group,交互在 group 上)。
   const link = linkInfo(node, pathToFile, ctx.parentOf, ctx.localFiles, ctx.links);
   const scrollTo = link && link.scrollTo ? link.scrollTo : null;
-  // 滚到本页节点用 "#id";没有本地页面可跳时不要写死 "/foo"
-  const href = link && link.href ? link.href : scrollTo ? `#${scrollTo}` : null;
+  // **HTML 不允许 <a> 嵌套。**
+  // 实测 evil-bistre 的导航:导航项那个框本身是链接(<a>),框里的文字**也是**链接,
+  // 于是浏览器的解析器在外层 <a> 上自动闭合 —— 文字掉出来成了兄弟节点,
+  // 相对坐标随之错乱(四个导航文字全挤在 x=447),而且被后面渲染的元素盖住点不到。
+  // 已经在某个 <a> 里时,本节点只渲染成普通元素,链接由外层承担(点击照样有效)。
+  const inAnchor = !!ctx.inAnchor;
+  const effHref = inAnchor ? null : link && link.href ? link.href : scrollTo ? `#${scrollTo}` : null;
+  const href = effHref;
   // 指向**输出目录里真实文件**的链接(PDF 等)默认新开标签:访客看完还能回来。
   // 真正的站外链接一律新开标签 + noopener。
   const newTab = link && (link.external || (link.localFile && link.openInNewTab));
@@ -724,7 +730,15 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   // 设计 px 上。1440 宽时 calc 与 px 恰好重合看不出问题,一到宽屏,同一行里标题
   // 跟着中心走了、卡片没有,间距从 29px 变成 269px(实测 1920 下线上 562 vs 本地 322)。
   const scales = node.constraints?.horizontal === "SCALE" && inScaledContext(node, ctx);
-  const centered = scales ? false : hasCenteredAncestor(node, ctx.parentOf);
+  // **嵌套进裁剪框/滚动框之后,不能再走 calc(50%)。**
+  // 实测 evil-bistre 的导航:四个文字链接全挤在 x=625,而它们的按钮胶囊在
+  // 448/526/602 —— 位置整体错位。原因:`centered` 让 left 变成
+  // `calc(50% + off)`,而 50% 是**相对最近的定位祖先**解析的 ——
+  // 平铺在画布上时那是画布宽度(1440),嵌套进一个 618 宽的框之后就是 309,
+  // 而 off 仍按画布算,于是整体偏移。
+  // 嵌套时一律用相对父框的 px(那也是设计里的原始坐标),不再参与居中。
+  const nested = !!ctx.nested;
+  const centered = nested ? false : scales ? false : hasCenteredAncestor(node, ctx.parentOf);
 
   if (tag === "SVG" && node.isLine) {
     const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
@@ -872,7 +886,14 @@ export function renderNode(node, nodes, canvas, out, ctx) {
   if (tag === "FRAME") {
     const scroll = node.overflowDirection;
     const hasFill = (node.fills || []).some((f) => f.visible);
-    if (!scroll && !hasFill) return;
+    // **`clipsContent: true` 的框必须渲染成裁剪容器。**
+    // 实测 evil-bistre 的 about 页:一个 618x537 的 "Designer portrait" 框里放着
+    // 一张 1440x2880 的照片(clipsContent=true)。线上把这个框裁成 618x537 的一块;
+    // 我们不裁 → 大照片**溢出整个画面**,压在导航上,于是 9 个导航链接全点不动,
+    // 底部 "MORE WORK" 的图片也压到文字上(用户看到的"文字位置不对")。
+    // 这不是个例:about 页 106 个节点里有 46 个 clipsContent,全站 26%~44%。
+    const clips = node.clipsContent === true;
+    if (!scroll && !hasFill && !clips) return;
     const st = nodeStyle(node, canvas, fontStack, assetUrl, centered);
     if (overlay) Object.assign(st, overlay);
     if (scroll === "HORIZONTAL_SCROLLING") {
@@ -883,18 +904,26 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st["overflow-x"] = "clip";
     } else if (scroll) {
       st.overflow = "auto";
+    } else if (clips) {
+      st.overflow = "hidden";
     }
     applyScaleH(node, st, canvas, ctx);
     const isLink = !!href;
     out.push(isLink ? `  <a href="${href}" style="${cssText(st)}"${nodeAttr(node)}>` : `  <div style="${cssText(st)}"${nodeAttr(node)}>`);
-    if (scroll) {
-      // Scroll containers own their subtree: children sit inside the scroll box.
+    // **裁剪框和滚动框一样,子节点必须嵌套进去** —— 平铺在画布上就没法被裁。
+    if (scroll || clips) {
+      const prevNested = ctx.nested;
+      const prevAnchor = ctx.inAnchor;
+      ctx.nested = true;   // 子节点改用相对本框的 px,不参与画布居中
+      if (isLink) ctx.inAnchor = true;   // 外层已经是 <a>,子节点不许再包一层
       for (const childId of node.children || []) {
         const child = nodes[childId];
         if (!child) continue;
         ctx.handled?.add(childId);
         renderNode(child, nodes, node.absoluteBoundingBox, out, ctx);
       }
+      ctx.nested = prevNested;
+      ctx.inAnchor = prevAnchor;
     }
     out.push(isLink ? "</a>" : "</div>");
     return;
@@ -1021,6 +1050,16 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st["background-position"] = "center";
     }
     applyScaleH(node, st, canvas, ctx);
+    // **图片没下载到时,不要让它变成一块盖住页面的透明玻璃。**
+    // 实测 evil-bistre 的 about 页:一张 1440x2880 的 "Designer portrait" 因为
+    // 抓取时并发超时没下到,div 还在、背景图 404,于是它是一块**全透明**的大块,
+    // 恰好压在导航上 —— 导航 9 个链接全部点不动,而页面上看不出任何异常。
+    // 缺失时给 pointer-events:none(点击穿透),并记进 ctx.missingAssets 让构建报告。
+    const miss = missingImageAsset(st, ctx);
+    if (miss) {
+      st["pointer-events"] = "none";
+      if (ctx.missingAssets) ctx.missingAssets.push(`${node.id} "${(node.name || node.tag || node.type || "").slice(0, 34)}" -> ${miss}`);
+    }
     // The live site renders each interactive node (rect button, hotspot
     // marker, …) as an <a>; an interactive group's children link to its target.
     if (href) {
@@ -1030,6 +1069,18 @@ export function renderNode(node, nodes, canvas, out, ctx) {
     }
     return;
   }
+}
+
+// 这个样式里的 background-image 指向的 assets 文件不存在时,返回它的相对路径。
+// 只认 assets/ 下的引用 —— 外部 URL、渐变、data: 都不管。
+function missingImageAsset(st, ctx) {
+  if (!ctx?.localFiles) return null;
+  const bg = st && st["background-image"];
+  if (!bg) return null;
+  const m = /url\((?:&quot;|"|')?assets\/([^)"'&]+)/.exec(String(bg));
+  if (!m) return null;
+  const rel = `assets/${decodeURIComponentSafe(m[1])}`;
+  return ctx.localFiles.has(rel) ? null : rel;
 }
 
 export function cssText(obj) {
