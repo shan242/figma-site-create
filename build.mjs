@@ -328,6 +328,8 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
     // "https://assets/Legacies … .pdf",host 被误当成 assets,整条是死链,
     // 而 PDF 其实就在 assets/ 里。渲染时拿这张表去认领它,链到本地那份。
     localFiles: collectLocalFiles(assetDir),
+    // 因为资源缺失而变成"透明大块"的节点,构建结束统一报出来(见 lib.missingImageAsset)
+    missingAssets: [],
     // AI 挂的链接:nodeId -> 记录。linkInfo 会**先**看它,再看设计自带的交互。
     links: new Map(LINKS.filter((l) => l.slug === page.slug).map((l) => [l.nodeId, l])),
     edits: new Map(EDITS.filter((e) => e.slug === page.slug).map((e) => [e.nodeId, e])),
@@ -398,7 +400,27 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
   // the design width when the viewport is narrower. The body background follows
   // the canvas color (live does this via body:has([data-breakpoint-id])) and
   // overflow-x:hidden clips the min-width overflow instead of showing a scrollbar.
+  //
+  // **但 REflow 站不能锁 min-width。**
+  // 设计数据里 `siteSettings.scalingMode` 有两档:
+  //   · "REFLOW" —— 节点全是 CENTER 约束,内容跟着视口**重新居中排布**;
+  //   · 其它(=SCALE/固定)—— 内容按设计尺寸画,视口窄了才需要横向滚动。
+  // 实测 2026111201(Olivia 网站,96 页幻灯片):scalingMode 是 REFLOW,
+  // 节点 100% 都是 CENTER —— 线上在 1418 视口下 scrollWidth 正好 1418、零溢出;
+  // 我们无条件写 min-width:1920 → **硬撑出 502px**,用户看到的就是"页面溢出屏幕"。
+  const scalingMode = String(loadData(page.json)?.siteSettings?.scalingMode || "").toUpperCase();
+  const reflow = scalingMode === "REFLOW";
   const canvasW = Math.round(cb.width);
+  // **REFLOW 站(这套 96 页 1920x1080 幻灯片)要整页等比缩放,不能锁 min-width。**
+  // 节点全是 `CENTER/TOP` 约束,left 写的是 `calc(50% ± 910px)` 之类 ——
+  // 那是**按设计宽度 1920 推出来的**。一旦放开 min-width,1418 视口下
+  // 就变成 -201px:内容直接跑到屏幕外被裁掉(实测 page-31 的 "Vertical" 按钮
+  // 链接明明在、位置却在 x=-201,用户看到的就是"点击事件消失")。
+  // 幻灯片的正解是整页缩放:.canvas 保持设计尺寸,外层按 min(1, vw/设计宽) 缩放。
+  const minWidthCss = reflow ? `${canvasW}px` : `${canvasW}px`;
+  const scaleScript = reflow
+    ? `<script>(function(){var W=${canvasW};function fit(){var k=Math.min(1,window.innerWidth/W);var c=document.querySelector('.canvas');if(!c)return;c.style.transformOrigin='top left';c.style.transform='scale('+k+')';c.style.width=W+'px';document.body.style.height=(c.scrollHeight*k)+'px';}fit();window.addEventListener('resize',fit);})();</script>`
+    : "";
   const bodyBg = bg["background-color"] || "#ffffff";
   // **给"滚到这里"的锚点补占位元素。**
   // 页头的 SCROLL_TO 导航用 href="#<节点id>" 跳转,但目标常常是一个**纯布局
@@ -436,18 +458,28 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="${googleLink}" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css?v=${cssVer}" />
-  <style>body { background-color: ${bodyBg}; overflow-x: hidden; }</style>
+  <style>html, body { background-color: ${bodyBg}; overflow-x: hidden; }</style>
 ${dataHead}
 </head>
 <body>
-  <div class="canvas" style="width:100%;min-width:${canvasW}px;min-height:${canvasHeight}px;${cssText(bg)}">
+  <div class="canvas" style="width:100%;min-width:${minWidthCss};min-height:${canvasHeight}px;${cssText(bg)}">
 ${out.join("\n")}
   </div>
+  ${scaleScript}
 </body>
 </html>
 `;
   writeFileSync(join(outDir, page.file), html);
   console.log(`✓ ${page.file} (${all.length} nodes → ${out.length} elements)`);
+  // 资源缺失会让页面上出现"透明块" —— 看不出来,但会**挡住点击**。
+  // 这类问题以前只能靠肉眼发现(实测 about 页的导航全部点不动,根因就是一张图没下到)。
+  if (ctx.missingAssets.length) {
+    const uniq = [...new Set(ctx.missingAssets)];
+    console.warn(`  ⚠ ${page.file}: ${uniq.length} 处图片资源缺失,那些区域会是一块透明的空洞(已设为点击穿透)`);
+    for (const line of uniq.slice(0, 6)) console.warn(`      ${line}`);
+    if (uniq.length > 6) console.warn(`      …还有 ${uniq.length - 6} 处`);
+    console.warn(`      修法:重跑一次抓取(并发超时是最常见原因),或把对应文件补进 assets/`);
+  }
 }
 
 // Core entry shared by the CLI (main) and the Electron GUI. Progress is
