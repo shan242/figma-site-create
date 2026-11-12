@@ -916,12 +916,26 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       const prevAnchor = ctx.inAnchor;
       ctx.nested = true;   // 子节点改用相对本框的 px,不参与画布居中
       if (isLink) ctx.inAnchor = true;   // 外层已经是 <a>,子节点不许再包一层
-      for (const childId of node.children || []) {
-        const child = nodes[childId];
-        if (!child) continue;
-        ctx.handled?.add(childId);
-        renderNode(child, nodes, node.absoluteBoundingBox, out, ctx);
-      }
+      // **必须"穿过"不渲染的包装层**(GROUP、纯布局 FRAME)。
+      // 实测 2026111201 page.html:`3:188` 会嵌套(clipsContent),它的直接子节点里
+      // `58:1827` 是个 GROUP —— GROUP 本身不渲染,于是它的两个子节点
+      // ("Click to continue" 胶囊和文字)落到了**扁平**循环里、被画在框外;
+      // 而 `3:210`(白卡)和 `3:213`(定义文字)是嵌套进去的。
+      // 结果:**所有嵌套元素都排在所有扁平元素之前** → 按钮盖住了卡片
+      // (用户报的"弹窗被按钮覆盖")。
+      // 嵌套时把包装层的子孙一并递归进来,顺序才和设计树一致。
+      const emitInside = (id) => {
+        const n2 = nodes[id];
+        if (!n2) return;
+        const before = out.length;
+        ctx.handled?.add(id);
+        renderNode(n2, nodes, node.absoluteBoundingBox, out, ctx);
+        // 没产出任何元素(包装层)→ 递归它的子节点
+        if (out.length === before) {
+          for (const g of n2.children || []) emitInside(g);
+        }
+      };
+      for (const childId of node.children || []) emitInside(childId);
       ctx.nested = prevNested;
       ctx.inAnchor = prevAnchor;
     }
