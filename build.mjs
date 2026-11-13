@@ -308,6 +308,36 @@ function buildPage(page, pathToFile, googleLink, hasCjk, cssVer) {
   expandInstances(d);
   const nodes = d.nodeById;
   const all = collectAll(d);
+  // **画布帧之外的节点,坐标要按"页面根"算,不能按画布帧算。**
+  // 实测 2026111202 的 page-3:背景图 `3:323`(1920x1168)挂在 WEBPAGE 上,
+  // 是画布帧 `3:321`(y=100)的**兄弟**,自身 y=14 —— 也就是**故意高出画布**去做
+  // 出血。我们之前统一以画布帧为原点,于是它被算成 y=14-100=-86,**整体上移 86px**;
+  // 又因为盒子比画布高 88px、`background-size:cover` 把图撑满盒子,
+  // 视觉上就成了"图片变大 + 错位"。
+  // 修法:凡是**不在画布帧子树里**的节点,把它的 bbox 平移 `画布帧偏移`,
+  // 这样它相对画布帧的坐标就等于它相对页面根的坐标,位置回到设计本意。
+  {
+    const frame = all.find((n) => n.type === "FRAME") || all.find((n) => n.type === "WEBPAGE");
+    const pageRoot = all.find((n) => n.type === "WEBPAGE");
+    if (frame && pageRoot && frame.id !== pageRoot.id) {
+      const insideIds = new Set();
+      const mark = (id) => { if (insideIds.has(id)) return; insideIds.add(id); for (const c of (d.nodeById[id] || {}).children || []) mark(c); };
+      mark(frame.id);
+      const dx = Math.round(frame.absoluteBoundingBox.x - pageRoot.absoluteBoundingBox.x);
+      const dy = Math.round(frame.absoluteBoundingBox.y - pageRoot.absoluteBoundingBox.y);
+      let shifted = 0;
+      for (const n of all) {
+        if (insideIds.has(n.id)) continue;
+        if (!n.absoluteBoundingBox) continue;
+        n.absoluteBoundingBox = { ...n.absoluteBoundingBox, x: n.absoluteBoundingBox.x + dx, y: n.absoluteBoundingBox.y + dy };
+        if (n.isolatedAbsoluteRenderBounds) {
+          n.isolatedAbsoluteRenderBounds = { ...n.isolatedAbsoluteRenderBounds, x: n.isolatedAbsoluteRenderBounds.x + dx, y: n.isolatedAbsoluteRenderBounds.y + dy };
+        }
+        shifted++;
+      }
+      if (shifted) console.log(`  ↳ ${page.file}: ${shifted} 个"画布帧之外"的节点按页面根重新定位(偏移 ${dx},${dy})`);
+    }
+  }
 
   const canvas = all.find((n) => n.type === "FRAME") || all.find((n) => n.type === "WEBPAGE");
   if (!canvas) throw new Error(`No canvas frame in ${page.path}`);
