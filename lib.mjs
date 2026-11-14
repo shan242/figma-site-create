@@ -1064,6 +1064,35 @@ export function renderNode(node, nodes, canvas, out, ctx) {
       st["background-position"] = "center";
     }
     applyScaleH(node, st, canvas, ctx);
+    // **旋转过的矩形/图片:按"真实尺寸 + 旋转"渲染,不能用包围盒。**
+    // 实测 2026111401 的 page-3:水瓶 `3:330` 做了 7° 旋转。
+    //   size = 464.576 x 316.107   ← 真实尺寸
+    //   absoluteBoundingBox = 500 x 370 ← **旋转后的包围盒**
+    //   500 = 0.9925×464.58 + 0.1219×316.11
+    //   370 = 0.1219×464.58 + 0.9925×316.11
+    // 之前直接拿包围盒当元素尺寸 → 图被放大 7.6%,而且少了那 7° 旋转,
+    // 于是"相同位置的瓶子变大且错位"(线上是 464.56x316.09 再 rotate(7deg))。
+    // 定位方式:以包围盒中心为基准放回真实尺寸,再绕中心旋转 —— 和线上一致。
+    if (isNodeRotated(node) && node.size?.x && node.size?.y) {
+      const rw = node.size.x;
+      const rh = node.size.y;
+      const cx = bb.x - canvas.x + bb.width / 2;
+      const cy = bb.y - canvas.y + bb.height / 2;
+      const leftPx = cx - rw / 2;
+      const topPx = cy - rh / 2;
+      st.width = `${Math.round(rw * 1000) / 1000}px`;
+      st.height = `${Math.round(rh * 1000) / 1000}px`;
+      st.top = `${Math.round(topPx)}px`;
+      if (centered) {
+        const off = leftPx - Math.round(canvas.width) / 2;
+        st.left = `calc(50% ${off < 0 ? "-" : "+"} ${Math.abs(Math.round(off * 1000) / 1000)}px)`;
+      } else {
+        st.left = `${Math.round(leftPx * 1000) / 1000}px`;
+      }
+      const t = node.relativeTransform;
+      st.transform = `matrix(${t[0][0]}, ${t[1][0]}, ${t[0][1]}, ${t[1][1]}, 0, 0)`;
+      st["transform-origin"] = "center";
+    }
     // **图片没下载到时,不要让它变成一块盖住页面的透明玻璃。**
     // 实测 evil-bistre 的 about 页:一张 1440x2880 的 "Designer portrait" 因为
     // 抓取时并发超时没下到,div 还在、背景图 404,于是它是一块**全透明**的大块,
